@@ -1,4 +1,5 @@
 .DS_Store
+.vscode/
 .env
 .env.*
 !.env.example
@@ -14,4 +15,3 @@ coverage/
 *.pyc
 *.log
 postgres-data/
-

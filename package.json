@@ -1,0 +1,13 @@
+{
+  "name": "accesspilot",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["apps/web"],
+  "scripts": {
+    "dev:web": "npm --workspace @accesspilot/web run dev",
+    "build:web": "npm --workspace @accesspilot/web run build",
+    "lint:web": "npm --workspace @accesspilot/web run lint",
+    "test:web": "npm --workspace @accesspilot/web run test"
+  }
+}
+
