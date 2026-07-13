@@ -2,7 +2,7 @@
 
 ## 目标
 
-建立一个最小可运行的 FastAPI 后端，为公开演示提供健康检查、Workspace 创建、当前 Workspace 查询、Workspace 重置和申请草稿预览接口。
+建立一个最小可运行的 FastAPI 后端，为公开演示提供健康检查、Workspace 创建、Workspace 重置和申请草稿预览接口。
 
 ## 领域边界
 
