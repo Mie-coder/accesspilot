@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from accesspilot.main import create_app
+from accesspilot.workspaces import InMemoryWorkspaceStore
 
 
 def test_create_workspace_sets_http_only_cookie() -> None:
@@ -12,3 +13,48 @@ def test_create_workspace_sets_http_only_cookie() -> None:
     assert response.json() == {"status": "created"}
     assert "accesspilot_workspace=" in response.headers["set-cookie"]
     assert "httponly" in response.headers["set-cookie"].lower()
+
+
+def test_reset_with_unknown_workspace_token_returns_not_found() -> None:
+    client = TestClient(create_app(), raise_server_exceptions=False)
+    client.cookies.set("accesspilot_workspace", "does-not-exist")
+
+    response = client.post("/api/workspaces/reset")
+
+    assert response.status_code == 404
+
+
+def test_reset_only_clears_the_current_browser_workspace() -> None:
+    store = InMemoryWorkspaceStore()
+    app = create_app(store=store)
+    first_browser = TestClient(app)
+    second_browser = TestClient(app)
+
+    first_browser.post("/api/workspaces")
+    second_browser.post("/api/workspaces")
+    first_token = first_browser.cookies.get("accesspilot_workspace")
+    second_token = second_browser.cookies.get("accesspilot_workspace")
+    assert first_token is not None
+    assert second_token is not None
+
+    first_browser.post(
+        "/api/drafts/preview",
+        json={"system_name": "InsightHub", "entitlement_name": "客户数据导出"},
+    )
+    second_browser.post(
+        "/api/drafts/preview",
+        json={"system_name": "OpsDesk", "entitlement_name": "运维日志查看"},
+    )
+
+    response = first_browser.post("/api/workspaces/reset")
+
+    first_workspace = store.get(first_token)
+    second_workspace = store.get(second_token)
+    assert response.status_code == 200
+    assert response.json() == {"status": "reset"}
+    assert first_browser.cookies.get("accesspilot_workspace") == first_token
+    assert first_workspace is not None
+    assert first_workspace.draft is None
+    assert second_workspace is not None
+    assert second_workspace.draft is not None
+    assert second_workspace.draft.system_name == "OpsDesk"

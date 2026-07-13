@@ -6,6 +6,7 @@ from accesspilot.config import Settings
 from accesspilot.domain.models import RequestDraft
 from accesspilot.workspaces import (
     InMemoryWorkspaceStore,
+    UnknownWorkspaceError,
     Workspace,
     WorkspaceService,
     WorkspaceStore,
@@ -23,8 +24,18 @@ def create_app(settings: Settings | None = None, store: WorkspaceStore | None = 
         """从cookie中读取Token， 并取得当前Workspace"""
         token = request.cookies.get(active_settings.workspace_cookie_name)
         if token is None:
+            # 浏览器从未创建演示空间，后端无法判断草稿归属哪个 Workspace。
             raise HTTPException(status_code=401, detail="Workspace cookie 是必须的")
-        return workspace_service.get(token)
+        try:
+            # 只有服务端 Store 中仍保存该 Token，才允许继续操作该 Workspace。
+            return workspace_service.get(token)
+        except UnknownWorkspaceError as error:
+            # Cookie 存在但资源已失效（例如 API 重启后内存清空），
+            # 将领域异常转换为浏览器可理解的 HTTP 404 响应。
+            raise HTTPException(
+                status_code=404,
+                detail="Workspace not found",
+            ) from error
 
     @app.get("/health")
     def health() -> dict[str, str]:
