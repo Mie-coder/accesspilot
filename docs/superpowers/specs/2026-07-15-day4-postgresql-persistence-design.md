@@ -33,19 +33,52 @@ apps/api/migrations/            # Alembic 迁移历史
 - `access_requests`：用户确认后的正式申请，包含 Workspace、申请人、权限、项目编码、数据范围、用途、开始日期、期限、状态和确认时间。
 - `approval_cases`：一份申请的整体审批流程，与申请本身分离。
 - `approval_steps`：具体审批顺序、审批人、角色、决策、意见和时间。
-- `access_grants`：IAM 真正开通成功后的权限，不以“审批通过”代替“授权成功”。
-- `audit_events`：只追加的业务时间线，保存事件类型、操作者、结构化摘要和时间。
-- `policy_chunks`：政策编号、分块序号、正文、元数据和 512 维向量。向量允许临时为空，便于 Embedding 失败后重试。
+- `access_grants`：IAM 真正开通成功后的权限，保存申请、幂等键、生效与失效时间；不以“审批通过”代替“授权成功”。
+- `audit_events`：只追加的业务时间线，保存事件类型、操作者类型与标识、结构化详情和时间。
+- `policy_chunks`：政策编号、分块序号、正文、元数据、512 维向量和创建时间。向量允许临时为空，便于 Embedding 失败后重试。
 
 员工、系统、权限和政策是全局只读虚构目录。申请、审批、授权和审计数据必须关联 `workspace_id`，所有业务查询都以当前 Workspace 作为边界。
+
+`project_code` 只是权限申请的外部业务上下文。AccessPilot 不管理项目负责人、成员、状态或生命周期，因此首版不建立 `projects` 表。
 
 ## 约束与事务
 
 - 一份申请最多只有一个 `approval_case`。
 - `(approval_case_id, step_order)` 唯一，防止重复审批层级。
 - `access_grants.request_id` 和 `idempotency_key` 均唯一，防止 IAM 重试产生重复权限。
+- 子表使用 `(workspace_id, request_id)` 或 `(workspace_id, approval_case_id)` 组合外键，保证业务记录与其父记录属于同一 Workspace。
 - 外键限制孤立记录；目录数据默认不级联删除。
 - 时间使用带时区时间戳，稳定编号使用唯一字符串，业务记录使用 UUID。
+
+`access_requests`、`approval_cases` 和 `approval_steps` 分别使用 `request_status`、`approval_status` 和 `step_status`，避免联表查询时混淆不同实体的状态。`access_grants` 不重复保存申请人和权限编码，因为它们可通过唯一 `request_id` 从不可随意修改的正式申请中获取。
+
+`audit_events.request_id` 允许为空，以表达 `workspace.reset` 等 Workspace 级事件。审计操作者使用 `actor_type` 区分 `employee`、`agent` 和 `system`，`actor_id` 在系统自动事件中可为空。
+
+## 关系总览
+
+```mermaid
+erDiagram
+    WORKSPACES ||--o{ ACCESS_REQUESTS : isolates
+    WORKSPACES ||--o{ APPROVAL_CASES : isolates
+    WORKSPACES ||--o{ APPROVAL_STEPS : isolates
+    WORKSPACES ||--o{ ACCESS_GRANTS : isolates
+    WORKSPACES ||--o{ AUDIT_EVENTS : isolates
+
+    EMPLOYEES ||--o{ EMPLOYEES : manages
+    EMPLOYEES ||--o{ ACCESS_REQUESTS : submits
+    EMPLOYEES ||--o{ APPROVAL_STEPS : approves
+    EMPLOYEES o|--o{ ENTITLEMENTS : owns
+
+    SYSTEMS ||--o{ ENTITLEMENTS : contains
+    ENTITLEMENTS ||--o{ ACCESS_REQUESTS : requested_as
+
+    ACCESS_REQUESTS ||--o| APPROVAL_CASES : creates
+    APPROVAL_CASES ||--|{ APPROVAL_STEPS : contains
+    ACCESS_REQUESTS ||--o| ACCESS_GRANTS : produces
+    ACCESS_REQUESTS o|--o{ AUDIT_EVENTS : records
+```
+
+`POLICY_CHUNKS` 是全局只读 RAG 资料，不直接依赖 Workspace 或申请。风险审查产生的政策引用将在后续 Agent/Risk Review 模型中表达。
 
 用户确认提交时，创建 `access_request`、`approval_case`、必需的 `approval_steps` 和首条 `audit_event` 必须位于同一数据库事务。任一步失败时整体回滚，不保留半成品。
 

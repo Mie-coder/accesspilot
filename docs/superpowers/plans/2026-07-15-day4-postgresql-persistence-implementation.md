@@ -14,6 +14,7 @@
 - 数据目录 `postgres-data/` 和 `.env` 不得进入 Git。
 - 所有企业数据必须是原创虚构数据，不得包含美的内部信息。
 - Workspace 私有数据必须带 `workspace_id`，原始 Cookie Token 不得存入数据库。
+- 子表必须用 Workspace 与父记录 ID 的组合外键阻止跨 Workspace 串数据。
 - `AccessRequest`、`ApprovalCase` 和 `AccessGrant` 必须分表。
 - `policy_chunks.embedding` 使用 `vector(512)` 且允许为空；首版不创建 ANN 索引。
 - 用户写核心 ORM/Store 逻辑；Codex 写测试、运行验证并补充中文注释。
@@ -190,6 +191,24 @@ def test_idempotency_and_approval_order_are_unique() -> None:
         set(constraint.columns.keys()) == {"approval_case_id", "step_order"}
         for constraint in step.constraints
     )
+
+
+def test_workspace_and_request_use_a_composite_foreign_key() -> None:
+    approval_case = Base.metadata.tables["approval_cases"]
+
+    assert any(
+        {element.parent.name for element in constraint.elements}
+        == {"workspace_id", "request_id"}
+        and {element.target_fullname for element in constraint.elements}
+        == {"access_requests.workspace_id", "access_requests.id"}
+        for constraint in approval_case.foreign_key_constraints
+    )
+
+
+def test_each_workflow_table_names_its_own_status() -> None:
+    assert "request_status" in Base.metadata.tables["access_requests"].c
+    assert "approval_status" in Base.metadata.tables["approval_cases"].c
+    assert "step_status" in Base.metadata.tables["approval_steps"].c
 ```
 
 Run: `LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 .venv/bin/python -m pytest apps/api/tests/db/test_models.py -v`
@@ -212,6 +231,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     String,
     Text,
@@ -289,6 +309,7 @@ class EntitlementRecord(Base):
 class AccessRequestRecord(Base):
     __tablename__ = "access_requests"
     __table_args__ = (
+        UniqueConstraint("workspace_id", "id"),
         CheckConstraint("duration_days > 0", name="duration_days_positive"),
     )
 
@@ -307,7 +328,7 @@ class AccessRequestRecord(Base):
     business_reason: Mapped[str] = mapped_column(Text)
     start_date: Mapped[date] = mapped_column(Date)
     duration_days: Mapped[int] = mapped_column(Integer)
-    status: Mapped[str] = mapped_column(String(40))
+    request_status: Mapped[str] = mapped_column(String(40))
     confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now
@@ -316,15 +337,21 @@ class AccessRequestRecord(Base):
 
 class ApprovalCaseRecord(Base):
     __tablename__ = "approval_cases"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "id"),
+        ForeignKeyConstraint(
+            ["workspace_id", "request_id"],
+            ["access_requests.workspace_id", "access_requests.id"],
+            ondelete="CASCADE",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     workspace_id: Mapped[UUID] = mapped_column(
         ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
     )
-    request_id: Mapped[UUID] = mapped_column(
-        ForeignKey("access_requests.id", ondelete="CASCADE"), unique=True
-    )
-    status: Mapped[str] = mapped_column(String(40))
+    request_id: Mapped[UUID] = mapped_column(Uuid, unique=True)
+    approval_status: Mapped[str] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now
     )
@@ -333,6 +360,11 @@ class ApprovalCaseRecord(Base):
 class ApprovalStepRecord(Base):
     __tablename__ = "approval_steps"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "approval_case_id"],
+            ["approval_cases.workspace_id", "approval_cases.id"],
+            ondelete="CASCADE",
+        ),
         UniqueConstraint("approval_case_id", "step_order"),
         CheckConstraint("step_order > 0", name="step_order_positive"),
     )
@@ -341,15 +373,13 @@ class ApprovalStepRecord(Base):
     workspace_id: Mapped[UUID] = mapped_column(
         ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
     )
-    approval_case_id: Mapped[UUID] = mapped_column(
-        ForeignKey("approval_cases.id", ondelete="CASCADE"), index=True
-    )
+    approval_case_id: Mapped[UUID] = mapped_column(Uuid, index=True)
     step_order: Mapped[int] = mapped_column(Integer)
     approver_id: Mapped[str] = mapped_column(
         ForeignKey("employees.employee_id", ondelete="RESTRICT")
     )
     approver_role: Mapped[str] = mapped_column(String(50))
-    status: Mapped[str] = mapped_column(String(30))
+    step_status: Mapped[str] = mapped_column(String(30))
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -361,21 +391,21 @@ class ApprovalStepRecord(Base):
 
 class AccessGrantRecord(Base):
     __tablename__ = "access_grants"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "request_id"],
+            ["access_requests.workspace_id", "access_requests.id"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("expires_at > starts_at", name="valid_time_range"),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     workspace_id: Mapped[UUID] = mapped_column(
         ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
     )
-    request_id: Mapped[UUID] = mapped_column(
-        ForeignKey("access_requests.id", ondelete="RESTRICT"), unique=True
-    )
+    request_id: Mapped[UUID] = mapped_column(Uuid, unique=True)
     idempotency_key: Mapped[str] = mapped_column(String(100), unique=True)
-    grantee_id: Mapped[str] = mapped_column(
-        ForeignKey("employees.employee_id", ondelete="RESTRICT")
-    )
-    entitlement_code: Mapped[str] = mapped_column(
-        ForeignKey("entitlements.code", ondelete="RESTRICT")
-    )
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
@@ -385,19 +415,23 @@ class AccessGrantRecord(Base):
 
 class AuditEventRecord(Base):
     __tablename__ = "audit_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "request_id"],
+            ["access_requests.workspace_id", "access_requests.id"],
+            ondelete="RESTRICT",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     workspace_id: Mapped[UUID] = mapped_column(
         ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
     )
-    request_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("access_requests.id", ondelete="SET NULL"), nullable=True
-    )
+    request_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    actor_type: Mapped[str] = mapped_column(String(30))
+    actor_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     event_type: Mapped[str] = mapped_column(String(100), index=True)
-    actor_id: Mapped[str | None] = mapped_column(
-        ForeignKey("employees.employee_id", ondelete="SET NULL"), nullable=True
-    )
-    summary: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, index=True
     )
@@ -421,13 +455,16 @@ class PolicyChunkRecord(Base):
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(512), nullable=True
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
 ```
 
 - [ ] **Step 6: 验证 ORM 元数据测试变绿**
 
 Run: `LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 .venv/bin/python -m pytest apps/api/tests/db/test_models.py -v`
 
-Expected: 2 tests PASS。
+Expected: 4 tests PASS。
 
 - [ ] **Step 7: 初始化 Alembic 并生成固定版本号迁移**
 
@@ -704,7 +741,7 @@ def test_new_session_reads_committed_request_and_audit(
             business_reason="核验项目运营数据",
             start_date=date(2026, 7, 15),
             duration_days=14,
-            status="submitted",
+            request_status="submitted",
             confirmed_at=datetime.now(UTC),
         )
         first.add(request)
@@ -713,9 +750,10 @@ def test_new_session_reads_committed_request_and_audit(
             AuditEventRecord(
                 workspace_id=workspace.id,
                 request_id=request.id,
-                event_type="request.submitted",
+                actor_type="employee",
                 actor_id="EMP-001",
-                summary={"project_code": "PRJ-AURORA"},
+                event_type="request.submitted",
+                details={"project_code": "PRJ-AURORA"},
             )
         )
         request_id = request.id
