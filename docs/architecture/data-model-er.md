@@ -10,7 +10,15 @@ ER 图用来表示“数据库有哪些表、每张表保存什么、表之间�
 - `||--o{`：一对零个或多个。
 - `||--o|`：一对零个或一个。
 
-## 完整关系图
+## 可放大高清图片
+
+> 点击下图打开 `6000 × 7000` 原图，再使用浏览器放大查看字段。
+
+[![AccessPilot 数据库 ER 图](accesspilot-data-model-er.png)](accesspilot-data-model-er.png)
+
+## 可编辑 Mermaid 源图
+
+下面保留同一张图的 Mermaid 源码，数据库表发生变化时可以继续维护。
 
 ```mermaid
 erDiagram
