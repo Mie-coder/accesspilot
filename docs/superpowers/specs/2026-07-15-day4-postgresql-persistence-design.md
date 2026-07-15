@@ -56,6 +56,8 @@ apps/api/migrations/            # Alembic 迁移历史
 
 ## 关系总览
 
+> 包含各表关键字段、主外键和唯一约束的版本，请查看 [AccessPilot 数据库 ER 图](../../architecture/data-model-er.md)。
+
 ```mermaid
 erDiagram
     WORKSPACES ||--o{ ACCESS_REQUESTS : isolates

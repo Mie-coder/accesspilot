@@ -47,6 +47,7 @@ mypy apps/api/src
 ## 架构文档
 
 - [访问申请与权限开通流程](docs/architecture/access-flow.md)
+- [数据库 ER 图](docs/architecture/data-model-er.md)
 - [项目实现计划](docs/plans/accesspilot-mvp.md)
 - [术语表](CONTEXT.md)
 - [架构决策记录](docs/adr/)
