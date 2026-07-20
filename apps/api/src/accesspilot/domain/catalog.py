@@ -33,6 +33,16 @@ class Employee:
 
 
 @dataclass(frozen=True)
+class System:
+    """可申请权限的原创虚构企业系统。"""
+
+    # code 是数据库外键和工具调用使用的稳定标识。
+    code: str
+    # name 是 Agent 和前端展示给用户的中文名称。
+    name: str
+
+
+@dataclass(frozen=True)
 class Entitlement:
     """可以被授予的最小权限单位及其安全约束。"""
 
@@ -144,6 +154,13 @@ EMPLOYEES = {
         manager_id="EMP-004",
         roles=frozenset({"employee", "on_call_sre"}),
     ),
+}
+
+# 字典键和 code 保持一致，用户界面只展示中文 name。
+SYSTEMS = {
+    "insighthub": System(code="insighthub", name="数据洞察中心"),
+    "codeforge": System(code="codeforge", name="代码协作平台"),
+    "opsdesk": System(code="opsdesk", name="运维工作台"),
 }
 
 ENTITLEMENTS = {

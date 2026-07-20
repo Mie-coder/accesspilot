@@ -1,6 +1,15 @@
 import accesspilot.domain.catalog as catalog
 
 
+def test_system_catalog_contains_every_entitlement_parent() -> None:
+    """每个权限的 system_code 都必须对应一个虚构系统。"""
+
+    assert set(catalog.SYSTEMS) == {"insighthub", "codeforge", "opsdesk"}
+    assert {item.system_code for item in catalog.ENTITLEMENTS.values()} <= set(
+        catalog.SYSTEMS
+    )
+
+
 def test_customer_export_has_high_risk_dual_approval_policy() -> None:
     entitlement = catalog.ENTITLEMENTS["insighthub.customer_export"]
 
