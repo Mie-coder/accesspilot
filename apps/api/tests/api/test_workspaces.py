@@ -5,7 +5,7 @@ from accesspilot.workspaces import InMemoryWorkspaceStore
 
 
 def test_create_workspace_sets_http_only_cookie() -> None:
-    client = TestClient(create_app())
+    client = TestClient(create_app(store=InMemoryWorkspaceStore()))
 
     response = client.post("/api/workspaces")
 
@@ -16,7 +16,10 @@ def test_create_workspace_sets_http_only_cookie() -> None:
 
 
 def test_reset_with_unknown_workspace_token_returns_not_found() -> None:
-    client = TestClient(create_app(), raise_server_exceptions=False)
+    client = TestClient(
+        create_app(store=InMemoryWorkspaceStore()),
+        raise_server_exceptions=False,
+    )
     client.cookies.set("accesspilot_workspace", "does-not-exist")
 
     response = client.post("/api/workspaces/reset")

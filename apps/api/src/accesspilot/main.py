@@ -3,9 +3,10 @@
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 
 from accesspilot.config import Settings
+from accesspilot.db.session import build_engine, build_session_factory
+from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
 from accesspilot.domain.models import RequestDraft
 from accesspilot.workspaces import (
-    InMemoryWorkspaceStore,
     UnknownWorkspaceError,
     Workspace,
     WorkspaceService,
@@ -16,8 +17,13 @@ from accesspilot.workspaces import (
 def create_app(settings: Settings | None = None, store: WorkspaceStore | None = None) -> FastAPI:
     """创建一个可配置、可测试的 FastAPI 应用。"""
     active_settings = settings or Settings()
-    # 创建workspace服务
-    workspace_service = WorkspaceService(store or InMemoryWorkspaceStore())
+    if store is None:
+        # 实际启动时默认用 PostgreSQL，所以 API 重启不会丢失 Workspace。
+        # 测试需要纯内存存储时，会通过 store= 显式注入。
+        store = SqlAlchemyWorkspaceStore(
+            build_session_factory(build_engine(active_settings.database_url))
+        )
+    workspace_service = WorkspaceService(store)
     app = FastAPI(title=active_settings.app_name)
 
     def require_workspace(request: Request) -> Workspace:
@@ -78,6 +84,24 @@ def create_app(settings: Settings | None = None, store: WorkspaceStore | None = 
             "draft": draft.model_dump(mode="json"),
             "missing_fields": missing_fields,
             "is_complete": not missing_fields,
+        }
+
+    @app.get("/api/drafts/current")
+    def get_current_draft(
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> dict[str, object]:
+        """读取当前浏览器 Workspace 中已保存的申请草稿。
+
+        复用 require_workspace 让 Cookie 检查、过期 Token 处理和
+        Workspace 查询保持一致，不从 URL 接收敏感 Token。
+        """
+
+        return {
+            "draft": (
+                workspace.draft.model_dump(mode="json")
+                if workspace.draft is not None
+                else None
+            )
         }
 
     return app

@@ -1,10 +1,11 @@
 from fastapi.testclient import TestClient
 
 from accesspilot.main import create_app
+from accesspilot.workspaces import InMemoryWorkspaceStore
 
 
 def test_preview_requires_a_workspace_cookie() -> None:
-    client = TestClient(create_app())
+    client = TestClient(create_app(store=InMemoryWorkspaceStore()))
 
     response = client.post(
         "/api/drafts/preview",
@@ -15,7 +16,7 @@ def test_preview_requires_a_workspace_cookie() -> None:
 
 
 def test_preview_returns_missing_fields_for_current_workspace() -> None:
-    client = TestClient(create_app())
+    client = TestClient(create_app(store=InMemoryWorkspaceStore()))
     client.post("/api/workspaces")
 
     response = client.post(
@@ -35,7 +36,7 @@ def test_preview_returns_missing_fields_for_current_workspace() -> None:
 
 
 def test_preview_rejects_invalid_request_body() -> None:
-    client = TestClient(create_app())
+    client = TestClient(create_app(store=InMemoryWorkspaceStore()))
     client.post("/api/workspaces")
 
     response = client.post("/api/drafts/preview", json={"duration_days": "tomorrow"})
