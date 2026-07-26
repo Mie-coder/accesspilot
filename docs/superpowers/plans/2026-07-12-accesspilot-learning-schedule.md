@@ -61,10 +61,10 @@
 
 ## Day 5：确定性的业务工具
 
-- [ ] 测试并实现 `get_employee_context`。
-- [ ] 测试并实现 `search_systems` 与 `list_entitlements`。
-- [ ] 测试并实现 `validate_access_request` 与 `get_request_status`。
-- [ ] 使用类型化 `ToolResult` 表示成功、参数错误和业务失败。
+- [x] 测试并实现 `get_employee_context`。
+- [x] 测试并实现 `search_systems` 与 `list_entitlements`。
+- [x] 测试并实现 `validate_access_request` 与 `get_request_status`。
+- [x] 使用类型化 `ToolResult` 表示成功、参数错误和业务失败。
 - [ ] 验证未知权限和不完整申请会被拒绝并完成提交。
 
 **Agent 可辅助：** 审查工具输入输出 Schema，设计错误参数场景。
