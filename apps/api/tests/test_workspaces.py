@@ -7,12 +7,12 @@ def test_reset_only_clears_the_target_workspace() -> None:
     first = service.create()
     second = service.create()
     first_draft = RequestDraft(
-        system_name="InsightHub",
-        entitlement_name="客户数据导出",
+        employee_id="EMP-001",
+        entitlement_id="ENT-CUSTOMER-EXPORT",
     )
     second_draft = RequestDraft(
-        system_name="OpsDesk",
-        entitlement_name="运维日志查看",
+        employee_id="EMP-002",
+        entitlement_id="ENT-OPS-LOG-READ",
     )
     service.save_draft(first.token, first_draft)
     service.save_draft(second.token, second_draft)

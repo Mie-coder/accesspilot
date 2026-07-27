@@ -42,11 +42,17 @@ def test_reset_only_clears_the_current_browser_workspace() -> None:
 
     first_browser.post(
         "/api/drafts/preview",
-        json={"system_name": "InsightHub", "entitlement_name": "客户数据导出"},
+        json={
+            "employee_id": "EMP-001",
+            "entitlement_id": "ENT-CUSTOMER-EXPORT",
+        },
     )
     second_browser.post(
         "/api/drafts/preview",
-        json={"system_name": "OpsDesk", "entitlement_name": "运维日志查看"},
+        json={
+            "employee_id": "EMP-002",
+            "entitlement_id": "ENT-OPS-LOG-READ",
+        },
     )
 
     response = first_browser.post("/api/workspaces/reset")
@@ -60,4 +66,5 @@ def test_reset_only_clears_the_current_browser_workspace() -> None:
     assert first_workspace.draft is None
     assert second_workspace is not None
     assert second_workspace.draft is not None
-    assert second_workspace.draft.system_name == "OpsDesk"
+    assert second_workspace.draft.employee_id == "EMP-002"
+    assert second_workspace.draft.entitlement_id == "ENT-OPS-LOG-READ"

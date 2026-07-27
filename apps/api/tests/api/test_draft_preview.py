@@ -9,7 +9,7 @@ def test_preview_requires_a_workspace_cookie() -> None:
 
     response = client.post(
         "/api/drafts/preview",
-        json={"system_name": "InsightHub", "entitlement_name": "客户数据导出"},
+        json={"employee_id": "EMP-001"},
     )
 
     assert response.status_code == 401
@@ -21,18 +21,86 @@ def test_preview_returns_missing_fields_for_current_workspace() -> None:
 
     response = client.post(
         "/api/drafts/preview",
-        json={"system_name": "InsightHub", "entitlement_name": "客户数据导出"},
+        json={
+            "employee_id": "EMP-001",
+            "entitlement_id": "ENT-CUSTOMER-EXPORT",
+        },
     )
 
     assert response.status_code == 200
     assert response.json()["missing_fields"] == [
-        "project_code",
-        "data_scope",
-        "business_reason",
-        "start_date",
         "duration_days",
+        "justification",
     ]
     assert response.json()["is_complete"] is False
+    assert response.json()["can_enter_approval"] is False
+    assert response.json()["draft"] == {
+        "employee_id": "EMP-001",
+        "entitlement_id": "ENT-CUSTOMER-EXPORT",
+        "duration_days": None,
+        "justification": None,
+        "confirmed": False,
+    }
+
+
+def test_complete_unconfirmed_draft_is_not_ready_for_approval() -> None:
+    client = TestClient(create_app(store=InMemoryWorkspaceStore()))
+    client.post("/api/workspaces")
+
+    response = client.post(
+        "/api/drafts/preview",
+        json={
+            "employee_id": "EMP-001",
+            "entitlement_id": "ENT-CUSTOMER-EXPORT",
+            "duration_days": 14,
+            "justification": "  核验项目运营数据  ",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["draft"]["justification"] == "核验项目运营数据"
+    assert response.json()["is_complete"] is True
+    assert response.json()["can_enter_approval"] is False
+
+
+def test_confirmed_complete_draft_is_ready_for_approval() -> None:
+    client = TestClient(create_app(store=InMemoryWorkspaceStore()))
+    client.post("/api/workspaces")
+
+    response = client.post(
+        "/api/drafts/preview",
+        json={
+            "employee_id": "EMP-001",
+            "entitlement_id": "ENT-CUSTOMER-EXPORT",
+            "duration_days": 14,
+            "justification": "核验项目运营数据",
+            "confirmed": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["is_complete"] is True
+    assert response.json()["can_enter_approval"] is True
+
+
+def test_preview_rejects_session_and_derived_fields() -> None:
+    client = TestClient(create_app(store=InMemoryWorkspaceStore()))
+    client.post("/api/workspaces")
+
+    response = client.post(
+        "/api/drafts/preview",
+        json={
+            "employee_id": "EMP-001",
+            "workspace": "client-controlled-workspace",
+            "manager": {"employee_id": "EMP-999"},
+        },
+    )
+
+    assert response.status_code == 422
+    assert {
+        error["type"]
+        for error in response.json()["detail"]
+    } == {"extra_forbidden"}
 
 
 def test_preview_rejects_invalid_request_body() -> None:

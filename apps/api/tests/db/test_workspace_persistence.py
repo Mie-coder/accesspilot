@@ -24,9 +24,11 @@ def test_workspace_draft_survives_new_app_instance() -> None:
         first_browser.post(
             "/api/drafts/preview",
             json={
-                "system_name": "数据洞察中心",
-                "entitlement_name": "客户数据导出",
-                "project_code": "PRJ-AURORA",
+                "employee_id": "EMP-001",
+                "entitlement_id": "ENT-CUSTOMER-EXPORT",
+                "duration_days": 14,
+                "justification": "核验项目运营数据",
+                "confirmed": False,
             },
         )
         token = first_browser.cookies.get("accesspilot_workspace")
@@ -40,5 +42,10 @@ def test_workspace_draft_survives_new_app_instance() -> None:
         response = restarted_browser.get("/api/drafts/current")
 
     assert response.status_code == 200
-    assert response.json()["draft"]["system_name"] == "数据洞察中心"
-    assert response.json()["draft"]["project_code"] == "PRJ-AURORA"
+    assert response.json()["draft"] == {
+        "employee_id": "EMP-001",
+        "entitlement_id": "ENT-CUSTOMER-EXPORT",
+        "duration_days": 14,
+        "justification": "核验项目运营数据",
+        "confirmed": False,
+    }

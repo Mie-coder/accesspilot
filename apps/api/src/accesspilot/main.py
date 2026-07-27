@@ -84,6 +84,8 @@ def create_app(settings: Settings | None = None, store: WorkspaceStore | None = 
             "draft": draft.model_dump(mode="json"),
             "missing_fields": missing_fields,
             "is_complete": not missing_fields,
+            # 这里只返回送审资格，不创建审批记录，也不代表权限已经开通。
+            "can_enter_approval": draft.can_enter_approval(),
         }
 
     @app.get("/api/drafts/current")
