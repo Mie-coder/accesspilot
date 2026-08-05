@@ -15,6 +15,19 @@ def test_create_workspace_sets_http_only_cookie() -> None:
     assert "httponly" in response.headers["set-cookie"].lower()
 
 
+def test_ensure_workspace_creates_once_and_then_reuses_cookie() -> None:
+    client = TestClient(create_app(store=InMemoryWorkspaceStore()))
+
+    created = client.post("/api/workspaces/ensure")
+    token = client.cookies.get("accesspilot_workspace")
+    existing = client.post("/api/workspaces/ensure")
+
+    assert created.json() == {"status": "created"}
+    assert token is not None
+    assert existing.json() == {"status": "existing"}
+    assert client.cookies.get("accesspilot_workspace") == token
+
+
 def test_reset_with_unknown_workspace_token_returns_not_found() -> None:
     client = TestClient(
         create_app(store=InMemoryWorkspaceStore()),

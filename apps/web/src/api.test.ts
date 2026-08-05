@@ -21,20 +21,13 @@ describe('parseSseEvents', () => {
 })
 
 describe('bootstrapWorkspace', () => {
-  it('creates a workspace after an unauthorized draft read, then loads replay state', async () => {
-    let draftReads = 0
+  it('ensures a workspace before loading draft and replay state', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       if (url === '/api/drafts/current') {
-        draftReads += 1
-        return draftReads === 1
-          ? new Response('{"detail":"Workspace cookie 是必须的"}', {
-              status: 401,
-              headers: { 'Content-Type': 'application/json' },
-            })
-          : Response.json({ draft: null })
+        return Response.json({ draft: null })
       }
-      if (url === '/api/workspaces') {
+      if (url === '/api/workspaces/ensure') {
         expect(init?.method).toBe('POST')
         return Response.json({ status: 'created' }, { status: 201 })
       }
@@ -59,7 +52,7 @@ describe('bootstrapWorkspace', () => {
     expect(snapshot.lastEventId).toBe(1)
     expect(snapshot.events[0]?.type).toBe('message.assistant')
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/workspaces',
+      '/api/workspaces/ensure',
       expect.objectContaining({ credentials: 'include', method: 'POST' }),
     )
   })

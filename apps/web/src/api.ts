@@ -1,8 +1,10 @@
 import type {
+  ApprovalInbox,
   ChatTurn,
   ModelQuota,
   RequestDraft,
   RequestResult,
+  RequestDetail,
   WorkspaceEvent,
   WorkspaceSnapshot,
 } from './types'
@@ -89,14 +91,9 @@ export async function replayEvents(
 }
 
 export async function bootstrapWorkspace(): Promise<WorkspaceSnapshot> {
-  let draft: RequestDraft | null
-  try {
-    draft = await readDraft()
-  } catch (error) {
-    if (!(error instanceof ApiError) || ![401, 404].includes(error.status)) throw error
-    await requestJson<{ status: string }>('/api/workspaces', { method: 'POST' })
-    draft = await readDraft()
-  }
+  // 后端原子地复用有效 Workspace 或创建新空间，首次加载无需先触发 401/404。
+  await requestJson<{ status: string }>('/api/workspaces/ensure', { method: 'POST' })
+  const draft = await readDraft()
 
   const [quota, events] = await Promise.all([
     requestJson<ModelQuota>('/api/model-quota'),
@@ -128,4 +125,57 @@ export async function submitRequest(signal?: AbortSignal): Promise<RequestResult
 
 export async function startNewWorkspace(): Promise<void> {
   await requestJson<{ status: string }>('/api/workspaces', { method: 'POST' })
+}
+
+export async function readApprovalInbox(actorId: string): Promise<ApprovalInbox> {
+  return requestJson<ApprovalInbox>(
+    `/api/approval-inbox?actor_id=${encodeURIComponent(actorId)}`,
+  )
+}
+
+export async function readRequestDetail(requestId: string): Promise<RequestDetail> {
+  return requestJson<RequestDetail>(`/api/requests/${encodeURIComponent(requestId)}`)
+}
+
+export async function startApproval(requestId: string): Promise<void> {
+  await requestJson(`/api/requests/${encodeURIComponent(requestId)}/approval-case`, {
+    method: 'POST',
+  })
+}
+
+export async function decideApproval(
+  caseId: string,
+  actorId: string,
+  decision: 'approve' | 'reject',
+  comment: string | null,
+): Promise<void> {
+  await requestJson(`/api/approval-cases/${encodeURIComponent(caseId)}/decisions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ actor_id: actorId, decision, comment }),
+  })
+}
+
+export async function setFaultMode(
+  faultMode: 'iam_failure' | 'iam_timeout' | null,
+): Promise<void> {
+  await requestJson('/api/workspaces/fault-mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fault_mode: faultMode }),
+  })
+}
+
+export async function provisionRequest(requestId: string): Promise<void> {
+  await requestJson(`/api/requests/${encodeURIComponent(requestId)}/provision`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ idempotency_key: `accesspilot-${requestId}` }),
+  })
+}
+
+export async function recoverProvisioning(requestId: string): Promise<void> {
+  await requestJson(`/api/requests/${encodeURIComponent(requestId)}/provision/recover`, {
+    method: 'POST',
+  })
 }

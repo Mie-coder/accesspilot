@@ -15,4 +15,5 @@ coverage/
 *.pyc
 *.log
 *.tsbuildinfo
+.playwright-cli/
 postgres-data/

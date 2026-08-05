@@ -14,7 +14,8 @@ import { useEffect, useState } from 'react'
 import { ApiError, bootstrapWorkspace } from './api'
 import { ChatThread } from './ChatThread'
 import { DraftCard } from './DraftCard'
-import type { WorkspaceEvent, WorkspaceSnapshot } from './types'
+import { OperationsConsole } from './OperationsConsole'
+import type { DemoRole, WorkspaceEvent, WorkspaceSnapshot } from './types'
 import { WorkbenchRuntime } from './WorkbenchRuntime'
 import { useWorkbench } from './workbench-context'
 
@@ -88,6 +89,7 @@ function WorkbenchPage() {
   const workbench = useWorkbench()
   const aui = useAui()
   const isRunning = useAuiState((state) => state.thread.isRunning)
+  const [role, setRole] = useState<DemoRole>('applicant')
   const confirm = () => {
     void aui.thread.append({
       role: 'user',
@@ -110,10 +112,14 @@ function WorkbenchPage() {
         <div className="topbar-actions">
           <label className="role-select">
             <span>演示角色</span>
-            <select aria-label="演示角色" defaultValue="applicant">
+            <select
+              aria-label="演示角色"
+              value={role}
+              onChange={(event) => setRole(event.target.value as DemoRole)}
+            >
               <option value="applicant">申请人 · EMP-001</option>
-              <option value="manager" disabled>直属经理 · T07</option>
-              <option value="owner" disabled>数据负责人 · T07</option>
+              <option value="manager">直属经理 · EMP-002</option>
+              <option value="data_owner">数据负责人 · EMP-003</option>
             </select>
           </label>
           <div className="api-health">
@@ -126,7 +132,8 @@ function WorkbenchPage() {
         </div>
       </header>
 
-      <main className="workspace-grid" id="main-workbench">
+      {role === 'applicant' ? (
+        <main className="workspace-grid" id="main-workbench">
         <section className="chat-panel" aria-labelledby="chat-title">
           <div className="chat-header">
             <div className="chat-title">
@@ -166,7 +173,16 @@ function WorkbenchPage() {
             <span>Workspace / PostgreSQL 是业务事实源，assistant-ui 只管理对话交互。</span>
           </div>
         </aside>
-      </main>
+        </main>
+      ) : (
+        <OperationsConsole
+          key={role}
+          actorId={role === 'manager' ? 'EMP-002' : 'EMP-003'}
+          roleLabel={role === 'manager' ? '直属经理' : '数据负责人'}
+          requestId={workbench.requestResult?.request_id ?? null}
+          quotaRemaining={workbench.quota.remaining}
+        />
+      )}
     </div>
   )
 }

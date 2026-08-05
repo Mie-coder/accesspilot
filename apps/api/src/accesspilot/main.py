@@ -50,6 +50,11 @@ from accesspilot.events import (
     get_model_quota,
     list_workspace_events,
 )
+from accesspilot.operations import (
+    OperationsNotFoundError,
+    get_request_detail,
+    list_approval_inbox,
+)
 from accesspilot.provisioning import (
     ApprovalRequiredError,
     IamProvisioner,
@@ -324,6 +329,28 @@ def create_app(
         )
         return {"status": "created"}
 
+    @app.post("/api/workspaces/ensure")
+    def ensure_workspace(request: Request, response: Response) -> dict[str, str]:
+        """复用有效 Workspace；首次访问或陈旧 Cookie 才创建新空间。"""
+
+        token = request.cookies.get(active_settings.workspace_cookie_name)
+        if token is not None:
+            try:
+                workspace_service.get(token)
+                return {"status": "existing"}
+            except UnknownWorkspaceError:
+                # 陈旧 Cookie 不应让首次加载先产生 404，再由前端猜测恢复方式。
+                pass
+        workspace = workspace_service.create()
+        response.set_cookie(
+            key=active_settings.workspace_cookie_name,
+            value=workspace.token,
+            httponly=True,
+            samesite="lax",
+            secure=active_settings.workspace_cookie_secure,
+        )
+        return {"status": "created"}
+
     @app.post("/api/workspaces/reset")
     def reset_workspace(
         workspace: Workspace = Depends(require_workspace),  # noqa: B008
@@ -459,6 +486,40 @@ def create_app(
                     detail="风险审查暂时不可用，请稍后重试",
                 ) from error
             return approval_payload(session, case)
+
+    @app.get("/api/approval-inbox")
+    def read_approval_inbox(
+        actor_id: str,
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> dict[str, object]:
+        """读取当前演示身份真正轮到处理的审批步骤。"""
+
+        with active_session_factory() as session:
+            try:
+                return list_approval_inbox(
+                    session,
+                    workspace_token=workspace.token,
+                    actor_id=actor_id,
+                )
+            except OperationsNotFoundError as error:
+                raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.get("/api/requests/{request_id}")
+    def read_request_detail(
+        request_id: UUID,
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> dict[str, object]:
+        """读取申请、审批、开通与只追加审计事实。"""
+
+        with active_session_factory() as session:
+            try:
+                return get_request_detail(
+                    session,
+                    workspace_token=workspace.token,
+                    request_id=request_id,
+                )
+            except OperationsNotFoundError as error:
+                raise HTTPException(status_code=404, detail="申请不存在") from error
 
     @app.post("/api/approval-cases/{case_id}/decisions")
     def decide_approval_step(

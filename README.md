@@ -22,7 +22,10 @@ AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent�
 - T04：幂等 IAM 开通、失败重试、超时未知查询恢复和唯一授权已完成；
 - T05：安全事件白名单、SSE `Last-Event-ID` 回放、对话入口和 Workspace 模型配额已完成；
 - T06：assistant-ui `LocalRuntime + ChatModelAdapter`、申请草稿卡、明确确认、正式提交与刷新恢复已完成；
-- 下一步按 `docs/tickets/accesspilot-mvp-v1.md` 实现审批收件箱与审计详情。
+- T07：按当前演示身份过滤的审批收件箱、政策/审批/开通/审计详情、故障恢复与只读回放已完成；
+- 下一步按 `docs/tickets/accesspilot-mvp-v1.md` 完成固定评测、容器化与本地最终验收。
+
+当前角色选择器和 `actor_id` 只用于虚构 Demo 流程，不是生产级身份认证或授权边界；真实系统必须由可信登录态在服务端确定操作者身份。
 
 ## 目录结构
 
