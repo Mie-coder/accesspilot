@@ -110,6 +110,8 @@
 
 **依赖：** T01–T07。
 
+**状态（2026-08-05）：** 已完成本地验收。12 条固定 API 评测全部通过，完整评测仅 11.34 秒；真实浏览器黄金路径已在 T07 五分钟内完成，且本 Ticket 未改动前端业务代码。新增 Python 3.12 API、Node 22 构建、非 root Nginx、pgvector Compose、迁移→目录→同源政策向量→API 启动链路，以及 `/health`/`/ready`、SSE 禁缓冲、资源限制和日志轮转。173 项后端测试、16 项前端测试、Ruff、MyPy、Alembic、ESLint、TypeScript/生产构建、API wheel、Shell 语法、Docker Compose v5.4.0 `config --quiet` 和四个基础镜像标签检查通过；独立复核问题已关闭。由于本机 Colima 缺少 QEMU，本轮未执行镜像 build/up；没有推送、合并或部署。
+
 ## 串行顺序与提交门槛
 
 按 `T01 → T02 → T03 → T04 → T05 → T06 → T07 → T08` 串行实施。每张 Ticket 独立验证通过后只创建本地提交；不推送、不合并、不部署。完成 T08 后由用户进行最终验收并决定下一步。

@@ -158,12 +158,14 @@
 
 ## Day 14：评测、部署与面试准备
 
-- [ ] 编写并运行 12 条固定 Agent 评测场景。
-- [ ] 添加 Dockerfile、Compose、Nginx、健康检查和日志轮转。
-- [ ] 添加 `.env.example`、README 与腾讯云部署说明。
-- [ ] 运行后端测试、前端测试、Lint、类型检查和构建。
+- [x] 编写并运行 12 条固定 Agent 评测场景。
+- [x] 添加 Dockerfile、Compose、Nginx、健康检查和日志轮转。
+- [x] 添加 `.env.example`、README 与腾讯云部署说明。
+- [x] 运行后端测试、前端测试、Lint、类型检查和构建。
 - [ ] 部署腾讯云，并在线运行完整黄金路径。
 - [ ] 用自己的话写项目介绍，不看代码讲解完整架构。
+
+**本地交付证据（2026-08-05）：** 12 条固定评测全部通过（11.34 秒）；后端 173 项 pytest、前端 16 项 Vitest、Ruff、MyPy、Alembic、ESLint、TypeScript/生产构建和 API wheel 通过。Docker Compose v5.4.0 配置校验与全部基础镜像标签检查通过，T07 的 1440px/390px 真实浏览器黄金路径证据继续有效。本机 Colima 因缺少 QEMU 未执行镜像 build/up；按约定未部署腾讯云，项目讲解也保留给学习者本人完成。
 
 **Agent 可辅助：** 审查部署命令、执行只读代码评审、进行模拟技术面试。
 

@@ -6,7 +6,8 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from accesspilot.agent.deepseek import DeepSeekStructuredReplyModel
@@ -239,6 +240,17 @@ def create_app(
     def health() -> dict[str, str]:
         """返回最小存活状态，不访问外部依赖"""
         return {"status": "ok"}
+
+    @app.get("/ready")
+    def readiness() -> dict[str, str]:
+        """确认 API 能读取数据库；不调用 DeepSeek、百炼或 IAM。"""
+
+        try:
+            with active_session_factory() as session:
+                session.execute(text("SELECT 1"))
+        except SQLAlchemyError as error:
+            raise HTTPException(status_code=503, detail="数据库暂不可用") from error
+        return {"status": "ready"}
 
     @app.get("/api/events")
     def replay_events(

@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# 依赖和应用安装都在构建阶段完成；运行时不需要 root 权限。
+COPY pyproject.toml ./
+COPY apps/api/src ./apps/api/src
+COPY alembic.ini ./
+COPY apps/api/migrations ./apps/api/migrations
+RUN pip install --no-cache-dir . \
+    && groupadd --system accesspilot \
+    && useradd --system --gid accesspilot --create-home accesspilot
+
+# 启动脚本按迁移、目录/向量初始化、API 的顺序执行。
+COPY scripts/start-api.sh ./scripts/start-api.sh
+RUN chmod 0555 ./scripts/start-api.sh \
+    && chown -R accesspilot:accesspilot /app
+
+USER accesspilot
+EXPOSE 8000
+
+CMD ["/app/scripts/start-api.sh"]
