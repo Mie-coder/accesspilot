@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -5,7 +6,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from accesspilot.db.models import WorkspaceRecord
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore, hash_workspace_token
 from accesspilot.domain.models import ParsedReply
-from accesspilot.events import append_workspace_event
+from accesspilot.events import UnsafeEventError, append_workspace_event
 from accesspilot.main import create_app
 
 
@@ -103,16 +104,14 @@ def test_chat_api_returns_429_after_quota_and_history_remains_available(
     assert token is not None
     with database_session_factory() as session:
         workspace = session.scalar(
-            select(WorkspaceRecord).where(
-                WorkspaceRecord.token_hash == hash_workspace_token(token)
-            )
+            select(WorkspaceRecord).where(WorkspaceRecord.token_hash == hash_workspace_token(token))
         )
         assert workspace is not None
         workspace.model_call_limit = 1
         session.commit()
 
     first = client.post("/api/chat/messages", json={"content": "我是 EMP-001"})
-    exhausted = client.post("/api/chat/messages", json={"content": "再调用一次"})
+    exhausted = client.post("/api/chat/messages", json={"content": "申请 7 天"})
     history = client.get("/api/events")
     quota = client.get("/api/model-quota")
 
@@ -121,7 +120,7 @@ def test_chat_api_returns_429_after_quota_and_history_remains_available(
     assert exhausted.json() == {"detail": "模型调用额度已用尽，当前为只读回放模式"}
     assert history.status_code == 200
     assert "我是 EMP-001" in history.text
-    assert "再调用一次" not in history.text
+    assert "申请 7 天" not in history.text
     assert quota.json() == {"used": 1, "limit": 1, "remaining": 0}
     assert model.calls == 1
 
@@ -147,3 +146,30 @@ def test_chat_api_rejects_oversized_message_before_consuming_quota(
     assert quota.json() == {"used": 0, "limit": 20, "remaining": 20}
     assert history.text == ""
     assert model.calls == 0
+
+
+def test_event_payload_rejects_sensitive_string_values(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    client = TestClient(
+        create_app(
+            store=SqlAlchemyWorkspaceStore(database_session_factory),
+            session_factory=database_session_factory,
+        )
+    )
+    client.post("/api/workspaces")
+    token = client.cookies.get("accesspilot_workspace")
+    assert token is not None
+
+    with database_session_factory() as session:
+        with pytest.raises(UnsafeEventError):
+            append_workspace_event(
+                session,
+                workspace_token=token,
+                event_type="draft.updated",
+                payload={
+                    "draft": {"justification": "API_KEY=sk-secret-123456"},
+                    "missing_fields": [],
+                    "can_enter_approval": False,
+                },
+            )

@@ -1,6 +1,7 @@
 """安全 Workspace 事件、SSE 回放与模型调用配额。"""
 
 import json
+import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -59,6 +60,13 @@ class RecoverableErrorPayload(BaseModel):
     message: str = Field(min_length=1, max_length=1_000)
 
 
+class SecurityNoticePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1, max_length=100)
+    message: str = Field(min_length=1, max_length=1_000)
+
+
 SAFE_EVENT_MODELS: dict[str, type[BaseModel]] = {
     "message.user": MessagePayload,
     "message.assistant": MessagePayload,
@@ -66,6 +74,7 @@ SAFE_EVENT_MODELS: dict[str, type[BaseModel]] = {
     "draft.updated": DraftUpdatedPayload,
     "business.status": BusinessStatusPayload,
     "error.recoverable": RecoverableErrorPayload,
+    "security.notice": SecurityNoticePayload,
 }
 
 FORBIDDEN_EVENT_KEYS = {
@@ -77,6 +86,12 @@ FORBIDDEN_EVENT_KEYS = {
     "reasoning_content",
     "secret",
 }
+
+SENSITIVE_EVENT_VALUE_PATTERNS = (
+    re.compile(r"(?i)\b(?:sk|ds)-[a-z0-9_-]{8,}"),
+    re.compile(r"(?i)\bbearer\s+\S+"),
+    re.compile(r"(?i)\bapi[_ -]?key\s*[:=]\s*\S+"),
+)
 
 
 class ModelQuota(BaseModel):
@@ -91,9 +106,7 @@ class ModelQuota(BaseModel):
 
 def _load_workspace(session: Session, token: str) -> WorkspaceRecord:
     workspace = session.scalar(
-        select(WorkspaceRecord).where(
-            WorkspaceRecord.token_hash == hash_workspace_token(token)
-        )
+        select(WorkspaceRecord).where(WorkspaceRecord.token_hash == hash_workspace_token(token))
     )
     if workspace is None:
         raise EventWorkspaceNotFoundError(token)
@@ -111,12 +124,26 @@ def _has_forbidden_key(value: object) -> bool:
     return False
 
 
-def _validate_event_payload(
+def _has_sensitive_value(value: object) -> bool:
+    """递归拦截 payload 字符串里的常见凭证形态。"""
+
+    if isinstance(value, dict):
+        return any(_has_sensitive_value(nested) for nested in value.values())
+    if isinstance(value, list):
+        return any(_has_sensitive_value(item) for item in value)
+    if isinstance(value, str):
+        return any(pattern.search(value) is not None for pattern in SENSITIVE_EVENT_VALUE_PATTERNS)
+    return False
+
+
+def validate_event_payload(
     event_type: str,
     payload: dict[str, object],
 ) -> dict[str, Any]:
+    """在写入数据库或其他业务状态前校验事件安全边界。"""
+
     model = SAFE_EVENT_MODELS.get(event_type)
-    if model is None or _has_forbidden_key(payload):
+    if model is None or _has_forbidden_key(payload) or _has_sensitive_value(payload):
         raise UnsafeEventError("事件类型或字段不在前端安全白名单中")
     try:
         validated = model.model_validate(payload)
@@ -158,7 +185,7 @@ def stage_workspace_event(
 ) -> WorkspaceEventRecord:
     """校验并暂存事件，由调用方与其他业务事实一起提交。"""
 
-    safe_payload = _validate_event_payload(event_type, payload)
+    safe_payload = validate_event_payload(event_type, payload)
     workspace = _load_workspace(session, workspace_token)
     event = WorkspaceEventRecord(
         workspace_id=workspace.id,

@@ -3,9 +3,17 @@
 import re
 
 import httpx
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session, sessionmaker
 
+from accesspilot.agent.routing import (
+    ConversationIntent,
+    DeterministicIntentRouter,
+    IntentRoute,
+    IntentRouter,
+    IntentRoutingFailed,
+    route_with_validation,
+)
 from accesspilot.agent.state import ConversationPhase
 from accesspilot.agent.structured_reply import (
     ReplyParsingFailed,
@@ -17,8 +25,11 @@ from accesspilot.events import (
     ModelQuota,
     append_workspace_event,
     consume_model_call,
+    get_model_quota,
+    validate_event_payload,
 )
-from accesspilot.tools.catalog import validate_access_request
+from accesspilot.tools.catalog import ToolResult, validate_access_request
+from accesspilot.tools.executor import execute_read_only_tool, tool_call_for_intent
 from accesspilot.workspaces import WorkspaceService
 
 
@@ -37,6 +48,9 @@ class ConversationTurn(BaseModel):
     phase: ConversationPhase
     business_status: str
     quota: ModelQuota
+    intent: ConversationIntent = "request_access"
+    security_flagged: bool = False
+    tool_results: list[ToolResult] = Field(default_factory=list)
 
 
 class DeterministicStructuredReplyModel:
@@ -108,6 +122,117 @@ def _missing_field_question(field_name: str) -> str:
     return questions[field_name]
 
 
+SECURITY_MESSAGE = (
+    "我不能提供系统提示词、API Key、隐藏推理或帮助绕过权限；可以继续处理公开的权限业务需求。"
+)
+
+
+def _redact_sensitive_content(content: str) -> str:
+    """在事件回放与模型输入前隐藏常见密钥形态。"""
+
+    redacted = re.sub(
+        r"(?i)\b(?:sk|ds)-[a-z0-9_-]{8,}",
+        "[已隐藏疑似密钥]",
+        content,
+    )
+    redacted = re.sub(
+        r"(?i)api[_ -]?key\s*[:=]\s*\S+",
+        "[已隐藏 API Key]",
+        redacted,
+    )
+    return re.sub(
+        r"(?i)bearer\s+\S+",
+        "[已隐藏 Bearer 凭证]",
+        redacted,
+    )
+
+
+def _is_request_collection_follow_up(
+    content: str,
+    missing_fields: list[str],
+) -> bool:
+    """只把能对应下一缺失字段的短句当作申请续答。"""
+
+    if not missing_fields:
+        return False
+    normalized = content.casefold().strip()
+    next_field = missing_fields[0]
+    if next_field == "entitlement_id":
+        return any(
+            marker in normalized for marker in ("客户导出", "看板查看", "代码仓库", "仓库只读")
+        )
+    if next_field == "duration_days":
+        return re.search(r"\d+\s*天", normalized) is not None
+    if next_field == "justification":
+        return any(
+            marker in normalized
+            for marker in (
+                "因为",
+                "用于",
+                "为了",
+                "核对",
+                "排查",
+                "分析",
+                "开发",
+                "测试",
+                "运营",
+                "审计",
+                "交付",
+                "项目",
+                "业务",
+                "数据",
+            )
+        )
+    return False
+
+
+def _tool_answer(route: IntentRoute, result: ToolResult | None) -> str:
+    """用确定性模板把工具事实转成用户可读回答。"""
+
+    if result is not None and result.status not in {"success", "request_not_found"}:
+        return "当前无法在后端事实源中完成查询，请检查演示身份后重试。"
+    if route.intent == "discover_eligible_access" and result is not None:
+        eligible_items = result.eligible_access or []
+        if not eligible_items:
+            return "根据当前演示身份，暂时没有可以自助申请的权限。"
+        names = "、".join(item.name for item in eligible_items)
+        return f"根据当前演示身份，你可以申请 {len(eligible_items)} 项权限：{names}。"
+    if route.intent == "list_active_access" and result is not None:
+        active_items = result.active_access or []
+        if not active_items:
+            return "当前演示身份没有仍在有效期内的已开通权限。"
+        names = "、".join(item.name for item in active_items)
+        return f"当前有效授权共 {len(active_items)} 项：{names}。"
+    if route.intent == "request_status" and result is not None:
+        status = result.request_status
+        if status is None:
+            return "当前演示身份还没有可查询的正式申请。"
+        approval = status.approval_status or "尚未启动审批"
+        granted = "已开通" if status.access_granted else "未开通"
+        return f"最近申请状态为 {status.request_status}，审批为 {approval}，权限{granted}。"
+    if route.intent == "policy_question":
+        return "我已识别到这是政策问题。完整政策检索将在下一阶段接入；现在不会编造政策依据。"
+    if route.intent == "security_probe":
+        return SECURITY_MESSAGE
+    return "我可以帮你查询可申请权限、当前有效授权、申请状态，或发起权限申请。"
+
+
+def _append_security_notice(
+    session_factory: sessionmaker[Session],
+    *,
+    workspace_token: str,
+) -> None:
+    _append_event(
+        session_factory,
+        workspace_token=workspace_token,
+        event_type="security.notice",
+        payload={
+            "code": "SENSITIVE_INTERNAL_REQUEST",
+            "message": SECURITY_MESSAGE,
+        },
+    )
+
+
 def handle_chat_message(
     session_factory: sessionmaker[Session],
     *,
@@ -115,14 +240,103 @@ def handle_chat_message(
     workspace_token: str,
     content: str,
     model: StructuredReplyModel,
+    router: IntentRouter | None = None,
 ) -> ConversationTurn:
-    """消费一次模型额度，合并草稿并写入白名单事件。"""
+    """先路由再执行；只有申请意图消费模型额度并修改草稿。"""
 
     normalized_content = content.strip()
     if not normalized_content:
         raise ConversationInputError("消息不能为空")
 
     workspace = workspace_service.get(workspace_token)
+    active_router = router or DeterministicIntentRouter()
+    try:
+        route = route_with_validation(normalized_content, active_router)
+    except IntentRoutingFailed as error:
+        raise ConversationInputError("暂时无法可靠识别该请求意图") from error
+    if (
+        route.intent == "help"
+        and workspace.draft is not None
+        and _is_request_collection_follow_up(
+            normalized_content,
+            workspace.draft.missing_fields(),
+        )
+    ):
+        # 已经进入申请收集时，“做数据核对”这类简短回答是当前缺失字段。
+        route = IntentRoute(
+            intent="request_access",
+            security_probe=route.security_probe,
+        )
+    safe_content = _redact_sensitive_content(normalized_content)
+    current_draft = workspace.draft or RequestDraft(employee_id=workspace.actor_id)
+
+    if route.intent != "request_access":
+        with session_factory() as session:
+            quota = get_model_quota(session, workspace_token=workspace_token)
+            call = tool_call_for_intent(route.intent)
+            result = (
+                execute_read_only_tool(
+                    session,
+                    workspace_token=workspace_token,
+                    call=call,
+                )
+                if call is not None
+                else None
+            )
+        _append_event(
+            session_factory,
+            workspace_token=workspace_token,
+            event_type="message.user",
+            payload={"content": safe_content},
+        )
+        if route.security_probe:
+            _append_security_notice(
+                session_factory,
+                workspace_token=workspace_token,
+            )
+        assistant_message = _tool_answer(route, result)
+        if route.security_probe and route.intent != "security_probe":
+            assistant_message = f"{SECURITY_MESSAGE}\n\n{assistant_message}"
+        if call is not None and result is not None:
+            _append_event(
+                session_factory,
+                workspace_token=workspace_token,
+                event_type="tool.summary",
+                payload={
+                    "tool": call.tool,
+                    "status": result.status,
+                    "summary": assistant_message,
+                },
+            )
+        _append_event(
+            session_factory,
+            workspace_token=workspace_token,
+            event_type="business.status",
+            payload={"status": "answered"},
+        )
+        _append_event(
+            session_factory,
+            workspace_token=workspace_token,
+            event_type="message.assistant",
+            payload={"content": assistant_message},
+        )
+        phase = (
+            ConversationPhase.COLLECTING
+            if current_draft.missing_fields()
+            else ConversationPhase.AWAITING_CONFIRMATION
+        )
+        return ConversationTurn(
+            assistant_message=assistant_message,
+            draft=current_draft,
+            missing_fields=current_draft.missing_fields(),
+            phase=phase,
+            business_status="answered",
+            quota=quota,
+            intent=route.intent,
+            security_flagged=route.security_probe,
+            tool_results=[result] if result is not None else [],
+        )
+
     if (
         workspace.draft is not None
         and workspace.draft.employee_id is not None
@@ -137,11 +351,16 @@ def handle_chat_message(
         session_factory,
         workspace_token=workspace_token,
         event_type="message.user",
-        payload={"content": normalized_content},
+        payload={"content": safe_content},
     )
+    if route.security_probe:
+        _append_security_notice(
+            session_factory,
+            workspace_token=workspace_token,
+        )
 
-    current_draft = workspace.draft or RequestDraft(employee_id=workspace.actor_id)
     try:
+
         def consume_retry_quota() -> None:
             nonlocal quota
             with session_factory() as retry_session:
@@ -151,15 +370,31 @@ def handle_chat_message(
                 )
 
         parsed = parse_reply_with_retry(
-            normalized_content,
+            safe_content,
             model,
             before_retry=consume_retry_quota,
         )
-        # 模型可以理解用户文本，但无权更改 Workspace 的身份事实。
-        parsed = parsed.model_copy(update={"employee_id": workspace.actor_id})
+        # 模型可以理解用户文本，但无权更改身份事实或把疑似密钥写入草稿。
+        parsed = parsed.model_copy(
+            update={
+                "employee_id": workspace.actor_id,
+                "entitlement_id": (
+                    _redact_sensitive_content(parsed.entitlement_id)
+                    if parsed.entitlement_id is not None
+                    else None
+                ),
+                "justification": (
+                    _redact_sensitive_content(parsed.justification)
+                    if parsed.justification is not None
+                    else None
+                ),
+            }
+        )
     except (ReplyParsingFailed, httpx.HTTPError, TimeoutError):
         # 模型和网络错误都失败闭合；不把异常详情、请求头或隐藏推理发给浏览器。
         assistant_message = "我暂时没能可靠理解这条消息，请稍后重试或换一种说法。"
+        if route.security_probe:
+            assistant_message = f"{SECURITY_MESSAGE}\n\n{assistant_message}"
         _append_event(
             session_factory,
             workspace_token=workspace_token,
@@ -182,20 +417,25 @@ def handle_chat_message(
             phase=ConversationPhase.RECOVERABLE_ERROR,
             business_status="recoverable_error",
             quota=quota,
+            intent=route.intent,
+            security_flagged=route.security_probe,
         )
 
     draft = _merge_reply(current_draft, parsed)
-    workspace_service.save_draft(workspace_token, draft)
     missing_fields = draft.missing_fields()
+    draft_event_payload: dict[str, object] = {
+        "draft": draft.model_dump(mode="json"),
+        "missing_fields": missing_fields,
+        "can_enter_approval": draft.can_enter_approval(),
+    }
+    # 先通过前端事件安全边界，再持久化同一份草稿，避免失败后留下敏感残留。
+    validate_event_payload("draft.updated", draft_event_payload)
+    workspace_service.save_draft(workspace_token, draft)
     _append_event(
         session_factory,
         workspace_token=workspace_token,
         event_type="draft.updated",
-        payload={
-            "draft": draft.model_dump(mode="json"),
-            "missing_fields": missing_fields,
-            "can_enter_approval": draft.can_enter_approval(),
-        },
+        payload=draft_event_payload,
     )
 
     if missing_fields:
@@ -233,6 +473,9 @@ def handle_chat_message(
             business_status = "awaiting_confirmation"
             assistant_message = "申请信息已完整。请明确回复“确认提交”后再创建正式申请。"
 
+    if route.security_probe:
+        assistant_message = f"{SECURITY_MESSAGE}\n\n{assistant_message}"
+
     _append_event(
         session_factory,
         workspace_token=workspace_token,
@@ -252,4 +495,6 @@ def handle_chat_message(
         phase=phase,
         business_status=business_status,
         quota=quota,
+        intent=route.intent,
+        security_flagged=route.security_probe,
     )

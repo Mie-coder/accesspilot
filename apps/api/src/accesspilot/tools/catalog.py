@@ -78,6 +78,7 @@ class ValidationIssue(BaseModel):
 class RequestStatusSummary(BaseModel):
     """一份申请可由数据库证实的当前状态。"""
 
+    request_id: str | None = None
     request_status: str
     approval_status: str | None
     access_granted: bool
@@ -402,6 +403,7 @@ def get_request_status(session: Session, request_id: str) -> ToolResult:
     return ToolResult(
         status="success",
         request_status=RequestStatusSummary(
+            request_id=str(request.id),
             request_status=request.request_status,
             approval_status=(
                 approval_case.approval_status if approval_case is not None else None
@@ -409,3 +411,35 @@ def get_request_status(session: Session, request_id: str) -> ToolResult:
             access_granted=access_granted,
         ),
     )
+
+
+def get_latest_request_status(
+    session: Session,
+    *,
+    workspace_token: str,
+) -> ToolResult:
+    """查询 Workspace 当前后端身份最近的一份申请状态。"""
+
+    if not workspace_token:
+        return ToolResult(status="invalid_argument")
+    workspace = session.scalar(
+        select(WorkspaceRecord).where(
+            WorkspaceRecord.token_hash == hash_workspace_token(workspace_token)
+        )
+    )
+    if workspace is None:
+        return ToolResult(status="workspace_not_found")
+    if session.get(EmployeeRecord, workspace.actor_id) is None:
+        return ToolResult(status="employee_not_found")
+    request = session.scalar(
+        select(AccessRequestRecord)
+        .where(
+            AccessRequestRecord.workspace_id == workspace.id,
+            AccessRequestRecord.requester_id == workspace.actor_id,
+        )
+        .order_by(AccessRequestRecord.created_at.desc(), AccessRequestRecord.id.desc())
+        .limit(1)
+    )
+    if request is None:
+        return ToolResult(status="request_not_found")
+    return get_request_status(session, str(request.id))

@@ -34,6 +34,7 @@ function eventCopy(event: WorkspaceEvent): { title: string; detail: string } | n
       submitted: '正式申请已创建，等待进入审批',
       validation_failed: '目录校验未通过',
       recoverable_error: '本轮可安全重试',
+      answered: '只读咨询已回答',
     }
     const status = typeof event.payload.status === 'string' ? event.payload.status : ''
     return { title: '业务状态更新', detail: labels[status] ?? status }
@@ -42,6 +43,12 @@ function eventCopy(event: WorkspaceEvent): { title: string; detail: string } | n
     return {
       title: '发生可恢复错误',
       detail: typeof event.payload.message === 'string' ? event.payload.message : '可稍后重试',
+    }
+  }
+  if (event.type === 'security.notice') {
+    return {
+      title: '安全边界已生效',
+      detail: typeof event.payload.message === 'string' ? event.payload.message : '已拒绝敏感内部信息请求',
     }
   }
   return null

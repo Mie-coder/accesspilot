@@ -17,6 +17,9 @@ const turn: ChatTurn = {
   phase: 'collecting',
   business_status: 'collecting',
   quota: { used: 1, limit: 20, remaining: 19 },
+  intent: 'request_access',
+  security_flagged: false,
+  tool_results: [],
 }
 
 afterEach(() => {

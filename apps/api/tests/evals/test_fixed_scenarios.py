@@ -368,14 +368,14 @@ def test_eval_10_quota_exhaustion_keeps_history_readable(
         session.commit()
 
     first = eval_client.post("/api/chat/messages", json={"content": "我是 EMP-001"})
-    exhausted = eval_client.post("/api/chat/messages", json={"content": "再调用一次"})
+    exhausted = eval_client.post("/api/chat/messages", json={"content": "申请 7 天"})
     history = eval_client.get("/api/events")
 
     assert first.status_code == 200
     assert exhausted.status_code == 429
     assert history.status_code == 200
     assert "我是 EMP-001" in history.text
-    assert "再调用一次" not in history.text
+    assert "申请 7 天" not in history.text
 
 
 def test_eval_11_workspace_cannot_read_another_request(

@@ -19,6 +19,9 @@ export interface ChatTurn {
   phase: string
   business_status: string
   quota: ModelQuota
+  intent: string
+  security_flagged: boolean
+  tool_results: Array<Record<string, unknown>>
 }
 
 export interface WorkspaceEvent {
