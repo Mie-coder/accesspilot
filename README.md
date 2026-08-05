@@ -2,6 +2,13 @@
 
 AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent。它演示员工如何通过多轮对话提交权限申请，并经过风险审查、人工审批和实际权限开通。
 
+## 当前版本与进度
+
+- **稳定基线：MVP v1.0** — T01–T08 已完成本地实现和验收；没有推送、部署或接入真实企业系统。
+- **开发版本：v1.1** — 产品化权限助手，T09–T14 已确认；当前按顺序实施 T09–T11。
+- **本轮目标：** 后端绑定演示身份、按身份查询可申请/已拥有权限、多意图路由与只读工具执行。
+- **后续目标：** T12 政策问答与提示词攻击防护、T13 前端回答卡片、T14 产品化评测和简历证据。
+
 ## 项目目标
 
 - 多轮对话补全结构化申请草稿；
@@ -30,12 +37,20 @@ AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent�
 ## 目录结构
 
 ```text
-apps/api/src/accesspilot/    Python API 与领域代码
-apps/api/tests/              后端 pytest 测试
-apps/web/                    React + Vite 前端
-docs/                        产品计划、架构流程和 ADR
-CONTEXT.md                   项目术语表
+apps/api/                    FastAPI 后端、数据库迁移与 pytest 测试
+apps/web/                    React + Vite 前端与组件测试
+docs/                        产品规格、Tickets、架构、ADR 与学习资料
+deploy/                      Nginx 等部署配置
+scripts/                     启动、评测与本地验收脚本
+compose.yaml                 前后端、PostgreSQL 的容器编排
+pyproject.toml               Python 依赖与质量工具配置
+package.json                 前端 Workspace 的统一命令入口
+CONTEXT.md                   项目业务术语表
 ```
+
+这是前后端分离的 Monorepo：React 和 FastAPI 分别位于 `apps/web` 与 `apps/api`，通过 HTTP API/SSE 通信，只是共享同一个 Git 仓库、文档和交付配置。详细职责见 [`apps/README.md`](apps/README.md) 与 [`docs/README.md`](docs/README.md)。教学记录集中在 [`docs/learning`](docs/learning/README.md)，不参与应用运行。
+
+本地开发还会生成 `.venv/`、`node_modules/`、`postgres-data/`、测试缓存和浏览器测试缓存。这些目录已被 Git 忽略，只是依赖或本地运行数据，不属于产品源码，也不应合并进 `apps/`。
 
 ## 本地开发
 

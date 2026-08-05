@@ -1,0 +1,45 @@
+/* AccessPilot 教学 Workspace 的共享课程样式。 */
+:root {
+  color-scheme: light;
+  --paper: #fbfaf7;
+  --ink: #1f2933;
+  --muted: #61707d;
+  --line: #d9d5cc;
+  --accent: #b94b35;
+  --code: #f1eee7;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: ui-serif, Georgia, "Noto Serif SC", serif;
+  line-height: 1.75;
+}
+
+main {
+  width: min(760px, calc(100% - 40px));
+  margin: 56px auto 96px;
+}
+
+h1, h2 { line-height: 1.2; letter-spacing: -0.02em; }
+h1 { font-size: clamp(2rem, 6vw, 3.8rem); margin-bottom: 0.3em; }
+h2 { margin-top: 2.2em; }
+p, li { font-size: 1.06rem; }
+.eyebrow, .meta { color: var(--muted); font-family: ui-sans-serif, system-ui, sans-serif; }
+.eyebrow { color: var(--accent); font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em; }
+.card {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 20px 24px;
+  margin: 24px 0;
+  background: rgba(255, 255, 255, 0.55);
+}
+pre, code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+pre { overflow-x: auto; background: var(--code); padding: 18px; border-radius: 10px; }
+code { font-size: 0.92em; }
+a { color: var(--accent); text-underline-offset: 3px; }
+footer { margin-top: 64px; border-top: 1px solid var(--line); padding-top: 20px; color: var(--muted); }
+@media print { body { background: white; } main { margin: 24px auto; } }

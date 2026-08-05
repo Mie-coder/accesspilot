@@ -45,6 +45,8 @@ Store keys only in `.env`; commit `.env.example` with placeholders. Do not expos
 
 ## 学习进度协议
 
+`$teach` 的教学 Workspace 固定为 `docs/learning/`。`MISSION.md`、`RESOURCES.md`、`NOTES.md`、`GLOSSARY.md`、`assets/`、`lessons/`、`learning-records/` 与 `reference/` 都从该目录读写，不得重新散落到项目根目录。
+
 每次开始辅导前，先读取 `docs/superpowers/plans/2026-07-12-accesspilot-learning-schedule.md` 和 `git status`，明确告诉学习者：当前 Day、已完成检查点、下一项检查点。只有获得测试输出、运行结果、代码或提交记录后，才能将对应的 `[ ]` 改为 `[x]`；不得根据推测勾选。默认采用教学模式：学习者亲手编写核心业务逻辑，Agent 主动补充测试、运行 pytest/Ruff/MyPy 等验证并处理测试与规范问题。除非学习者明确要求，不得直接实现业务功能。要求学习者编码前，必须先用中文说明业务问题、文件职责、数据流、关键语法和面试表达，并用一个理解问题确认学习者明白后再给编码步骤。
 
 ## 跨日复盘协议
