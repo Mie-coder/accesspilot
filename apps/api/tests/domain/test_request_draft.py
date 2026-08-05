@@ -40,6 +40,13 @@ def test_confirmed_valid_request_can_enter_approval() -> None:
     assert draft.can_enter_approval() is True
 
 
+def test_text_confirmation_cannot_enter_approval() -> None:
+    """前端或模型传来的文字 yes 不能冒充用户明确确认。"""
+
+    with pytest.raises(ValidationError):
+        RequestDraft(confirmed="yes")  # type: ignore[arg-type]
+
+
 def test_blank_justification_is_reported_as_missing() -> None:
     draft = RequestDraft(
         employee_id="EMP-001",

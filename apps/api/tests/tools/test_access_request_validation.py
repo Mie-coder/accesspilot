@@ -1,7 +1,5 @@
 """validate_access_request 的行为合同。"""
 
-from datetime import date
-
 from sqlalchemy.orm import Session
 
 from accesspilot.db.seed import seed_catalog
@@ -13,13 +11,10 @@ def complete_draft(*, duration_days: int = 30) -> RequestDraft:
     """构造一份字段完整的虚构权限申请草稿。"""
 
     return RequestDraft(
-        system_name="数据洞察中心",
-        entitlement_name="脱敏客户数据导出",
-        project_code="PROJECT-001",
-        data_scope="华东地区脱敏客户数据",
-        business_reason="产品运营分析",
-        start_date=date(2026, 7, 26),
+        employee_id="EMP-001",
+        entitlement_id="insighthub.customer_export",
         duration_days=duration_days,
+        justification="产品运营分析",
     )
 
 
@@ -30,8 +25,6 @@ def test_accepts_an_eligible_complete_request(database_session: Session) -> None
 
     result = validate_access_request(
         database_session,
-        "EMP-001",
-        "insighthub.customer_export",
         complete_draft(),
     )
 
@@ -46,9 +39,9 @@ def test_rejects_unknown_entitlement(database_session: Session) -> None:
 
     result = validate_access_request(
         database_session,
-        "EMP-001",
-        "missing.entitlement",
-        complete_draft(),
+        complete_draft().model_copy(
+            update={"entitlement_id": "missing.entitlement"}
+        ),
     )
 
     assert result.status == "entitlement_not_found"
@@ -62,15 +55,13 @@ def test_rejects_incomplete_draft(database_session: Session) -> None:
 
     result = validate_access_request(
         database_session,
-        "EMP-001",
-        "insighthub.customer_export",
         RequestDraft(),
     )
 
     assert result.status == "validation_failed"
     assert result.issues is not None
-    assert result.issues[0].code == "missing_fields:system_name"
-    assert result.issues[0].message == "缺少必填字段：系统名称"
+    assert result.issues[0].code == "missing_fields:employee_id"
+    assert result.issues[0].message == "缺少必填字段：员工编号"
 
 
 def test_rejects_non_self_service_entitlement(database_session: Session) -> None:
@@ -80,9 +71,9 @@ def test_rejects_non_self_service_entitlement(database_session: Session) -> None
 
     result = validate_access_request(
         database_session,
-        "EMP-001",
-        "insighthub.raw_customer_export",
-        complete_draft(),
+        complete_draft().model_copy(
+            update={"entitlement_id": "insighthub.raw_customer_export"}
+        ),
     )
 
     assert result.status == "validation_failed"
@@ -98,8 +89,6 @@ def test_rejects_duration_above_catalog_limit(database_session: Session) -> None
 
     result = validate_access_request(
         database_session,
-        "EMP-001",
-        "insighthub.customer_export",
         complete_draft(duration_days=31),
     )
 

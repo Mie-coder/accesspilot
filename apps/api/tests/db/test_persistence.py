@@ -1,6 +1,6 @@
 """跨 Session 的 PostgreSQL 持久化集成测试。"""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from hashlib import sha256
 from uuid import uuid4
 
@@ -33,11 +33,8 @@ def test_new_session_reads_committed_request_and_audit(
             workspace_id=workspace.id,
             requester_id="EMP-001",
             entitlement_code="insighthub.customer_export",
-            project_code="PRJ-AURORA",
-            data_scope="华南区脱敏客户数据",
-            business_reason="核验项目运营数据",
-            start_date=date(2026, 7, 20),
             duration_days=14,
+            justification="核验项目运营数据",
             request_status="submitted",
             confirmed_at=datetime.now(UTC),
         )
@@ -52,7 +49,7 @@ def test_new_session_reads_committed_request_and_audit(
                 actor_type="employee",
                 actor_id="EMP-001",
                 event_type="request.submitted",
-                details={"project_code": "PRJ-AURORA"},
+                details={"justification": "核验项目运营数据"},
             )
         )
         request_id = request.id
@@ -68,6 +65,6 @@ def test_new_session_reads_committed_request_and_audit(
         )
 
         assert stored_request is not None
-        assert stored_request.project_code == "PRJ-AURORA"
+        assert stored_request.justification == "核验项目运营数据"
         assert stored_audit is not None
         assert stored_audit.event_type == "request.submitted"

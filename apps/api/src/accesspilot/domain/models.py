@@ -1,6 +1,6 @@
 """权限申请领域数据模型。"""
 
-from pydantic import BaseModel, ConfigDict, StrictInt, field_validator
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, field_validator
 from pydantic_core import PydanticCustomError
 
 
@@ -13,7 +13,8 @@ class RequestDraft(BaseModel):
     entitlement_id: str | None = None
     duration_days: StrictInt | None = None
     justification: str | None = None
-    confirmed: bool = False
+    # 确认必须是 JSON 布尔值；"yes"、1 等宽松值不能越过提交守卫。
+    confirmed: StrictBool = False
 
     @field_validator("duration_days")
     @classmethod
@@ -58,3 +59,15 @@ class RequestDraft(BaseModel):
 
         # 这里只表达送审守卫，不代表审批通过，更不代表权限已开通。
         return not self.missing_fields() and self.confirmed
+
+
+class ParsedReply(BaseModel):
+    """模型从单句用户回复中提取出的草稿增量。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    employee_id: str | None = None
+    entitlement_id: str | None = None
+    duration_days: StrictInt | None = None
+    justification: str | None = None
+    confirmed: StrictBool | None = None

@@ -1,6 +1,6 @@
 """AccessPilot 的 SQLAlchemy ORM 数据表模型。"""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -8,7 +8,6 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
-    Date,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -211,11 +210,8 @@ class AccessRequestRecord(Base):
     )
 
     # 以下是用户确认时冻结的业务内容。
-    project_code: Mapped[str] = mapped_column(String(100))
-    data_scope: Mapped[str] = mapped_column(Text)
-    business_reason: Mapped[str] = mapped_column(Text)
-    start_date: Mapped[date] = mapped_column(Date)
     duration_days: Mapped[int] = mapped_column(Integer)
+    justification: Mapped[str] = mapped_column(Text)
     request_status: Mapped[str] = mapped_column(String(40))
 
     # confirmed_at 记录用户动作；created_at 记录 ORM 创建记录的时间。

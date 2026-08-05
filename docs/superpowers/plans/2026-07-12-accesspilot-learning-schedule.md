@@ -133,7 +133,8 @@
 
 ## Day 12：React 对话申请台
 
-- [ ] 创建总体布局和演示角色选择器。
+- [ ] 使用 assistant-ui 创建总体布局、对话线程和演示角色选择器。
+- [ ] 使用 `LocalRuntime + ChatModelAdapter` 对接自有 FastAPI/SSE，业务状态仍以 Workspace/PostgreSQL 为准。
 - [ ] 实现聊天记录、流式事件和工具调用卡片。
 - [ ] 实现申请草稿卡片与人工确认操作。
 - [ ] 为工具失败、确认和流式状态编写组件测试。

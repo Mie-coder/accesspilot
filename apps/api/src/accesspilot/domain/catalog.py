@@ -76,7 +76,7 @@ POLICIES = (
     PolicyClause(
         code="POL-001",
         title="申请字段完整性",
-        content="权限申请必须包含项目编码、数据范围、业务用途、开始日期和授权期限。",
+        content="权限申请必须包含申请人、具体权限、授权期限和明确的业务理由。",
     ),
     PolicyClause(
         code="POL-002",
@@ -90,8 +90,8 @@ POLICIES = (
     ),
     PolicyClause(
         code="POL-004",
-        title="客户数据导出期限与范围",
-        content="客户数据导出权限必须限制数据范围和使用期限，不得授予无限期访问。",
+        title="客户数据导出期限与用途",
+        content="客户数据导出权限必须说明业务用途并限制使用期限，不得授予无限期访问。",
     ),
     PolicyClause(
         code="POL-005",

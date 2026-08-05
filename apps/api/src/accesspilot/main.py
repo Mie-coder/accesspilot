@@ -1,11 +1,18 @@
 """FastAPI 应用入口"""
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from sqlalchemy.orm import Session, sessionmaker
 
 from accesspilot.config import Settings
 from accesspilot.db.session import build_engine, build_session_factory
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
 from accesspilot.domain.models import RequestDraft
+from accesspilot.requests import (
+    RequestNotReadyError,
+    RequestValidationError,
+    RequestWorkspaceNotFoundError,
+    submit_access_request,
+)
 from accesspilot.workspaces import (
     UnknownWorkspaceError,
     Workspace,
@@ -14,15 +21,20 @@ from accesspilot.workspaces import (
 )
 
 
-def create_app(settings: Settings | None = None, store: WorkspaceStore | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    store: WorkspaceStore | None = None,
+    session_factory: sessionmaker[Session] | None = None,
+) -> FastAPI:
     """创建一个可配置、可测试的 FastAPI 应用。"""
     active_settings = settings or Settings()
+    active_session_factory = session_factory or build_session_factory(
+        build_engine(active_settings.database_url)
+    )
     if store is None:
         # 实际启动时默认用 PostgreSQL，所以 API 重启不会丢失 Workspace。
         # 测试需要纯内存存储时，会通过 store= 显式注入。
-        store = SqlAlchemyWorkspaceStore(
-            build_session_factory(build_engine(active_settings.database_url))
-        )
+        store = SqlAlchemyWorkspaceStore(active_session_factory)
     workspace_service = WorkspaceService(store)
     app = FastAPI(title=active_settings.app_name)
 
@@ -104,6 +116,43 @@ def create_app(settings: Settings | None = None, store: WorkspaceStore | None = 
                 if workspace.draft is not None
                 else None
             )
+        }
+
+    @app.post("/api/requests", status_code=201)
+    def submit_request(
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> dict[str, str]:
+        """把当前 Workspace 中已明确确认的草稿冻结为正式申请。"""
+
+        if workspace.draft is None or workspace.draft.missing_fields():
+            raise HTTPException(status_code=409, detail="申请草稿尚未完成")
+
+        with active_session_factory() as session:
+            try:
+                request = submit_access_request(
+                    session,
+                    workspace_token=workspace.token,
+                    draft=workspace.draft,
+                )
+            except RequestNotReadyError as error:
+                raise HTTPException(
+                    status_code=409,
+                    detail="申请草稿尚未明确确认",
+                ) from error
+            except RequestWorkspaceNotFoundError as error:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Workspace not found",
+                ) from error
+            except RequestValidationError as error:
+                raise HTTPException(
+                    status_code=422,
+                    detail="申请未通过目录校验",
+                ) from error
+
+        return {
+            "request_id": str(request.id),
+            "request_status": request.request_status,
         }
 
     return app

@@ -173,31 +173,15 @@ def list_entitlements(session: Session, system_code: str) -> ToolResult:
 
 def validate_access_request(
     session: Session,
-    employee_id: str,
-    entitlement_code: str,
     draft: RequestDraft,
 ) -> ToolResult:
     """按目录规则预校验一份权限申请。"""
 
-    if not employee_id.strip() or not entitlement_code.strip():
-        return ToolResult(status="invalid_argument")
-
-    employee = session.get(EmployeeRecord, employee_id)
-    if employee is None:
-        return ToolResult(status="employee_not_found")
-
-    entitlement = session.get(EntitlementRecord, entitlement_code)
-    if entitlement is None:
-        return ToolResult(status="entitlement_not_found")
-
     field_labels = {
-        "system_name": "系统名称",
-        "entitlement_name": "权限名称",
-        "project_code": "项目编码",
-        "data_scope": "数据范围",
-        "business_reason": "申请理由",
-        "start_date": "开始日期",
+        "employee_id": "员工编号",
+        "entitlement_id": "权限编号",
         "duration_days": "申请期限",
+        "justification": "申请理由",
     }
     issues: list[ValidationIssue] = [
         ValidationIssue(
@@ -206,6 +190,19 @@ def validate_access_request(
         )
         for field_name in draft.missing_fields()
     ]
+
+    # 草稿字段不完整时无法查询目录；一次返回全部缺项供 Agent 继续补全。
+    if draft.employee_id is None or draft.entitlement_id is None:
+        return ToolResult(status="validation_failed", issues=issues)
+
+    employee = session.get(EmployeeRecord, draft.employee_id)
+    if employee is None:
+        return ToolResult(status="employee_not_found")
+
+    entitlement = session.get(EntitlementRecord, draft.entitlement_id)
+    if entitlement is None:
+        return ToolResult(status="entitlement_not_found")
+
     # 目录禁止自助时，普通 Agent 流程不能创建该申请。
     if not entitlement.self_service_allowed:
         issues.append(

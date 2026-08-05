@@ -3,7 +3,7 @@
 ## 全局约束
 
 - 所有员工、系统、权限、政策和审批数据均为虚构内容。
-- 技术栈：React + TypeScript + Vite；FastAPI；LangChain/LangGraph；PostgreSQL + pgvector；DeepSeek Chat；百炼 `text-embedding-v4`（512 维）。
+- 技术栈：React + TypeScript + Vite + assistant-ui；FastAPI；LangChain/LangGraph；PostgreSQL + pgvector；DeepSeek Chat；百炼 `text-embedding-v4`（512 维）。
 - 黄金路径是限时申请 `InsightHub / 客户数据导出` 权限。
 - 申请人确认、直属经理审批和数据所有者审批必须完成后才能开通权限。
 - 审批和权限开通是两个独立状态；开通过程支持幂等和故障注入。
@@ -26,7 +26,7 @@
 
 ## 任务 4：React 演示应用
 
-实现三个页面：对话申请台、审批收件箱、申请与审计详情。添加角色、故障模式、重置和回放标识等演示工具栏。展示流式事件、工具卡片、草稿确认、政策引用和权限开通恢复流程，并补充组件和交互测试。
+实现三个页面：对话申请台、审批收件箱、申请与审计详情。对话申请台使用 assistant-ui 的 React primitives，并通过 `LocalRuntime + ChatModelAdapter` 对接自有 FastAPI/SSE；业务状态和线程历史仍以 Workspace/PostgreSQL 为准，不使用 assistant-ui Cloud 保存审批或授权事实。添加角色、故障模式、重置和回放标识等演示工具栏。展示流式事件、工具卡片、草稿确认、政策引用和权限开通恢复流程，并补充组件和交互测试。
 
 ## 任务 5：评测、部署与验收
 

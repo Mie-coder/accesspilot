@@ -82,15 +82,12 @@ def test_access_request_preserves_confirmed_business_facts() -> None:
         "workspace_id",
         "requester_id",
         "entitlement_code",
-        "project_code",
-        "data_scope",
-        "business_reason",
-        "start_date",
         "duration_days",
+        "justification",
         "request_status",
         "confirmed_at",
         "created_at",
-    } <= set(request.c.keys())
+    } == set(request.c.keys())
     assert {key.target_fullname for key in request.c.workspace_id.foreign_keys} == {"workspaces.id"}
     assert {key.target_fullname for key in request.c.requester_id.foreign_keys} == {
         "employees.employee_id"

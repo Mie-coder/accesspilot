@@ -1,6 +1,6 @@
 """get_request_status 的行为合同。"""
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import uuid4
 
@@ -27,11 +27,8 @@ def create_request(database_session: Session) -> AccessRequestRecord:
         workspace_id=workspace.id,
         requester_id="EMP-001",
         entitlement_code="insighthub.customer_export",
-        project_code="PROJECT-001",
-        data_scope="华东地区脱敏客户数据",
-        business_reason="产品运营分析",
-        start_date=date(2026, 7, 26),
         duration_days=30,
+        justification="产品运营分析",
         request_status="submitted",
         confirmed_at=datetime.now(UTC),
     )

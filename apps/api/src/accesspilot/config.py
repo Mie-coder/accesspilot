@@ -1,5 +1,6 @@
 """AccessPilot 应用配置。"""
 
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,8 +13,22 @@ class Settings(BaseSettings):
     database_url: str = (
         "postgresql+psycopg://accesspilot@127.0.0.1:55432/accesspilot"
     )
+    deepseek_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias="DEEPSEEK_API_KEY",
+    )
+    deepseek_model: str = Field(
+        default="deepseek-v4-flash",
+        validation_alias="DEEPSEEK_MODEL",
+    )
+    deepseek_base_url: str = Field(
+        default="https://api.deepseek.com",
+        validation_alias="DEEPSEEK_BASE_URL",
+    )
 
     model_config = SettingsConfigDict(
         env_prefix="ACCESSPILOT_",
+        env_file=".env",
+        env_file_encoding="utf-8",
         extra="ignore",
     )

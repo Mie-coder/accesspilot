@@ -13,3 +13,15 @@ def test_database_url_defaults_to_lightweight_local_postgres(
     assert Settings().database_url == (
         "postgresql+psycopg://accesspilot@127.0.0.1:55432/accesspilot"
     )
+
+
+def test_deepseek_settings_use_server_environment(monkeypatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "local-test-key")
+    monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+
+    settings = Settings()
+
+    assert settings.deepseek_api_key is not None
+    assert settings.deepseek_api_key.get_secret_value() == "local-test-key"
+    assert settings.deepseek_model == "deepseek-v4-flash"
+    assert "local-test-key" not in repr(settings)
