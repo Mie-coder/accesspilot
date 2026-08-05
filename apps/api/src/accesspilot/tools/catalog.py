@@ -1,4 +1,5 @@
 
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -13,7 +14,9 @@ from accesspilot.db.models import (
     EmployeeRecord,
     EntitlementRecord,
     SystemRecord,
+    WorkspaceRecord,
 )
+from accesspilot.db.workspace_store import hash_workspace_token
 from accesspilot.domain.models import RequestDraft
 
 '''给审批流程看的员工资料包'''
@@ -37,6 +40,32 @@ class EntitlementSummary(BaseModel):
     code: str
     name: str
     risk_level: str
+
+
+class EligibleAccessSummary(BaseModel):
+    """当前员工根据目录规则可以自助申请的权限。"""
+
+    code: str
+    name: str
+    system_code: str
+    system_name: str
+    risk_level: str
+    max_duration_days: int | None
+    approval_policy: str
+
+
+class ActiveAccessSummary(BaseModel):
+    """由真实 AccessGrant 证明且当前仍在有效期的授权。"""
+
+    grant_id: str
+    request_id: str
+    code: str
+    name: str
+    system_code: str
+    system_name: str
+    risk_level: str
+    starts_at: datetime
+    expires_at: datetime
 
 
 class ValidationIssue(BaseModel):
@@ -66,11 +95,14 @@ class ToolResult(BaseModel):
         "entitlement_not_found",
         "validation_failed",
         "request_not_found",
+        "workspace_not_found",
     ]
     employee:EmployeeContext | None = None
     manager:ManagerSummary | None = None
     systems:list[SystemSummary] | None = None
     entitlements: list[EntitlementSummary] | None = None
+    eligible_access: list[EligibleAccessSummary] | None = None
+    active_access: list[ActiveAccessSummary] | None = None
     issues: list[ValidationIssue] | None = None
     request_status: RequestStatusSummary | None = None
 
@@ -169,6 +201,113 @@ def list_entitlements(session: Session, system_code: str) -> ToolResult:
             for record in records
         ],
     )
+
+
+def list_eligible_access(
+    session: Session,
+    *,
+    workspace_token: str,
+) -> ToolResult:
+    """按 Workspace 后端身份的部门、角色和自助规则列出可申请权限。"""
+
+    if not workspace_token:
+        return ToolResult(status="invalid_argument")
+    workspace = session.scalar(
+        select(WorkspaceRecord).where(
+            WorkspaceRecord.token_hash == hash_workspace_token(workspace_token)
+        )
+    )
+    if workspace is None:
+        return ToolResult(status="workspace_not_found")
+    employee = session.get(EmployeeRecord, workspace.actor_id)
+    if employee is None:
+        return ToolResult(status="employee_not_found")
+
+    records = session.execute(
+        select(EntitlementRecord, SystemRecord)
+        .join(SystemRecord, SystemRecord.code == EntitlementRecord.system_code)
+        .where(EntitlementRecord.self_service_allowed.is_(True))
+        .order_by(EntitlementRecord.code)
+    ).all()
+    eligible = [
+        EligibleAccessSummary(
+            code=entitlement.code,
+            name=entitlement.name,
+            system_code=system.code,
+            system_name=system.name,
+            risk_level=entitlement.risk_level,
+            max_duration_days=entitlement.max_duration_days,
+            approval_policy=entitlement.approval_policy,
+        )
+        for entitlement, system in records
+        if employee.department in entitlement.eligible_departments
+        or bool(set(employee.roles) & set(entitlement.eligible_roles))
+    ]
+    # 没有符合条件的权限是正常空结果，不是系统错误。
+    return ToolResult(status="success", eligible_access=eligible)
+
+
+def list_active_access(
+    session: Session,
+    *,
+    workspace_token: str,
+    at: datetime | None = None,
+) -> ToolResult:
+    """仅返回当前 Workspace 中该员工已生效且未过期的授权。"""
+
+    if not workspace_token:
+        return ToolResult(status="invalid_argument")
+    workspace = session.scalar(
+        select(WorkspaceRecord).where(
+            WorkspaceRecord.token_hash == hash_workspace_token(workspace_token)
+        )
+    )
+    if workspace is None:
+        return ToolResult(status="workspace_not_found")
+    if session.get(EmployeeRecord, workspace.actor_id) is None:
+        return ToolResult(status="employee_not_found")
+
+    effective_at = at or datetime.now(UTC)
+    records = session.execute(
+        select(
+            AccessGrantRecord,
+            AccessRequestRecord,
+            EntitlementRecord,
+            SystemRecord,
+        )
+        .join(
+            AccessRequestRecord,
+            AccessRequestRecord.id == AccessGrantRecord.request_id,
+        )
+        .join(
+            EntitlementRecord,
+            EntitlementRecord.code == AccessRequestRecord.entitlement_code,
+        )
+        .join(SystemRecord, SystemRecord.code == EntitlementRecord.system_code)
+        .where(
+            AccessGrantRecord.workspace_id == workspace.id,
+            AccessRequestRecord.workspace_id == workspace.id,
+            AccessRequestRecord.requester_id == workspace.actor_id,
+            AccessGrantRecord.starts_at <= effective_at,
+            AccessGrantRecord.expires_at > effective_at,
+        )
+        .order_by(EntitlementRecord.code)
+    ).all()
+    active = [
+        ActiveAccessSummary(
+            grant_id=str(grant.id),
+            request_id=str(request.id),
+            code=entitlement.code,
+            name=entitlement.name,
+            system_code=system.code,
+            system_name=system.name,
+            risk_level=entitlement.risk_level,
+            starts_at=grant.starts_at,
+            expires_at=grant.expires_at,
+        )
+        for grant, request, entitlement, system in records
+    ]
+    return ToolResult(status="success", active_access=active)
 
 
 def validate_access_request(
