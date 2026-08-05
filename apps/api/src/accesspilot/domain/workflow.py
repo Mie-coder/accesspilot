@@ -5,7 +5,7 @@ from enum import StrEnum
 
 # 申请本身的状态
 class RequestStatus(StrEnum):
-    DRAFT = "draft",
+    DRAFT = "draft"
     AWAITING_CONFIRMATION = "awaiting_confirmation"
     SUBMITTED = "submitted"
     CANCELLED = "cancelled"
