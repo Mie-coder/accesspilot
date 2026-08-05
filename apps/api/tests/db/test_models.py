@@ -15,7 +15,7 @@ def load_tables():  # type: ignore[no-untyped-def]
 
 
 def test_metadata_contains_day4_tables() -> None:
-    """ER 图中的 11 张表必须全部进入 ORM 元数据。"""
+    """ER 图中的 12 张表必须全部进入 ORM 元数据。"""
 
     assert set(load_tables()) == {
         "access_grants",
@@ -29,6 +29,7 @@ def test_metadata_contains_day4_tables() -> None:
         "provisioning_attempts",
         "systems",
         "workspaces",
+        "workspace_events",
     }
 
 

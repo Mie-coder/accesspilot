@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Protocol
 
 from accesspilot.domain.models import ParsedReply
@@ -31,12 +32,15 @@ CORRECTION_PROMPT = (
 def parse_reply_with_retry(
     user_reply: str,
     model: StructuredReplyModel,
+    before_retry: Callable[[], None] | None = None,
 ) -> ParsedReply:
     """解析用户回复；仅对结构化格式错误执行一次纠正重试。"""
 
     try:
         return model.parse_reply(user_reply)
     except MalformedStructuredOutputError:
+        if before_retry is not None:
+            before_retry()
         try:
             return model.parse_reply(
                 user_reply,

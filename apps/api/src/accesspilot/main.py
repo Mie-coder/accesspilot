@@ -4,15 +4,18 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from accesspilot.agent.deepseek import DeepSeekStructuredReplyModel
 from accesspilot.agent.embeddings import (
     DashScopeEmbeddingModel,
     DeterministicEmbeddingModel,
     EmbeddingModel,
 )
+from accesspilot.agent.structured_reply import StructuredReplyModel
 from accesspilot.approvals import (
     ApprovalActorMismatchError,
     ApprovalAlreadyStartedError,
@@ -27,6 +30,11 @@ from accesspilot.approvals import (
     start_approval_case,
 )
 from accesspilot.config import Settings
+from accesspilot.conversation import (
+    ConversationInputError,
+    DeterministicStructuredReplyModel,
+    handle_chat_message,
+)
 from accesspilot.db.models import (
     AccessGrantRecord,
     ApprovalCaseRecord,
@@ -36,6 +44,12 @@ from accesspilot.db.models import (
 from accesspilot.db.session import build_engine, build_session_factory
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
 from accesspilot.domain.models import RequestDraft
+from accesspilot.events import (
+    ModelQuotaExceededError,
+    format_sse_event,
+    get_model_quota,
+    list_workspace_events,
+)
 from accesspilot.provisioning import (
     ApprovalRequiredError,
     IamProvisioner,
@@ -95,6 +109,14 @@ class FaultModeBody(BaseModel):
     fault_mode: Literal["iam_failure", "iam_timeout"] | None
 
 
+class ChatMessageBody(BaseModel):
+    """对话入口只接收一条用户可见文本。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: str
+
+
 def create_app(
     settings: Settings | None = None,
     store: WorkspaceStore | None = None,
@@ -102,6 +124,7 @@ def create_app(
     embedding_model: EmbeddingModel | None = None,
     risk_review_model: RiskReviewModel | None = None,
     iam_provisioner: IamProvisioner | None = None,
+    structured_reply_model: StructuredReplyModel | None = None,
 ) -> FastAPI:
     """创建一个可配置、可测试的 FastAPI 应用。"""
     active_settings = settings or Settings()
@@ -132,6 +155,15 @@ def create_app(
             )
     if iam_provisioner is None:
         iam_provisioner = SimulatedIamProvisioner()
+    if structured_reply_model is None:
+        if active_settings.deepseek_api_key is None:
+            structured_reply_model = DeterministicStructuredReplyModel()
+        else:
+            structured_reply_model = DeepSeekStructuredReplyModel(
+                api_key=active_settings.deepseek_api_key.get_secret_value(),
+                model_name=active_settings.deepseek_model,
+                base_url=active_settings.deepseek_base_url,
+            )
     workspace_service = WorkspaceService(store)
     app = FastAPI(title=active_settings.app_name)
 
@@ -201,6 +233,81 @@ def create_app(
     def health() -> dict[str, str]:
         """返回最小存活状态，不访问外部依赖"""
         return {"status": "ok"}
+
+    @app.get("/api/events")
+    def replay_events(
+        request: Request,
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> StreamingResponse:
+        """按 Last-Event-ID 回放当前 Workspace 尚未收到的安全事件。"""
+
+        raw_last_event_id = request.headers.get("Last-Event-ID", "0")
+        try:
+            after_id = int(raw_last_event_id)
+        except ValueError as error:
+            raise HTTPException(
+                status_code=400,
+                detail="Last-Event-ID 必须是非负整数",
+            ) from error
+        if after_id < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Last-Event-ID 必须是非负整数",
+            )
+        with active_session_factory() as session:
+            chunks = [
+                format_sse_event(event)
+                for event in list_workspace_events(
+                    session,
+                    workspace_token=workspace.token,
+                    after_id=after_id,
+                )
+            ]
+        return StreamingResponse(
+            iter(chunks),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.get("/api/model-quota")
+    def read_model_quota(
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> dict[str, int]:
+        """读取当前配额；只读回放不会消耗模型次数。"""
+
+        with active_session_factory() as session:
+            quota = get_model_quota(
+                session,
+                workspace_token=workspace.token,
+            )
+        return quota.model_dump()
+
+    @app.post("/api/chat/messages")
+    def create_chat_message(
+        body: ChatMessageBody,
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> dict[str, object]:
+        """处理一轮申请对话，并持久化前端可回放的安全事件。"""
+
+        try:
+            turn = handle_chat_message(
+                active_session_factory,
+                workspace_service=workspace_service,
+                workspace_token=workspace.token,
+                content=body.content,
+                model=structured_reply_model,
+            )
+        except ModelQuotaExceededError as error:
+            raise HTTPException(
+                status_code=429,
+                detail="模型调用额度已用尽，当前为只读回放模式",
+            ) from error
+        except ConversationInputError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return turn.model_dump(mode="json")
 
     @app.post("/api/workspaces", status_code=201)
     def create_workspace(response: Response) -> dict[str, str]:

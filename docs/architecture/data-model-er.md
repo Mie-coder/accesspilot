@@ -27,6 +27,8 @@ erDiagram
         string token_hash UK "Cookie Token 哈希"
         jsonb draft "未提交申请草稿"
         string fault_mode "故障注入模式"
+        int model_call_limit "模型调用上限"
+        int model_calls_used "已用模型调用数"
         timestamptz created_at "创建时间"
     }
 
@@ -122,6 +124,14 @@ erDiagram
         timestamptz created_at "发生时间"
     }
 
+    WORKSPACE_EVENTS {
+        bigint id PK "SSE Last-Event-ID"
+        uuid workspace_id FK "所属工作区"
+        string event_type "安全事件白名单类型"
+        jsonb payload "前端可见结构化内容"
+        timestamptz created_at "发生时间"
+    }
+
     POLICY_CHUNKS {
         uuid id PK "政策分块主键"
         string policy_code "政策编号"
@@ -139,6 +149,7 @@ erDiagram
     WORKSPACES ||--o{ ACCESS_GRANTS : "隔离授权"
     WORKSPACES ||--o{ PROVISIONING_ATTEMPTS : "隔离开通操作"
     WORKSPACES ||--o{ AUDIT_EVENTS : "隔离审计事件"
+    WORKSPACES ||--o{ WORKSPACE_EVENTS : "隔离安全回放事件"
 
     EMPLOYEES o|--o{ EMPLOYEES : "管理下属"
     EMPLOYEES ||--o{ ACCESS_REQUESTS : "发起申请"
@@ -163,6 +174,7 @@ erDiagram
 3. 提交申请时创建一个 `APPROVAL_CASES`，再按策略创建一个或多个 `APPROVAL_STEPS`。
 4. 所有必需审批节点通过后，IAM 模拟器尝试开通权限。
 5. IAM 调用先写 `PROVISIONING_ATTEMPTS`；只有确认成功才创建 `ACCESS_GRANTS`。超时保持 `unknown` 并按原幂等键查询，不伪造授权记录。
+6. 前端只从 `WORKSPACE_EVENTS` 读取白名单事件；模型隐藏推理、请求头和密钥不得进入该表。
 
 ## 必须记住的数据库约束
 
@@ -170,5 +182,7 @@ erDiagram
 - `(approval_case_id, step_order)` 唯一：同一审批流不能出现两个“第 1 步”。
 - `ACCESS_GRANTS.request_id` 和 `idempotency_key` 唯一：重试不能重复授权。
 - `PROVISIONING_ATTEMPTS.request_id` 和 `idempotency_key` 唯一：失败、超时与恢复都复用同一操作。
+- `WORKSPACE_EVENTS.id` 单调递增：SSE 重连用 `Last-Event-ID` 只补发当前 Workspace 的遗漏事件。
+- `WORKSPACES.model_calls_used <= model_call_limit`：额度耗尽后禁止新模型调用，但允许只读回放。
 - 业务子表同时校验 `workspace_id` 和父记录 ID：Workspace A 不能引用 Workspace B 的申请。
 - `POLICY_CHUNKS.embedding` 允许为空，但检索时必须报可恢复错误，不得编造政策结论。

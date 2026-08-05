@@ -6,11 +6,13 @@ from uuid import UUID, uuid4
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Identity,
     Integer,
     String,
     Text,
@@ -38,6 +40,16 @@ class WorkspaceRecord(Base):
 
     # Python 中的 WorkspaceRecord 对应 PostgreSQL 中的 workspaces 表。
     __tablename__ = "workspaces"
+    __table_args__ = (
+        CheckConstraint(
+            "model_call_limit >= 0",
+            name="model_call_limit_non_negative",
+        ),
+        CheckConstraint(
+            "model_calls_used >= 0 AND model_calls_used <= model_call_limit",
+            name="model_calls_within_limit",
+        ),
+    )
 
     # Mapped[UUID] 是 Python 侧类型；Uuid 是数据库列类型。
     # default=uuid4 传入的是函数，SQLAlchemy 会在每条新记录创建时调用它。
@@ -63,6 +75,17 @@ class WorkspaceRecord(Base):
     fault_mode: Mapped[str | None] = mapped_column(
         String(50),
         nullable=True,
+    )
+    # 模型配额属于 Workspace，使用行锁原子消费；历史读取不消耗配额。
+    model_call_limit: Mapped[int] = mapped_column(
+        Integer,
+        default=20,
+        server_default="20",
+    )
+    model_calls_used: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
     )
     # timezone=True 要求保存带时区的时间；传入 utc_now 而不是 utc_now()，
     # 保证每条记录插入时才生成当时的时间。
@@ -419,4 +442,28 @@ class PolicyChunkRecord(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
+    )
+
+
+class WorkspaceEventRecord(Base):
+    """保存允许前端回放的安全事件，不包含模型隐藏推理。"""
+
+    __tablename__ = "workspace_events"
+
+    # 全局递增 ID 可直接作为 SSE Last-Event-ID 游标。
+    id: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(),
+        primary_key=True,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        index=True,
+    )
+    event_type: Mapped[str] = mapped_column(String(60), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        index=True,
     )
