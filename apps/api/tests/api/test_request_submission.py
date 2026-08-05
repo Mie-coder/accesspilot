@@ -61,3 +61,20 @@ def test_submit_returns_frozen_request(
     payload = response.json()
     UUID(payload["request_id"])
     assert payload["request_status"] == "submitted"
+
+
+def test_submitted_request_is_recoverable_from_safe_event_replay(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    client = build_client(database_session_factory)
+    client.post("/api/workspaces")
+    save_complete_draft(client, confirmed=True)
+
+    submitted = client.post("/api/requests")
+    history = client.get("/api/events")
+
+    assert submitted.status_code == 201
+    assert history.status_code == 200
+    assert "event: business.status" in history.text
+    assert '"status":"submitted"' in history.text
+    assert f'"request_id":"{submitted.json()["request_id"]}"' in history.text

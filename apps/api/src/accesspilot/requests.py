@@ -11,6 +11,7 @@ from accesspilot.db.models import (
 )
 from accesspilot.db.workspace_store import hash_workspace_token
 from accesspilot.domain.models import RequestDraft
+from accesspilot.events import stage_workspace_event
 from accesspilot.tools.catalog import ToolResult, validate_access_request
 
 
@@ -89,7 +90,16 @@ def submit_access_request(
                 },
             )
         )
-        # 正式申请与审计必须一起成功或一起回滚，避免出现无证据的业务事实。
+        stage_workspace_event(
+            session,
+            workspace_token=workspace_token,
+            event_type="business.status",
+            payload={
+                "status": "submitted",
+                "request_id": str(request.id),
+            },
+        )
+        # 正式申请、审计与前端安全事件一起成功或回滚，避免出现不一致的业务事实。
         session.commit()
     except Exception:
         session.rollback()

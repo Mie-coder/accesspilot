@@ -21,7 +21,8 @@ AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent�
 - T03：直属经理到数据所有者的串行审批、越权/乱序/重复守卫与审计已完成；
 - T04：幂等 IAM 开通、失败重试、超时未知查询恢复和唯一授权已完成；
 - T05：安全事件白名单、SSE `Last-Event-ID` 回放、对话入口和 Workspace 模型配额已完成；
-- 下一步按 `docs/tickets/accesspilot-mvp-v1.md` 实现 assistant-ui 对话申请台。
+- T06：assistant-ui `LocalRuntime + ChatModelAdapter`、申请草稿卡、明确确认、正式提交与刷新恢复已完成；
+- 下一步按 `docs/tickets/accesspilot-mvp-v1.md` 实现审批收件箱与审计详情。
 
 ## 目录结构
 
@@ -60,6 +61,18 @@ python -m accesspilot.smoke deepseek-risk
 ```
 
 Smoke 输出只包含安全业务结果或向量维度，不打印密钥和完整向量。
+
+前端使用 Node.js 20.19+ 与 pnpm：
+
+```bash
+pnpm install
+pnpm --filter @accesspilot/web test
+pnpm --filter @accesspilot/web lint
+pnpm --filter @accesspilot/web build
+pnpm --filter @accesspilot/web exec vite --host 127.0.0.1 --port 5173
+```
+
+开发服务器会把 `/api` 和 `/health` 代理到 `http://127.0.0.1:8000`。浏览器只持有 HttpOnly Workspace cookie；DeepSeek 与百炼密钥始终留在 FastAPI 的本地 `.env`。
 
 ## 架构文档
 

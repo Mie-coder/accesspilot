@@ -133,14 +133,16 @@
 
 ## Day 12：React 对话申请台
 
-- [ ] 使用 assistant-ui 创建总体布局、对话线程和演示角色选择器。
-- [ ] 使用 `LocalRuntime + ChatModelAdapter` 对接自有 FastAPI/SSE，业务状态仍以 Workspace/PostgreSQL 为准。
-- [ ] 实现聊天记录、流式事件和工具调用卡片。
-- [ ] 实现申请草稿卡片与人工确认操作。
-- [ ] 为工具失败、确认和流式状态编写组件测试。
-- [ ] 在浏览器完成申请人阶段并完成提交。
+- [x] 使用 assistant-ui 创建总体布局、对话线程和演示角色选择器。
+- [x] 使用 `LocalRuntime + ChatModelAdapter` 对接自有 FastAPI/SSE，业务状态仍以 Workspace/PostgreSQL 为准。
+- [x] 实现聊天记录、流式事件和工具调用卡片。
+- [x] 实现申请草稿卡片与人工确认操作。
+- [x] 为工具失败、确认和流式状态编写组件测试。
+- [x] 在浏览器完成申请人阶段并完成提交。
 
 **Agent 可辅助：** 根据你的线框图建议 CSS，审查可访问性和状态处理。
+
+**完成证据（2026-08-05）：** assistant-ui 0.15.4 已接入真实 FastAPI；8 项 Vitest、ESLint、TypeScript 与生产构建通过，后端累计 154 项 pytest 通过。浏览器完成 1440px/390px 检查和真实申请提交，刷新后可从安全事件恢复 `request_id`；两种宽度均无横向溢出，干净页面控制台无报错。
 
 ## Day 13：审批收件箱、申请详情与完整闭环
 

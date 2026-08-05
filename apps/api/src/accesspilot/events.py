@@ -134,6 +134,30 @@ def append_workspace_event(
 ) -> WorkspaceEventRecord:
     """校验并持久化一条可发送给浏览器的事件。"""
 
+    try:
+        event = stage_workspace_event(
+            session,
+            workspace_token=workspace_token,
+            event_type=event_type,
+            payload=payload,
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    session.refresh(event)
+    return event
+
+
+def stage_workspace_event(
+    session: Session,
+    *,
+    workspace_token: str,
+    event_type: str,
+    payload: dict[str, object],
+) -> WorkspaceEventRecord:
+    """校验并暂存事件，由调用方与其他业务事实一起提交。"""
+
     safe_payload = _validate_event_payload(event_type, payload)
     workspace = _load_workspace(session, workspace_token)
     event = WorkspaceEventRecord(
@@ -141,13 +165,7 @@ def append_workspace_event(
         event_type=event_type,
         payload=safe_payload,
     )
-    try:
-        session.add(event)
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    session.refresh(event)
+    session.add(event)
     return event
 
 

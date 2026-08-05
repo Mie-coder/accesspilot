@@ -5,7 +5,7 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -114,7 +114,8 @@ class ChatMessageBody(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    content: str
+    # 在进入业务逻辑前限制长度，避免无效消息先消耗模型额度。
+    content: str = Field(max_length=10_000)
 
 
 def create_app(

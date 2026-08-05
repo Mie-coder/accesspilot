@@ -124,3 +124,26 @@ def test_chat_api_returns_429_after_quota_and_history_remains_available(
     assert "再调用一次" not in history.text
     assert quota.json() == {"used": 1, "limit": 1, "remaining": 0}
     assert model.calls == 1
+
+
+def test_chat_api_rejects_oversized_message_before_consuming_quota(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    model = StaticStructuredReplyModel()
+    client = TestClient(
+        create_app(
+            store=SqlAlchemyWorkspaceStore(database_session_factory),
+            session_factory=database_session_factory,
+            structured_reply_model=model,
+        )
+    )
+    client.post("/api/workspaces")
+
+    response = client.post("/api/chat/messages", json={"content": "x" * 10_001})
+    quota = client.get("/api/model-quota")
+    history = client.get("/api/events")
+
+    assert response.status_code == 422
+    assert quota.json() == {"used": 0, "limit": 20, "remaining": 20}
+    assert history.text == ""
+    assert model.calls == 0
