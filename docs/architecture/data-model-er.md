@@ -61,11 +61,8 @@ erDiagram
         uuid workspace_id FK "所属工作区"
         string requester_id FK "申请人"
         string entitlement_code FK "目标权限"
-        string project_code "项目编码"
-        text data_scope "数据范围"
-        text business_reason "申请用途"
-        date start_date "开始日期"
         int duration_days "期限天数"
+        text justification "申请理由"
         string request_status "申请状态"
         timestamptz confirmed_at "用户确认时间"
         timestamptz created_at "记录创建时间"
@@ -102,6 +99,18 @@ erDiagram
         timestamptz created_at "创建时间"
     }
 
+    PROVISIONING_ATTEMPTS {
+        uuid id PK "开通尝试主键"
+        uuid workspace_id FK "所属工作区"
+        uuid request_id FK,UK "一份申请一个稳定操作"
+        string idempotency_key UK "幂等键"
+        string provisioning_status "开通状态"
+        int attempt_count "尝试次数"
+        text last_error "最后错误或未知原因"
+        timestamptz created_at "创建时间"
+        timestamptz updated_at "更新时间"
+    }
+
     AUDIT_EVENTS {
         uuid id PK "审计事件主键"
         uuid workspace_id FK "所属工作区"
@@ -128,6 +137,7 @@ erDiagram
     WORKSPACES ||--o{ APPROVAL_CASES : "隔离审批流"
     WORKSPACES ||--o{ APPROVAL_STEPS : "隔离审批节点"
     WORKSPACES ||--o{ ACCESS_GRANTS : "隔离授权"
+    WORKSPACES ||--o{ PROVISIONING_ATTEMPTS : "隔离开通操作"
     WORKSPACES ||--o{ AUDIT_EVENTS : "隔离审计事件"
 
     EMPLOYEES o|--o{ EMPLOYEES : "管理下属"
@@ -140,6 +150,7 @@ erDiagram
     ACCESS_REQUESTS ||--o| APPROVAL_CASES : "创建审批流"
     APPROVAL_CASES ||--|{ APPROVAL_STEPS : "包含节点"
     ACCESS_REQUESTS ||--o| ACCESS_GRANTS : "开通后产生"
+    ACCESS_REQUESTS ||--o| PROVISIONING_ATTEMPTS : "记录开通尝试"
     ACCESS_REQUESTS o|--o{ AUDIT_EVENTS : "记录时间线"
 ```
 
@@ -151,12 +162,13 @@ erDiagram
 2. 用户确认后，才生成不可随意修改的 `ACCESS_REQUESTS`。
 3. 提交申请时创建一个 `APPROVAL_CASES`，再按策略创建一个或多个 `APPROVAL_STEPS`。
 4. 所有必需审批节点通过后，IAM 模拟器尝试开通权限。
-5. 只有 IAM 真正开通成功才创建 `ACCESS_GRANTS`；如果超时，只写入 `AUDIT_EVENTS`，不伪造授权记录。
+5. IAM 调用先写 `PROVISIONING_ATTEMPTS`；只有确认成功才创建 `ACCESS_GRANTS`。超时保持 `unknown` 并按原幂等键查询，不伪造授权记录。
 
 ## 必须记住的数据库约束
 
 - `APPROVAL_CASES.request_id` 唯一：一份申请不能出现两条审批流。
 - `(approval_case_id, step_order)` 唯一：同一审批流不能出现两个“第 1 步”。
 - `ACCESS_GRANTS.request_id` 和 `idempotency_key` 唯一：重试不能重复授权。
+- `PROVISIONING_ATTEMPTS.request_id` 和 `idempotency_key` 唯一：失败、超时与恢复都复用同一操作。
 - 业务子表同时校验 `workspace_id` 和父记录 ID：Workspace A 不能引用 Workspace B 的申请。
 - `POLICY_CHUNKS.embedding` 允许为空，但检索时必须报可恢复错误，不得编造政策结论。

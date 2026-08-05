@@ -5,6 +5,7 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from accesspilot.agent.embeddings import (
@@ -26,10 +27,26 @@ from accesspilot.approvals import (
     start_approval_case,
 )
 from accesspilot.config import Settings
-from accesspilot.db.models import ApprovalCaseRecord, ApprovalStepRecord
+from accesspilot.db.models import (
+    AccessGrantRecord,
+    ApprovalCaseRecord,
+    ApprovalStepRecord,
+    ProvisioningAttemptRecord,
+)
 from accesspilot.db.session import build_engine, build_session_factory
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
 from accesspilot.domain.models import RequestDraft
+from accesspilot.provisioning import (
+    ApprovalRequiredError,
+    IamProvisioner,
+    IdempotencyConflictError,
+    ProvisioningAttemptNotFoundError,
+    ProvisioningNotFoundError,
+    ProvisioningWorkspaceMismatchError,
+    SimulatedIamProvisioner,
+    provision_access,
+    recover_provisioning,
+)
 from accesspilot.requests import (
     RequestNotReadyError,
     RequestValidationError,
@@ -62,12 +79,29 @@ class ApprovalDecisionBody(BaseModel):
     comment: str | None = None
 
 
+class ProvisionAccessBody(BaseModel):
+    """开通 API 只接收调用方生成并稳定复用的幂等键。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str
+
+
+class FaultModeBody(BaseModel):
+    """Demo Workspace 可选择的可控 IAM 故障。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fault_mode: Literal["iam_failure", "iam_timeout"] | None
+
+
 def create_app(
     settings: Settings | None = None,
     store: WorkspaceStore | None = None,
     session_factory: sessionmaker[Session] | None = None,
     embedding_model: EmbeddingModel | None = None,
     risk_review_model: RiskReviewModel | None = None,
+    iam_provisioner: IamProvisioner | None = None,
 ) -> FastAPI:
     """创建一个可配置、可测试的 FastAPI 应用。"""
     active_settings = settings or Settings()
@@ -96,6 +130,8 @@ def create_app(
                 model_name=active_settings.deepseek_model,
                 base_url=active_settings.deepseek_base_url,
             )
+    if iam_provisioner is None:
+        iam_provisioner = SimulatedIamProvisioner()
     workspace_service = WorkspaceService(store)
     app = FastAPI(title=active_settings.app_name)
 
@@ -141,6 +177,26 @@ def create_app(
             ],
         }
 
+    def provisioning_payload(
+        session: Session,
+        attempt: ProvisioningAttemptRecord,
+    ) -> dict[str, object]:
+        """从数据库事实返回开通状态，不把审批通过冒充为已授权。"""
+
+        grant = session.scalar(
+            select(AccessGrantRecord).where(
+                AccessGrantRecord.request_id == attempt.request_id
+            )
+        )
+        return {
+            "provisioning_attempt_id": str(attempt.id),
+            "provisioning_status": attempt.provisioning_status,
+            "attempt_count": attempt.attempt_count,
+            "last_error": attempt.last_error,
+            "access_granted": grant is not None,
+            "grant_id": str(grant.id) if grant is not None else None,
+        }
+
     @app.get("/health")
     def health() -> dict[str, str]:
         """返回最小存活状态，不访问外部依赖"""
@@ -168,6 +224,19 @@ def create_app(
 
         workspace_service.reset(workspace.token)
         return {"status": "reset"}
+
+    @app.post("/api/workspaces/fault-mode")
+    def set_workspace_fault_mode(
+        body: FaultModeBody,
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> dict[str, str | None]:
+        """为当前 Workspace 设置或清除可控 IAM 故障。"""
+
+        updated = workspace_service.set_fault_mode(
+            workspace.token,
+            body.fault_mode,
+        )
+        return {"fault_mode": updated.fault_mode}
 
     @app.post("/api/drafts/preview")
     def preview_draft(
@@ -315,6 +384,63 @@ def create_app(
             except ApprovalTerminalError as error:
                 raise HTTPException(status_code=409, detail="审批流已经结束") from error
             return approval_payload(session, case)
+
+    @app.post("/api/requests/{request_id}/provision")
+    def provision_request(
+        request_id: UUID,
+        body: ProvisionAccessBody,
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> dict[str, object]:
+        """用稳定幂等键开通已完成审批的权限。"""
+
+        with active_session_factory() as session:
+            try:
+                attempt = provision_access(
+                    session,
+                    workspace_token=workspace.token,
+                    request_id=request_id,
+                    idempotency_key=body.idempotency_key,
+                    iam=iam_provisioner,
+                )
+            except (ProvisioningNotFoundError, ProvisioningWorkspaceMismatchError) as error:
+                raise HTTPException(status_code=404, detail="申请不存在") from error
+            except ApprovalRequiredError as error:
+                raise HTTPException(
+                    status_code=409,
+                    detail="人工审批尚未全部通过",
+                ) from error
+            except IdempotencyConflictError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            return provisioning_payload(session, attempt)
+
+    @app.post("/api/requests/{request_id}/provision/recover")
+    def recover_request_provisioning(
+        request_id: UUID,
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> dict[str, object]:
+        """查询原幂等操作并恢复未知开通结果。"""
+
+        with active_session_factory() as session:
+            try:
+                attempt = recover_provisioning(
+                    session,
+                    workspace_token=workspace.token,
+                    request_id=request_id,
+                    iam=iam_provisioner,
+                )
+            except (ProvisioningNotFoundError, ProvisioningWorkspaceMismatchError) as error:
+                raise HTTPException(status_code=404, detail="申请不存在") from error
+            except ApprovalRequiredError as error:
+                raise HTTPException(
+                    status_code=409,
+                    detail="人工审批尚未全部通过",
+                ) from error
+            except ProvisioningAttemptNotFoundError as error:
+                raise HTTPException(
+                    status_code=409,
+                    detail="还没有可恢复的开通尝试",
+                ) from error
+            return provisioning_payload(session, attempt)
 
     return app
 

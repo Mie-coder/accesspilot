@@ -15,7 +15,7 @@ def load_tables():  # type: ignore[no-untyped-def]
 
 
 def test_metadata_contains_day4_tables() -> None:
-    """ER 图中的 10 张表必须全部进入 ORM 元数据。"""
+    """ER 图中的 11 张表必须全部进入 ORM 元数据。"""
 
     assert set(load_tables()) == {
         "access_grants",
@@ -26,6 +26,7 @@ def test_metadata_contains_day4_tables() -> None:
         "employees",
         "entitlements",
         "policy_chunks",
+        "provisioning_attempts",
         "systems",
         "workspaces",
     }
@@ -135,6 +136,21 @@ def test_access_grant_only_represents_successful_time_bounded_access() -> None:
         isinstance(constraint, CheckConstraint)
         and str(constraint.sqltext) == "expires_at > starts_at"
         for constraint in grant.constraints
+    )
+
+
+def test_provisioning_attempt_keeps_one_idempotent_operation_per_request() -> None:
+    """开通失败或未知时必须重用同一申请和幂等键。"""
+
+    attempt = load_tables()["provisioning_attempts"]
+
+    assert attempt.c.request_id.unique is True
+    assert attempt.c.idempotency_key.unique is True
+    assert attempt.c.last_error.nullable is True
+    assert any(
+        isinstance(constraint, CheckConstraint)
+        and str(constraint.sqltext) == "attempt_count > 0"
+        for constraint in attempt.constraints
     )
 
 

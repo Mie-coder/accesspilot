@@ -19,7 +19,8 @@ AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent�
 - T01：DeepSeek 严格结构化提取、确认提交守卫、正式申请与审计事务已完成；
 - T02：百炼/离线 512 维向量、pgvector Top 4 和只读风险审查已完成；
 - T03：直属经理到数据所有者的串行审批、越权/乱序/重复守卫与审计已完成；
-- 下一步按 `docs/tickets/accesspilot-mvp-v1.md` 实现幂等权限开通与故障恢复。
+- T04：幂等 IAM 开通、失败重试、超时未知查询恢复和唯一授权已完成；
+- 下一步按 `docs/tickets/accesspilot-mvp-v1.md` 实现 SSE 事件回放与 Workspace 配额。
 
 ## 目录结构
 

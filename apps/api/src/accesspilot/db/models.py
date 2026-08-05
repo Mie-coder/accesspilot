@@ -322,6 +322,41 @@ class AccessGrantRecord(Base):
     )
 
 
+class ProvisioningAttemptRecord(Base):
+    """保存一次可恢复、可幂等重放的 IAM 开通操作。"""
+
+    __tablename__ = "provisioning_attempts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "request_id"],
+            ["access_requests.workspace_id", "access_requests.id"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("attempt_count > 0", name="attempt_count_positive"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        index=True,
+    )
+    # 每份申请只有一个稳定操作；失败重试也必须复用同一条记录。
+    request_id: Mapped[UUID] = mapped_column(Uuid, unique=True)
+    idempotency_key: Mapped[str] = mapped_column(String(100), unique=True)
+    provisioning_status: Mapped[str] = mapped_column(String(30))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=1)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+    )
+
+
 class AuditEventRecord(Base):
     """保存只追加的业务时间线事件。"""
 

@@ -19,7 +19,7 @@ config.set_main_option("sqlalchemy.url", Settings().database_url)
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# 导入 models 后，10 张表会注册到 Base.metadata，供 autogenerate 比较差异。
+# 导入 models 后，11 张表会注册到 Base.metadata，供 autogenerate 比较差异。
 target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,

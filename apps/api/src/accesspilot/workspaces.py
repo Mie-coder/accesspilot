@@ -62,3 +62,11 @@ class WorkspaceService:
         workspace.fault_mode = None
         self._store.save(workspace)
         return workspace
+
+    def set_fault_mode(self, token: str, fault_mode: str | None) -> Workspace:
+        """只修改当前演示空间的故障注入模式。"""
+
+        workspace = self.get(token)
+        workspace.fault_mode = fault_mode
+        self._store.save(workspace)
+        return workspace
