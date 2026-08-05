@@ -27,6 +27,14 @@ describe('bootstrapWorkspace', () => {
       if (url === '/api/drafts/current') {
         return Response.json({ draft: null })
       }
+      if (url === '/api/workspaces/identity') {
+        return Response.json({
+          employee_id: 'EMP-002',
+          name: '陈峰',
+          department: 'product_operations',
+          roles: ['manager'],
+        })
+      }
       if (url === '/api/workspaces/ensure') {
         expect(init?.method).toBe('POST')
         return Response.json({ status: 'created' }, { status: 201 })
@@ -47,6 +55,7 @@ describe('bootstrapWorkspace', () => {
 
     const snapshot = await bootstrapWorkspace()
 
+    expect(snapshot.identity.employee_id).toBe('EMP-002')
     expect(snapshot.draft).toBeNull()
     expect(snapshot.quota.remaining).toBe(20)
     expect(snapshot.lastEventId).toBe(1)

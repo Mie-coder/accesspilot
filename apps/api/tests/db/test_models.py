@@ -38,8 +38,11 @@ def test_workspace_table_stores_isolated_demo_state() -> None:
 
     workspace = load_tables()["workspaces"]
 
-    assert {"id", "token_hash", "draft", "fault_mode", "created_at"} <= set(workspace.c.keys())
+    assert {"id", "token_hash", "actor_id", "draft", "fault_mode", "created_at"} <= set(
+        workspace.c.keys()
+    )
     assert workspace.c.token_hash.unique is True
+    assert workspace.c.actor_id.nullable is False
     assert workspace.c.draft.nullable is True
     assert workspace.c.fault_mode.nullable is True
 

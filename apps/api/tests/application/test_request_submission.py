@@ -12,7 +12,11 @@ from accesspilot.db.models import (
 )
 from accesspilot.db.seed import seed_catalog
 from accesspilot.domain.models import RequestDraft
-from accesspilot.requests import RequestNotReadyError, submit_access_request
+from accesspilot.requests import (
+    RequestActorMismatchError,
+    RequestNotReadyError,
+    submit_access_request,
+)
 
 
 def create_workspace(session: Session) -> tuple[str, WorkspaceRecord]:
@@ -79,3 +83,26 @@ def test_confirmed_draft_freezes_request_and_audit(database_session: Session) ->
         "duration_days": 14,
         "justification": "核验项目运营数据",
     }
+
+
+def test_submit_rejects_a_draft_owned_by_another_demo_identity(
+    database_session: Session,
+) -> None:
+    seed_catalog(database_session)
+    token, workspace = create_workspace(database_session)
+    workspace.actor_id = "EMP-002"
+    database_session.commit()
+
+    with pytest.raises(RequestActorMismatchError):
+        submit_access_request(
+            database_session,
+            workspace_token=token,
+            draft=complete_draft(confirmed=True),
+            actor_id="EMP-002",
+        )
+
+    assert database_session.scalar(
+        select(AccessRequestRecord).where(
+            AccessRequestRecord.workspace_id == workspace.id
+        )
+    ) is None

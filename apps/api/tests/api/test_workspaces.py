@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
 from accesspilot.main import create_app
-from accesspilot.workspaces import InMemoryWorkspaceStore
+from accesspilot.workspaces import InMemoryWorkspaceStore, WorkspaceService
 
 
 def test_create_workspace_sets_http_only_cookie() -> None:
@@ -52,6 +52,7 @@ def test_reset_only_clears_the_current_browser_workspace() -> None:
     second_token = second_browser.cookies.get("accesspilot_workspace")
     assert first_token is not None
     assert second_token is not None
+    WorkspaceService(store).set_actor(second_token, "EMP-002")
 
     first_browser.post(
         "/api/drafts/preview",

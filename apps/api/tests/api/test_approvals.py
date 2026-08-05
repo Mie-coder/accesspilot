@@ -77,6 +77,14 @@ def start_case(client: TestClient, request_id: str) -> dict[str, object]:
     return response.json()
 
 
+def switch_identity(client: TestClient, employee_id: str) -> None:
+    response = client.post(
+        "/api/workspaces/identity",
+        json={"employee_id": employee_id},
+    )
+    assert response.status_code == 200
+
+
 def test_api_completes_manager_then_data_owner_approval(
     approval_client: TestClient,
 ) -> None:
@@ -85,10 +93,10 @@ def test_api_completes_manager_then_data_owner_approval(
     case_id = case["approval_case_id"]
     assert case["approval_status"] == "pending_manager"
 
+    switch_identity(approval_client, "EMP-002")
     manager = approval_client.post(
         f"/api/approval-cases/{case_id}/decisions",
         json={
-            "actor_id": "EMP-002",
             "decision": "approve",
             "comment": "经理确认业务需要。",
         },
@@ -96,10 +104,10 @@ def test_api_completes_manager_then_data_owner_approval(
     assert manager.status_code == 200
     assert manager.json()["approval_status"] == "pending_data_owner"
 
+    switch_identity(approval_client, "EMP-003")
     owner = approval_client.post(
         f"/api/approval-cases/{case_id}/decisions",
         json={
-            "actor_id": "EMP-003",
             "decision": "approve",
             "comment": "数据所有者确认最小权限。",
         },
@@ -119,19 +127,60 @@ def test_api_rejects_owner_before_manager_without_advancing(
     case = start_case(approval_client, request_id)
     case_id = case["approval_case_id"]
 
+    switch_identity(approval_client, "EMP-003")
     owner = approval_client.post(
         f"/api/approval-cases/{case_id}/decisions",
-        json={"actor_id": "EMP-003", "decision": "approve"},
+        json={"decision": "approve"},
     )
     assert owner.status_code == 409
     assert owner.json() == {"detail": "前序审批尚未完成"}
 
+    switch_identity(approval_client, "EMP-002")
     manager = approval_client.post(
         f"/api/approval-cases/{case_id}/decisions",
-        json={"actor_id": "EMP-002", "decision": "approve"},
+        json={"decision": "approve"},
     )
     assert manager.status_code == 200
     assert manager.json()["approval_status"] == "pending_data_owner"
+
+
+def test_api_rejects_stale_draft_after_workspace_identity_switch(
+    approval_client: TestClient,
+) -> None:
+    approval_client.post("/api/workspaces")
+    preview = approval_client.post(
+        "/api/drafts/preview",
+        json={
+            "employee_id": "EMP-001",
+            "entitlement_id": "insighthub.customer_export",
+            "duration_days": 14,
+            "justification": "核验虚构项目运营数据",
+            "confirmed": True,
+        },
+    )
+    assert preview.status_code == 200
+    switch_identity(approval_client, "EMP-002")
+
+    submitted = approval_client.post("/api/requests")
+
+    assert submitted.status_code == 409
+    assert submitted.json()["detail"] == (
+        "当前草稿属于另一演示身份，请切回原身份后提交"
+    )
+
+
+def test_decision_body_cannot_supply_an_actor_id(
+    approval_client: TestClient,
+) -> None:
+    request_id = submit_request(approval_client)
+    case_id = start_case(approval_client, request_id)["approval_case_id"]
+
+    response = approval_client.post(
+        f"/api/approval-cases/{case_id}/decisions",
+        json={"actor_id": "EMP-002", "decision": "approve"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_api_rejects_cross_workspace_before_calling_risk_model(

@@ -48,6 +48,7 @@ class SqlAlchemyWorkspaceStore:
             # Session 稍后会关闭，因此返回独立的领域对象，而非 ORM 记录。
             return Workspace(
                 token=token,
+                actor_id=record.actor_id,
                 draft=draft,
                 fault_mode=record.fault_mode,
             )
@@ -74,6 +75,7 @@ class SqlAlchemyWorkspaceStore:
                 session.add(
                     WorkspaceRecord(
                         token_hash=token_hash,
+                        actor_id=workspace.actor_id,
                         draft=draft_data,
                         fault_mode=workspace.fault_mode,
                     )
@@ -82,6 +84,7 @@ class SqlAlchemyWorkspaceStore:
                 # 后续保存：只更新允许变化的草稿和故障模式。
                 record.draft = draft_data
                 record.fault_mode = workspace.fault_mode
+                record.actor_id = workspace.actor_id
 
             # commit 后，即使 API 进程重启，数据仍保留在 PostgreSQL 中。
             session.commit()

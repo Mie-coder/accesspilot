@@ -32,7 +32,15 @@ export interface RequestResult {
   request_status: string
 }
 
+export interface WorkspaceIdentity {
+  employee_id: string
+  name: string
+  department: string
+  roles: string[]
+}
+
 export interface WorkspaceSnapshot {
+  identity: WorkspaceIdentity
   draft: RequestDraft | null
   quota: ModelQuota
   events: WorkspaceEvent[]

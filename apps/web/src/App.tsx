@@ -89,7 +89,17 @@ function WorkbenchPage() {
   const workbench = useWorkbench()
   const aui = useAui()
   const isRunning = useAuiState((state) => state.thread.isRunning)
-  const [role, setRole] = useState<DemoRole>('applicant')
+  const identityToRole: Record<string, DemoRole> = {
+    'EMP-001': 'applicant',
+    'EMP-002': 'manager',
+    'EMP-003': 'data_owner',
+  }
+  const roleToIdentity: Record<DemoRole, string> = {
+    applicant: 'EMP-001',
+    manager: 'EMP-002',
+    data_owner: 'EMP-003',
+  }
+  const role = identityToRole[workbench.identity.employee_id] ?? 'applicant'
   const confirm = () => {
     void aui.thread.append({
       role: 'user',
@@ -115,7 +125,10 @@ function WorkbenchPage() {
             <select
               aria-label="演示角色"
               value={role}
-              onChange={(event) => setRole(event.target.value as DemoRole)}
+              onChange={(event) => {
+                const nextRole = event.target.value as DemoRole
+                void workbench.switchIdentity(roleToIdentity[nextRole])
+              }}
             >
               <option value="applicant">申请人 · EMP-001</option>
               <option value="manager">直属经理 · EMP-002</option>
@@ -177,7 +190,6 @@ function WorkbenchPage() {
       ) : (
         <OperationsConsole
           key={role}
-          actorId={role === 'manager' ? 'EMP-002' : 'EMP-003'}
           roleLabel={role === 'manager' ? '直属经理' : '数据负责人'}
           requestId={workbench.requestResult?.request_id ?? null}
           quotaRemaining={workbench.quota.remaining}

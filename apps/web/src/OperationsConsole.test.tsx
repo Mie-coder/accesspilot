@@ -224,7 +224,6 @@ describe('OperationsView', () => {
 
     render(
       <OperationsConsole
-        actorId="EMP-002"
         roleLabel="直属经理"
         requestId={null}
         quotaRemaining={20}

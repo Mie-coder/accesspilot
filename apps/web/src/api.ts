@@ -6,6 +6,7 @@ import type {
   RequestResult,
   RequestDetail,
   WorkspaceEvent,
+  WorkspaceIdentity,
   WorkspaceSnapshot,
 } from './types'
 
@@ -93,13 +94,14 @@ export async function replayEvents(
 export async function bootstrapWorkspace(): Promise<WorkspaceSnapshot> {
   // 后端原子地复用有效 Workspace 或创建新空间，首次加载无需先触发 401/404。
   await requestJson<{ status: string }>('/api/workspaces/ensure', { method: 'POST' })
-  const draft = await readDraft()
-
-  const [quota, events] = await Promise.all([
+  const [identity, draft, quota, events] = await Promise.all([
+    requestJson<WorkspaceIdentity>('/api/workspaces/identity'),
+    readDraft(),
     requestJson<ModelQuota>('/api/model-quota'),
     replayEvents(),
   ])
   return {
+    identity,
     draft,
     quota,
     events,
@@ -127,10 +129,18 @@ export async function startNewWorkspace(): Promise<void> {
   await requestJson<{ status: string }>('/api/workspaces', { method: 'POST' })
 }
 
-export async function readApprovalInbox(actorId: string): Promise<ApprovalInbox> {
-  return requestJson<ApprovalInbox>(
-    `/api/approval-inbox?actor_id=${encodeURIComponent(actorId)}`,
-  )
+export async function switchWorkspaceIdentity(
+  employeeId: string,
+): Promise<WorkspaceIdentity> {
+  return requestJson<WorkspaceIdentity>('/api/workspaces/identity', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ employee_id: employeeId }),
+  })
+}
+
+export async function readApprovalInbox(): Promise<ApprovalInbox> {
+  return requestJson<ApprovalInbox>('/api/approval-inbox')
 }
 
 export async function readRequestDetail(requestId: string): Promise<RequestDetail> {
@@ -145,14 +155,13 @@ export async function startApproval(requestId: string): Promise<void> {
 
 export async function decideApproval(
   caseId: string,
-  actorId: string,
   decision: 'approve' | 'reject',
   comment: string | null,
 ): Promise<void> {
   await requestJson(`/api/approval-cases/${encodeURIComponent(caseId)}/decisions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ actor_id: actorId, decision, comment }),
+    body: JSON.stringify({ decision, comment }),
   })
 }
 

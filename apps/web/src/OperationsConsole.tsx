@@ -408,12 +408,10 @@ export function OperationsView({
 }
 
 export function OperationsConsole({
-  actorId,
   roleLabel,
   requestId,
   quotaRemaining,
 }: {
-  actorId: string
   roleLabel: string
   requestId: string | null
   quotaRemaining: number
@@ -426,11 +424,11 @@ export function OperationsConsole({
   const [error, setError] = useState<string | null>(null)
 
   const fetchFacts = useCallback(async () => {
-    const nextInbox = await readApprovalInbox(actorId)
+    const nextInbox = await readApprovalInbox()
     const nextRequestId = selectedRequestId ?? requestId ?? nextInbox.items[0]?.request_id ?? null
     const nextDetail = nextRequestId ? await readRequestDetail(nextRequestId) : null
     return { nextInbox, nextDetail }
-  }, [actorId, requestId, selectedRequestId])
+  }, [requestId, selectedRequestId])
 
   const refresh = useCallback(async () => {
     setIsLoading(true)
@@ -495,7 +493,7 @@ export function OperationsConsole({
       }}
       onDecision={(decision, comment) => {
         if (currentCaseId) {
-          void runAction(() => decideApproval(currentCaseId, actorId, decision, comment))
+          void runAction(() => decideApproval(currentCaseId, decision, comment))
         }
       }}
       onFaultMode={(mode) => void runAction(() => setFaultMode(mode))}

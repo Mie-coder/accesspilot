@@ -65,6 +65,13 @@ class WorkspaceRecord(Base):
         unique=True,
         index=True,
     )
+    # 演示身份与 Workspace 绑定；不加外键，避免迁移早于目录 seed 时失败。
+    actor_id: Mapped[str] = mapped_column(
+        String(30),
+        default="EMP-001",
+        server_default="EMP-001",
+        index=True,
+    )
     # 草稿是对话中可反复修改的结构，序列化成 JSONB 保存。
     # 新 Workspace 可能还没有草稿，所以 Python 类型包含 None，数据库也允许 NULL。
     draft: Mapped[dict[str, Any] | None] = mapped_column(

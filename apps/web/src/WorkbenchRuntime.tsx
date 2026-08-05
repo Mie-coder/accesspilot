@@ -11,7 +11,12 @@ import {
   useState,
 } from 'react'
 
-import { replayEvents, startNewWorkspace, submitRequest } from './api'
+import {
+  replayEvents,
+  startNewWorkspace,
+  submitRequest,
+  switchWorkspaceIdentity,
+} from './api'
 import { createChatModelAdapter } from './runtime'
 import type {
   ChatTurn,
@@ -63,6 +68,7 @@ export function WorkbenchRuntime({
   children: ReactNode
 }) {
   const [draft, setDraft] = useState<RequestDraft | null>(snapshot.draft)
+  const [identity, setIdentity] = useState(snapshot.identity)
   const [quota, setQuota] = useState(snapshot.quota)
   const [events, setEvents] = useState(snapshot.events)
   const [businessStatus, setBusinessStatus] = useState('collecting')
@@ -72,6 +78,7 @@ export function WorkbenchRuntime({
   )
   const [isSubmitting, setIsSubmitting] = useState(false)
   const lastEventIdRef = useRef(snapshot.lastEventId)
+  const identitySwitchRef = useRef<Promise<void>>(Promise.resolve())
 
   const onTurn = useCallback((turn: ChatTurn) => {
     setDraft(turn.draft)
@@ -135,8 +142,24 @@ export function WorkbenchRuntime({
     }
   }, [])
 
+  const switchIdentity = useCallback((employeeId: string): Promise<void> => {
+    // 快速连续切换时串行请求，避免旧响应把 UI 倒退到过期身份。
+    const operation = identitySwitchRef.current.then(async () => {
+      setError(null)
+      try {
+        const nextIdentity = await switchWorkspaceIdentity(employeeId)
+        setIdentity(nextIdentity)
+      } catch (switchError) {
+        setError(switchError instanceof Error ? switchError.message : '演示身份切换失败')
+      }
+    })
+    identitySwitchRef.current = operation
+    return operation
+  }, [])
+
   const context = useMemo<WorkbenchContextValue>(
     () => ({
+      identity,
       draft,
       missingFields: missingFields(draft),
       quota,
@@ -145,10 +168,23 @@ export function WorkbenchRuntime({
       error,
       requestResult,
       isSubmitting,
+      switchIdentity,
       submit,
       reset,
     }),
-    [businessStatus, draft, error, events, isSubmitting, quota, requestResult, reset, submit],
+    [
+      businessStatus,
+      draft,
+      error,
+      events,
+      identity,
+      isSubmitting,
+      quota,
+      requestResult,
+      reset,
+      submit,
+      switchIdentity,
+    ],
   )
 
   return (

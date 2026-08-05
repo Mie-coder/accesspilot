@@ -57,32 +57,38 @@ def submit_and_start(client: TestClient) -> tuple[str, str]:
     return request_id, started.json()["approval_case_id"]
 
 
+def switch_identity(client: TestClient, employee_id: str) -> None:
+    response = client.post(
+        "/api/workspaces/identity",
+        json={"employee_id": employee_id},
+    )
+    assert response.status_code == 200
+
+
 def test_inbox_only_returns_the_current_pending_actor_step(
     operations_client: TestClient,
 ) -> None:
     request_id, case_id = submit_and_start(operations_client)
 
-    manager = operations_client.get("/api/approval-inbox?actor_id=EMP-002")
-    owner_waiting = operations_client.get("/api/approval-inbox?actor_id=EMP-003")
+    switch_identity(operations_client, "EMP-002")
+    manager = operations_client.get("/api/approval-inbox")
+    switch_identity(operations_client, "EMP-003")
+    owner_waiting = operations_client.get("/api/approval-inbox")
 
     assert manager.status_code == 200
     assert [item["request_id"] for item in manager.json()["items"]] == [request_id]
     assert manager.json()["items"][0]["step_status"] == "pending"
     assert owner_waiting.json()["items"] == []
 
+    switch_identity(operations_client, "EMP-002")
     decided = operations_client.post(
         f"/api/approval-cases/{case_id}/decisions",
-        json={"actor_id": "EMP-002", "decision": "approve"},
+        json={"decision": "approve"},
     )
     assert decided.status_code == 200
-    assert operations_client.get(
-        "/api/approval-inbox?actor_id=EMP-002"
-    ).json()["items"] == []
-    assert len(
-        operations_client.get(
-            "/api/approval-inbox?actor_id=EMP-003"
-        ).json()["items"]
-    ) == 1
+    assert operations_client.get("/api/approval-inbox").json()["items"] == []
+    switch_identity(operations_client, "EMP-003")
+    assert len(operations_client.get("/api/approval-inbox").json()["items"]) == 1
 
 
 def test_detail_returns_policy_steps_and_append_only_audit(
@@ -126,9 +132,10 @@ def test_timeout_detail_exposes_recovery_without_claiming_a_grant(
 ) -> None:
     request_id, case_id = submit_and_start(operations_client)
     for actor_id in ("EMP-002", "EMP-003"):
+        switch_identity(operations_client, actor_id)
         assert operations_client.post(
             f"/api/approval-cases/{case_id}/decisions",
-            json={"actor_id": actor_id, "decision": "approve"},
+            json={"decision": "approve"},
         ).status_code == 200
     assert operations_client.post(
         "/api/workspaces/fault-mode",
@@ -159,6 +166,4 @@ def test_detail_does_not_cross_workspace_boundary(
     assert other_browser.post("/api/workspaces").status_code == 201
 
     assert other_browser.get(f"/api/requests/{request_id}").status_code == 404
-    assert other_browser.get(
-        "/api/approval-inbox?actor_id=EMP-002"
-    ).json()["items"] == []
+    assert other_browser.get("/api/approval-inbox").json()["items"] == []

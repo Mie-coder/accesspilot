@@ -5,9 +5,11 @@ import type {
   RequestDraft,
   RequestResult,
   WorkspaceEvent,
+  WorkspaceIdentity,
 } from './types'
 
 export interface WorkbenchContextValue {
+  identity: WorkspaceIdentity
   draft: RequestDraft | null
   missingFields: string[]
   quota: ModelQuota
@@ -16,6 +18,7 @@ export interface WorkbenchContextValue {
   error: string | null
   requestResult: RequestResult | null
   isSubmitting: boolean
+  switchIdentity: (employeeId: string) => Promise<void>
   submit: () => Promise<void>
   reset: () => Promise<void>
 }

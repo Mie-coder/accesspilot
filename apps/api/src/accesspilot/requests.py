@@ -23,6 +23,10 @@ class RequestWorkspaceNotFoundError(RuntimeError):
     """提交时对应的 Workspace 已不存在。"""
 
 
+class RequestActorMismatchError(RuntimeError):
+    """草稿申请人与 Workspace 后端身份不一致。"""
+
+
 class RequestValidationError(RuntimeError):
     """目录规则拒绝了这份申请。"""
 
@@ -36,16 +40,13 @@ def submit_access_request(
     *,
     workspace_token: str,
     draft: RequestDraft,
+    actor_id: str | None = None,
 ) -> AccessRequestRecord:
     """确认并冻结草稿，同时追加一条申请提交审计事件。"""
 
     # 完整不等于已获授权：只有用户明确确认，才能跨过正式提交边界。
     if not draft.can_enter_approval():
         raise RequestNotReadyError
-
-    validation = validate_access_request(session, draft)
-    if validation.status != "success":
-        raise RequestValidationError(validation)
 
     workspace = session.scalar(
         select(WorkspaceRecord).where(
@@ -54,6 +55,14 @@ def submit_access_request(
     )
     if workspace is None:
         raise RequestWorkspaceNotFoundError
+
+    bound_actor_id = actor_id or workspace.actor_id
+    if draft.employee_id != bound_actor_id or workspace.actor_id != bound_actor_id:
+        raise RequestActorMismatchError
+
+    validation = validate_access_request(session, draft)
+    if validation.status != "success":
+        raise RequestValidationError(validation)
 
     # can_enter_approval 已证明四个业务字段非空；显式断言也帮助类型检查器收窄类型。
     assert draft.employee_id is not None

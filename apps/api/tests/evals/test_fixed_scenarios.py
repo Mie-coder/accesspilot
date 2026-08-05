@@ -127,11 +127,20 @@ def start_case(client: TestClient, request_id: str) -> str:
     return response.json()["approval_case_id"]
 
 
+def switch_identity(client: TestClient, employee_id: str) -> None:
+    response = client.post(
+        "/api/workspaces/identity",
+        json={"employee_id": employee_id},
+    )
+    assert response.status_code == 200
+
+
 def approve_all(client: TestClient, case_id: str) -> None:
     for actor_id in ("EMP-002", "EMP-003"):
+        switch_identity(client, actor_id)
         response = client.post(
             f"/api/approval-cases/{case_id}/decisions",
-            json={"actor_id": actor_id, "decision": "approve"},
+            json={"decision": "approve"},
         )
         assert response.status_code == 200
 
@@ -226,9 +235,10 @@ def test_eval_05_data_owner_cannot_approve_out_of_order(
     request_id = submit_request(eval_client)
     case_id = start_case(eval_client, request_id)
 
+    switch_identity(eval_client, "EMP-003")
     response = eval_client.post(
         f"/api/approval-cases/{case_id}/decisions",
-        json={"actor_id": "EMP-003", "decision": "approve"},
+        json={"decision": "approve"},
     )
     detail = eval_client.get(f"/api/requests/{request_id}")
 
@@ -243,13 +253,15 @@ def test_eval_05_data_owner_cannot_approve_out_of_order(
 def test_eval_06_rejection_is_terminal(eval_client: TestClient) -> None:
     request_id = submit_request(eval_client)
     case_id = start_case(eval_client, request_id)
+    switch_identity(eval_client, "EMP-002")
     rejected = eval_client.post(
         f"/api/approval-cases/{case_id}/decisions",
-        json={"actor_id": "EMP-002", "decision": "reject", "comment": "无需导出"},
+        json={"decision": "reject", "comment": "无需导出"},
     )
+    switch_identity(eval_client, "EMP-003")
     owner_attempt = eval_client.post(
         f"/api/approval-cases/{case_id}/decisions",
-        json={"actor_id": "EMP-003", "decision": "approve"},
+        json={"decision": "approve"},
     )
     provision_attempt = eval_client.post(
         f"/api/requests/{request_id}/provision",

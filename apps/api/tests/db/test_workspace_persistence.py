@@ -21,10 +21,16 @@ def test_workspace_draft_survives_new_app_instance() -> None:
     first_app = create_app(settings=settings)
     with TestClient(first_app) as first_browser:
         first_browser.post("/api/workspaces")
+        switched = first_browser.post(
+            "/api/workspaces/identity",
+            json={"employee_id": "EMP-002"},
+        )
+        assert switched.status_code == 200
         first_browser.post(
             "/api/drafts/preview",
             json={
-                "employee_id": "EMP-001",
+                # 请求体即使伪造员工编号，草稿也必须绑定后端身份。
+                "employee_id": "EMP-999",
                 "entitlement_id": "ENT-CUSTOMER-EXPORT",
                 "duration_days": 14,
                 "justification": "核验项目运营数据",
@@ -40,10 +46,12 @@ def test_workspace_draft_survives_new_app_instance() -> None:
     with TestClient(restarted_app) as restarted_browser:
         restarted_browser.cookies.set("accesspilot_workspace", token)
         response = restarted_browser.get("/api/drafts/current")
+        identity = restarted_browser.get("/api/workspaces/identity")
 
     assert response.status_code == 200
+    assert identity.json()["employee_id"] == "EMP-002"
     assert response.json()["draft"] == {
-        "employee_id": "EMP-001",
+        "employee_id": "EMP-002",
         "entitlement_id": "ENT-CUSTOMER-EXPORT",
         "duration_days": 14,
         "justification": "核验项目运营数据",

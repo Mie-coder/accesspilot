@@ -122,6 +122,15 @@ def handle_chat_message(
     if not normalized_content:
         raise ConversationInputError("消息不能为空")
 
+    workspace = workspace_service.get(workspace_token)
+    if (
+        workspace.draft is not None
+        and workspace.draft.employee_id is not None
+        and workspace.draft.employee_id != workspace.actor_id
+    ):
+        # 切换角色不能静默把旧申请人改成新身份。
+        raise ConversationInputError("当前草稿属于另一演示身份，请先切回原身份")
+
     with session_factory() as session:
         quota = consume_model_call(session, workspace_token=workspace_token)
     _append_event(
@@ -131,8 +140,7 @@ def handle_chat_message(
         payload={"content": normalized_content},
     )
 
-    workspace = workspace_service.get(workspace_token)
-    current_draft = workspace.draft or RequestDraft()
+    current_draft = workspace.draft or RequestDraft(employee_id=workspace.actor_id)
     try:
         def consume_retry_quota() -> None:
             nonlocal quota
@@ -147,6 +155,8 @@ def handle_chat_message(
             model,
             before_retry=consume_retry_quota,
         )
+        # 模型可以理解用户文本，但无权更改 Workspace 的身份事实。
+        parsed = parsed.model_copy(update={"employee_id": workspace.actor_id})
     except (ReplyParsingFailed, httpx.HTTPError, TimeoutError):
         # 模型和网络错误都失败闭合；不把异常详情、请求头或隐藏推理发给浏览器。
         assistant_message = "我暂时没能可靠理解这条消息，请稍后重试或换一种说法。"

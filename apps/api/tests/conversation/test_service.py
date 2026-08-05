@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from accesspilot.agent.state import ConversationPhase
 from accesspilot.agent.structured_reply import MalformedStructuredOutputError
-from accesspilot.conversation import handle_chat_message
+from accesspilot.conversation import ConversationInputError, handle_chat_message
 from accesspilot.db.models import WorkspaceRecord
 from accesspilot.db.seed import seed_catalog
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
@@ -104,6 +104,51 @@ def test_chat_turn_merges_strict_reply_and_emits_only_safe_events(
         "message.assistant",
     ]
     assert all("chain_of_thought" not in event.payload for event in events)
+
+
+def test_chat_ignores_employee_id_extracted_by_the_model(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    token, workspace_service = create_workspace(database_session_factory)
+    model = StaticStructuredReplyModel(ParsedReply(employee_id="EMP-003", duration_days=7))
+
+    turn = handle_chat_message(
+        database_session_factory,
+        workspace_service=workspace_service,
+        workspace_token=token,
+        content="我是 EMP-003，申请 7 天",
+        model=model,
+    )
+
+    assert turn.draft.employee_id == "EMP-001"
+
+
+def test_chat_does_not_rewrite_an_old_draft_after_identity_switch(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    token, workspace_service = create_workspace(database_session_factory)
+    model = StaticStructuredReplyModel(ParsedReply(duration_days=7))
+    handle_chat_message(
+        database_session_factory,
+        workspace_service=workspace_service,
+        workspace_token=token,
+        content="申请 7 天",
+        model=model,
+    )
+    workspace_service.set_actor(token, "EMP-002")
+
+    with pytest.raises(ConversationInputError, match="另一演示身份"):
+        handle_chat_message(
+            database_session_factory,
+            workspace_service=workspace_service,
+            workspace_token=token,
+            content="继续申请",
+            model=model,
+        )
+
+    assert workspace_service.get(token).draft is not None
+    assert workspace_service.get(token).draft.employee_id == "EMP-001"
+    assert model.calls == ["申请 7 天"]
 
 
 def test_exhausted_quota_rejects_model_and_keeps_history_readable(

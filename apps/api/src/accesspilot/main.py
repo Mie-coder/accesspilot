@@ -40,6 +40,7 @@ from accesspilot.db.models import (
     AccessGrantRecord,
     ApprovalCaseRecord,
     ApprovalStepRecord,
+    EmployeeRecord,
     ProvisioningAttemptRecord,
 )
 from accesspilot.db.session import build_engine, build_session_factory
@@ -68,6 +69,7 @@ from accesspilot.provisioning import (
     recover_provisioning,
 )
 from accesspilot.requests import (
+    RequestActorMismatchError,
     RequestNotReadyError,
     RequestValidationError,
     RequestWorkspaceNotFoundError,
@@ -82,6 +84,7 @@ from accesspilot.risk.review import (
     review_request_risk,
 )
 from accesspilot.workspaces import (
+    InvalidDemoActorError,
     UnknownWorkspaceError,
     Workspace,
     WorkspaceService,
@@ -94,9 +97,16 @@ class ApprovalDecisionBody(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    actor_id: str
     decision: Literal["approve", "reject"]
     comment: str | None = None
+
+
+class WorkspaceIdentityBody(BaseModel):
+    """前端只能选择预置演示员工，不能自由构造业务身份。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    employee_id: str
 
 
 class ProvisionAccessBody(BaseModel):
@@ -236,6 +246,20 @@ def create_app(
             "grant_id": str(grant.id) if grant is not None else None,
         }
 
+    def identity_payload(workspace: Workspace) -> dict[str, object]:
+        """从目录返回后端绑定的演示员工事实。"""
+
+        with active_session_factory() as session:
+            employee = session.get(EmployeeRecord, workspace.actor_id)
+        if employee is None:
+            raise HTTPException(status_code=422, detail="演示员工不存在")
+        return {
+            "employee_id": employee.employee_id,
+            "name": employee.name,
+            "department": employee.department,
+            "roles": employee.roles,
+        }
+
     @app.get("/health")
     def health() -> dict[str, str]:
         """返回最小存活状态，不访问外部依赖"""
@@ -372,6 +396,31 @@ def create_app(
         workspace_service.reset(workspace.token)
         return {"status": "reset"}
 
+    @app.get("/api/workspaces/identity")
+    def read_workspace_identity(
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> dict[str, object]:
+        """读取当前 Workspace 的后端演示身份。"""
+
+        return identity_payload(workspace)
+
+    @app.post("/api/workspaces/identity")
+    def switch_workspace_identity(
+        body: WorkspaceIdentityBody,
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> dict[str, object]:
+        """仅在预置虚构员工之间切换，旧草稿保持原样。"""
+
+        try:
+            with active_session_factory() as session:
+                employee = session.get(EmployeeRecord, body.employee_id)
+            if employee is None:
+                raise InvalidDemoActorError(body.employee_id)
+            updated = workspace_service.set_actor(workspace.token, body.employee_id)
+        except InvalidDemoActorError as error:
+            raise HTTPException(status_code=422, detail="不支持该演示身份") from error
+        return identity_payload(updated)
+
     @app.post("/api/workspaces/fault-mode")
     def set_workspace_fault_mode(
         body: FaultModeBody,
@@ -392,14 +441,26 @@ def create_app(
     ) -> dict[str, object]:
         """保存草稿并返回仍需补充的字段。"""
 
-        workspace_service.save_draft(workspace.token, draft)
-        missing_fields = draft.missing_fields()
+        if (
+            workspace.draft is not None
+            and workspace.draft.employee_id is not None
+            and workspace.draft.employee_id != workspace.actor_id
+        ):
+            # 角色切换后旧草稿仍属于原申请人，不允许该入口静默覆盖。
+            raise HTTPException(
+                status_code=409,
+                detail="当前草稿属于另一演示身份，请先切回原身份",
+            )
+        # employee_id 是后端事实；请求体中的同名字段只为兼容旧表单。
+        bound_draft = draft.model_copy(update={"employee_id": workspace.actor_id})
+        workspace_service.save_draft(workspace.token, bound_draft)
+        missing_fields = bound_draft.missing_fields()
         return {
-            "draft": draft.model_dump(mode="json"),
+            "draft": bound_draft.model_dump(mode="json"),
             "missing_fields": missing_fields,
             "is_complete": not missing_fields,
             # 这里只返回送审资格，不创建审批记录，也不代表权限已经开通。
-            "can_enter_approval": draft.can_enter_approval(),
+            "can_enter_approval": bound_draft.can_enter_approval(),
         }
 
     @app.get("/api/drafts/current")
@@ -435,7 +496,13 @@ def create_app(
                     session,
                     workspace_token=workspace.token,
                     draft=workspace.draft,
+                    actor_id=workspace.actor_id,
                 )
+            except RequestActorMismatchError as error:
+                raise HTTPException(
+                    status_code=409,
+                    detail="当前草稿属于另一演示身份，请切回原身份后提交",
+                ) from error
             except RequestNotReadyError as error:
                 raise HTTPException(
                     status_code=409,
@@ -501,7 +568,6 @@ def create_app(
 
     @app.get("/api/approval-inbox")
     def read_approval_inbox(
-        actor_id: str,
         workspace: Workspace = Depends(require_workspace),  # noqa: B008
     ) -> dict[str, object]:
         """读取当前演示身份真正轮到处理的审批步骤。"""
@@ -511,7 +577,7 @@ def create_app(
                 return list_approval_inbox(
                     session,
                     workspace_token=workspace.token,
-                    actor_id=actor_id,
+                    actor_id=workspace.actor_id,
                 )
             except OperationsNotFoundError as error:
                 raise HTTPException(status_code=404, detail=str(error)) from error
@@ -547,7 +613,7 @@ def create_app(
                     session,
                     workspace_token=workspace.token,
                     case_id=case_id,
-                    actor_id=body.actor_id,
+                    actor_id=workspace.actor_id,
                     decision=body.decision,
                     comment=body.comment,
                 )
