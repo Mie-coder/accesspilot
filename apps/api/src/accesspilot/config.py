@@ -25,6 +25,18 @@ class Settings(BaseSettings):
         default="https://api.deepseek.com",
         validation_alias="DEEPSEEK_BASE_URL",
     )
+    dashscope_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias="DASHSCOPE_API_KEY",
+    )
+    dashscope_embedding_model: str = Field(
+        default="text-embedding-v4",
+        validation_alias="DASHSCOPE_EMBEDDING_MODEL",
+    )
+    dashscope_base_url: str = Field(
+        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        validation_alias="DASHSCOPE_BASE_URL",
+    )
 
     model_config = SettingsConfigDict(
         env_prefix="ACCESSPILOT_",

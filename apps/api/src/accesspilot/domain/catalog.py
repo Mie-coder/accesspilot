@@ -96,10 +96,7 @@ POLICIES = (
     PolicyClause(
         code="POL-005",
         title="原始客户数据禁止自助",
-        content=(
-            "客户数据导出权限必须限制数据范围和使用期限，"
-            "不得授予无限期访问。"
-        ),
+        content="原始或未脱敏客户数据权限不得通过自助流程申请，必须转人工安全流程。",
     ),
     PolicyClause(
         code="POL-006",

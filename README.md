@@ -16,9 +16,9 @@ AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent�
 
 ## 当前进度
 
-- Day 1：申请草稿模型、缺失字段判断和测试已完成；
-- Day 2：状态枚举、状态转换、虚构员工/权限/政策目录、术语表和 ADR 已完成；
-- 当前正在搭建 FastAPI、数据库和 Agent 工具层。
+- T01：DeepSeek 严格结构化提取、确认提交守卫、正式申请与审计事务已完成；
+- T02：百炼/离线 512 维向量、pgvector Top 4 和只读风险审查已完成；
+- 下一步按 `docs/tickets/accesspilot-mvp-v1.md` 实现两级人工审批。
 
 ## 目录结构
 
@@ -42,7 +42,21 @@ ruff check apps/api/src apps/api/tests
 mypy apps/api/src
 ```
 
-当前阶段的核心测试不依赖 DeepSeek、百炼或 PostgreSQL，便于先验证领域规则。后续接入模型和向量服务时，密钥只能放在本地 `.env`，不得提交到 Git。
+集成测试需要本地 PostgreSQL/pgvector；DeepSeek 与百炼测试默认使用假客户端或确定性离线适配器，不消耗真实额度。真实密钥只能放在本地 `.env`，不得提交到 Git：
+
+```dotenv
+DEEPSEEK_API_KEY=你的本地密钥
+DASHSCOPE_API_KEY=你的本地密钥
+```
+
+需要手动验证真实适配器时运行：
+
+```bash
+python -m accesspilot.smoke dashscope-embedding
+python -m accesspilot.smoke deepseek-risk
+```
+
+Smoke 输出只包含安全业务结果或向量维度，不打印密钥和完整向量。
 
 ## 架构文档
 

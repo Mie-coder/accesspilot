@@ -81,29 +81,29 @@
 
 ## Day 7：DeepSeek、Structured Output 与确认守卫
 
-- [ ] 将 `DEEPSEEK_API_KEY` 配置到本地 `.env`，确认未进入 Git。
-- [ ] 接入 DeepSeek，并用 Pydantic 校验模型结构化输出。
-- [ ] 测试空 JSON、格式错误和一次纠正重试。
-- [ ] 测试并实现“用户未确认时不得提交申请”。
+- [x] 将 `DEEPSEEK_API_KEY` 配置到本地 `.env`，确认未进入 Git。
+- [x] 接入 DeepSeek，并用 Pydantic 校验模型结构化输出。
+- [x] 测试空 JSON、格式错误和一次纠正重试。
+- [x] 测试并实现“用户未确认时不得提交申请”。
 - [ ] 解释 Structured Output 与 Tool Calling 的区别并完成提交。
 
 **Agent 可辅助：** 查询官方文档、解释 API 错误、审查 Prompt 与工具 Schema。
 
 ## Day 8：百炼向量化、pgvector 与政策 RAG
 
-- [ ] 创建 AccessPilot 专用百炼 API Key，并只保存在 `.env`。
-- [ ] 用 `text-embedding-v4` 生成 512 维政策向量。
-- [ ] 将虚构政策分块及向量写入 pgvector。
-- [ ] 检索最相关的 Top 4 政策条款并返回引用信息。
-- [ ] 测试向量服务失败时风险审查进入可恢复错误，而不是编造政策。
+- [x] 创建 AccessPilot 专用百炼 API Key，并只保存在 `.env`。
+- [x] 用 `text-embedding-v4` 生成 512 维政策向量。
+- [x] 将虚构政策分块及向量写入 pgvector。
+- [x] 检索最相关的 Top 4 政策条款并返回引用信息。
+- [x] 测试向量服务失败时风险审查进入可恢复错误，而不是编造政策。
 - [ ] 解释为什么政策使用 RAG、权限主数据使用 Tool/SQL，并完成提交。
 
 **Agent 可辅助：** 解释向量、余弦相似度、分块和小数据集精确检索。
 
 ## Day 9：风险审查 Agent 与两级人工审批
 
-- [ ] 定义只读 `RiskReview` 结构化输出。
-- [ ] 实现独立风险审查 Agent，只允许读取申请与政策。
+- [x] 定义只读 `RiskReview` 结构化输出。
+- [x] 实现独立风险审查 Agent，只允许读取申请与政策。
 - [ ] 测试并实现直属经理 → 数据所有者的串行审批。
 - [ ] 测试驳回、重复审批和错误顺序。
 - [ ] 解释两个 Agent 的责任边界并完成提交。

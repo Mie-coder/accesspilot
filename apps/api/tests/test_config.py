@@ -25,3 +25,15 @@ def test_deepseek_settings_use_server_environment(monkeypatch) -> None:
     assert settings.deepseek_api_key.get_secret_value() == "local-test-key"
     assert settings.deepseek_model == "deepseek-v4-flash"
     assert "local-test-key" not in repr(settings)
+
+
+def test_dashscope_settings_use_server_environment(monkeypatch) -> None:
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "local-embedding-key")
+    monkeypatch.setenv("DASHSCOPE_EMBEDDING_MODEL", "text-embedding-v4")
+
+    settings = Settings()
+
+    assert settings.dashscope_api_key is not None
+    assert settings.dashscope_api_key.get_secret_value() == "local-embedding-key"
+    assert settings.dashscope_embedding_model == "text-embedding-v4"
+    assert "local-embedding-key" not in repr(settings)

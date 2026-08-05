@@ -16,6 +16,8 @@
 
 ## T02 — 政策向量与只读风险审查
 
+**状态：** 已完成并通过本地验收（118 条后端测试、Ruff、MyPy、Alembic 漂移检查、真实百炼与 DeepSeek smoke test）。
+
 **目标：** 完成百炼/离线嵌入、pgvector Top 4 检索和严格只读 `RiskReview`。
 
 **验收：**
