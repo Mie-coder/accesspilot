@@ -98,6 +98,10 @@ def eval_client(
 
 def create_workspace(client: TestClient) -> None:
     assert client.post("/api/workspaces").status_code == 201
+    assert client.post(
+        "/api/demo/session",
+        json={"employee_id": "EMP-001"},
+    ).status_code == 200
 
 
 def save_draft(client: TestClient, *, confirmed: bool) -> None:
@@ -405,7 +409,6 @@ def test_eval_12_two_malformed_replies_fail_closed(
         )
     )
     create_workspace(client)
-    assert client.post("/api/demo/session", json={"employee_id": "EMP-001"}).status_code == 200
 
     response = client.post("/api/chat/messages", json={"content": "帮我申请权限"})
     assert client.post("/api/demo/session", json={"employee_id": "EMP-001"}).status_code == 200

@@ -44,6 +44,10 @@ def operations_client(
 def submit_and_start(client: TestClient) -> tuple[str, str]:
     assert client.post("/api/workspaces").status_code == 201
     assert client.post(
+        "/api/demo/session",
+        json={"employee_id": "EMP-001"},
+    ).status_code == 200
+    assert client.post(
         "/api/drafts/preview",
         json={
             "employee_id": "EMP-001",

@@ -1,7 +1,8 @@
 from fastapi.testclient import TestClient
 
+from accesspilot.config import Settings
 from accesspilot.main import create_app
-from accesspilot.workspaces import InMemoryWorkspaceStore, WorkspaceService
+from accesspilot.workspaces import InMemoryWorkspaceStore
 
 
 def test_preview_requires_a_workspace_cookie() -> None:
@@ -130,8 +131,17 @@ def test_preview_cannot_override_backend_workspace_identity() -> None:
 
 def test_preview_does_not_overwrite_an_old_draft_after_identity_switch() -> None:
     store = InMemoryWorkspaceStore()
-    client = TestClient(create_app(store=store))
-    client.post("/api/workspaces")
+    client = TestClient(
+        create_app(
+            store=store,
+            settings=Settings(demo_mode_enabled=True),
+        )
+    )
+    assert client.post("/api/workspaces").status_code == 201
+    assert client.post(
+        "/api/demo/session",
+        json={"employee_id": "EMP-001"},
+    ).status_code == 200
     token = client.cookies.get("accesspilot_workspace")
     assert token is not None
     original = client.post(
@@ -145,7 +155,10 @@ def test_preview_does_not_overwrite_an_old_draft_after_identity_switch() -> None
         },
     )
     assert original.status_code == 200
-    WorkspaceService(store).set_actor(token, "EMP-002")
+    assert client.post(
+        "/api/demo/session",
+        json={"employee_id": "EMP-002"},
+    ).status_code == 200
 
     response = client.post(
         "/api/drafts/preview",

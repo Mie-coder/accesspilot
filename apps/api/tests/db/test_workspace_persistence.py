@@ -16,11 +16,17 @@ def test_workspace_draft_survives_new_app_instance() -> None:
         database_url=os.getenv(
             "ACCESSPILOT_TEST_DATABASE_URL",
             "postgresql+psycopg://accesspilot@127.0.0.1:55432/accesspilot_test",
-        )
+        ),
+        demo_mode_enabled=True,
     )
     first_app = create_app(settings=settings)
     with TestClient(first_app) as first_browser:
-        first_browser.post("/api/workspaces")
+        assert first_browser.post("/api/workspaces").status_code == 201
+        entered = first_browser.post(
+            "/api/demo/session",
+            json={"employee_id": "EMP-001"},
+        )
+        assert entered.status_code == 200
         switched = first_browser.post(
             "/api/demo/session",
             json={"employee_id": "EMP-002"},

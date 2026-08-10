@@ -55,6 +55,10 @@ def approval_client(
 
 def submit_request(client: TestClient) -> str:
     assert client.post("/api/workspaces").status_code == 201
+    assert client.post(
+        "/api/demo/session",
+        json={"employee_id": "EMP-001"},
+    ).status_code == 200
     assert (
         client.post(
             "/api/drafts/preview",
@@ -149,7 +153,11 @@ def test_api_rejects_owner_before_manager_without_advancing(
 def test_api_rejects_stale_draft_after_workspace_identity_switch(
     approval_client: TestClient,
 ) -> None:
-    approval_client.post("/api/workspaces")
+    assert approval_client.post("/api/workspaces").status_code == 201
+    assert approval_client.post(
+        "/api/demo/session",
+        json={"employee_id": "EMP-001"},
+    ).status_code == 200
     preview = approval_client.post(
         "/api/drafts/preview",
         json={
