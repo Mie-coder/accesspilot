@@ -92,6 +92,14 @@ from accesspilot.workspaces import (
 )
 
 
+class DemoSessionBody(BaseModel):
+    """显式进入虚构演示场景时选择的预置身份。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    employee_id: str
+
+
 class ApprovalDecisionBody(BaseModel):
     """人工审批 API 唯一允许接收的决定字段。"""
 
@@ -181,25 +189,100 @@ def create_app(
                 model_name=active_settings.deepseek_model,
                 base_url=active_settings.deepseek_base_url,
             )
-    workspace_service = WorkspaceService(store)
+    workspace_service = WorkspaceService(
+        store,
+        product_actor_id=active_settings.product_actor_id,
+        demo_mode_enabled=active_settings.demo_mode_enabled,
+    )
     app = FastAPI(title=active_settings.app_name)
 
-    def require_workspace(request: Request) -> Workspace:
-        """从cookie中读取Token， 并取得当前Workspace"""
+    def _set_workspace_cookie(response: Response, token: str) -> None:
+        response.set_cookie(
+            key=active_settings.workspace_cookie_name,
+            value=token,
+            httponly=True,
+            samesite="lax",
+            secure=active_settings.workspace_cookie_secure,
+        )
+
+    def _set_product_backup_cookie(response: Response, token: str) -> None:
+        response.set_cookie(
+            key=active_settings.product_workspace_cookie_name,
+            value=token,
+            httponly=True,
+            samesite="lax",
+            secure=active_settings.workspace_cookie_secure,
+        )
+
+    def _clear_product_backup_cookie(response: Response) -> None:
+        response.delete_cookie(active_settings.product_workspace_cookie_name)
+
+    def _resolve_workspace(request: Request, response: Response) -> Workspace:
+        """解析主 Cookie；关闭 Demo 时永不把旧 Demo 空间当产品空间。"""
+
         token = request.cookies.get(active_settings.workspace_cookie_name)
         if token is None:
-            # 浏览器从未创建演示空间，后端无法判断草稿归属哪个 Workspace。
             raise HTTPException(status_code=401, detail="Workspace cookie 是必须的")
         try:
-            # 只有服务端 Store 中仍保存该 Token，才允许继续操作该 Workspace。
-            return workspace_service.get(token)
+            raw_workspace = workspace_service.peek(token)
         except UnknownWorkspaceError as error:
-            # Cookie 存在但资源已失效（例如 API 重启后内存清空），
-            # 将领域异常转换为浏览器可理解的 HTTP 404 响应。
-            raise HTTPException(
-                status_code=404,
-                detail="Workspace not found",
-            ) from error
+            raise HTTPException(status_code=404, detail="Workspace not found") from error
+
+        backup_token = request.cookies.get(active_settings.product_workspace_cookie_name)
+        if active_settings.demo_mode_enabled or not raw_workspace.demo_session_active:
+            workspace = workspace_service.get(token)
+            if not active_settings.demo_mode_enabled and backup_token is not None:
+                _clear_product_backup_cookie(response)
+            return workspace
+
+        if backup_token is not None:
+            try:
+                product_raw = workspace_service.peek(backup_token)
+            except UnknownWorkspaceError:
+                product_raw = None
+            if product_raw is not None and not product_raw.demo_session_active:
+                product_workspace = workspace_service.get(backup_token)
+                workspace_service.exit_demo(token)
+                _set_workspace_cookie(response, product_workspace.token)
+                _clear_product_backup_cookie(response)
+                return product_workspace
+
+        workspace_service.get(token)
+        clean_workspace = workspace_service.create()
+        _set_workspace_cookie(response, clean_workspace.token)
+        _clear_product_backup_cookie(response)
+        return clean_workspace
+
+    def require_workspace(
+        request: Request,
+        response: Response,
+    ) -> Workspace:
+        """读取当前有效 Workspace；必要时恢复产品 Cookie。"""
+
+        return _resolve_workspace(request, response)
+
+    def require_active_demo(
+        request: Request,
+        response: Response,
+    ) -> Workspace:
+        """Demo 控制 API 只有在功能开启且显式进入场景后可用。"""
+
+        if not active_settings.demo_mode_enabled:
+            raise HTTPException(status_code=404, detail="Demo 控制台未启用")
+        workspace = _resolve_workspace(request, response)
+        if not workspace.demo_session_active or workspace.demo_actor_id is None:
+            raise HTTPException(status_code=404, detail="尚未进入 Demo 场景")
+        return workspace
+
+    def require_demo_feature(
+        request: Request,
+        response: Response,
+    ) -> Workspace:
+        """Demo API 先检查功能开关，再解析 Cookie。"""
+
+        if not active_settings.demo_mode_enabled:
+            raise HTTPException(status_code=404, detail="Demo 控制台未启用")
+        return _resolve_workspace(request, response)
 
     def approval_payload(
         session: Session,
@@ -256,10 +339,24 @@ def create_app(
         return {
             "employee_id": employee.employee_id,
             "name": employee.name,
+
+
             "department": employee.department,
             "roles": employee.roles,
         }
 
+
+    def demo_session_payload(workspace: Workspace) -> dict[str, object]:
+        """返回 Demo 控制台需要的会话状态，不混入普通产品身份响应。"""
+
+        payload: dict[str, object] = {
+            "demo_mode_enabled": active_settings.demo_mode_enabled,
+            "demo_session_active": workspace.demo_session_active,
+        }
+        payload["fault_mode"] = workspace.fault_mode if workspace.demo_session_active else None
+        if workspace.demo_session_active and workspace.demo_actor_id:
+            payload["employee_id"] = workspace.demo_actor_id
+        return payload
     @app.get("/health")
     def health() -> dict[str, str]:
         """返回最小存活状态，不访问外部依赖"""
@@ -314,9 +411,9 @@ def create_app(
             },
         )
 
-    @app.get("/api/model-quota")
+    @app.get("/api/demo/model-quota")
     def read_model_quota(
-        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+        workspace: Workspace = Depends(require_active_demo),  # noqa: B008
     ) -> dict[str, int]:
         """读取当前配额；只读回放不会消耗模型次数。"""
 
@@ -349,51 +446,73 @@ def create_app(
             ) from error
         except ConversationInputError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
-        return turn.model_dump(mode="json")
+        return turn.model_dump(mode="json", exclude={"quota"})
 
-    @app.post("/api/workspaces", status_code=201)
-    def create_workspace(response: Response) -> dict[str, str]:
-        """创建当前浏览器的独立演示空间。"""
-
-        workspace = workspace_service.create()
-        response.set_cookie(
-            key=active_settings.workspace_cookie_name,
-            value=workspace.token,
-            httponly=True,
-            samesite="lax",
-            secure=active_settings.workspace_cookie_secure,
-        )
-        return {"status": "created"}
-
-    @app.post("/api/workspaces/ensure")
-    def ensure_workspace(request: Request, response: Response) -> dict[str, str]:
-        """复用有效 Workspace；首次访问或陈旧 Cookie 才创建新空间。"""
+    @app.post("/api/workspaces")
+    def create_workspace(request: Request, response: Response) -> dict[str, str]:
+        """首次创建 Workspace；已有有效 Cookie 时保持原空间。"""
 
         token = request.cookies.get(active_settings.workspace_cookie_name)
         if token is not None:
             try:
-                workspace_service.get(token)
-                return {"status": "existing"}
+                workspace_service.peek(token)
             except UnknownWorkspaceError:
-                # 陈旧 Cookie 不应让首次加载先产生 404，再由前端猜测恢复方式。
                 pass
+            else:
+                _resolve_workspace(request, response)
+                response.status_code = 200
+                return {"status": "existing"}
         workspace = workspace_service.create()
-        response.set_cookie(
-            key=active_settings.workspace_cookie_name,
-            value=workspace.token,
-            httponly=True,
-            samesite="lax",
-            secure=active_settings.workspace_cookie_secure,
-        )
+        _set_workspace_cookie(response, workspace.token)
+        response.status_code = 201
         return {"status": "created"}
 
-    @app.post("/api/workspaces/reset")
+    @app.post("/api/workspaces/ensure")
+    def ensure_workspace(request: Request, response: Response) -> dict[str, str]:
+        """复用有效 Workspace；首次或陈旧 Cookie 才创建新空间。"""
+
+        token = request.cookies.get(active_settings.workspace_cookie_name)
+        if token is not None:
+            try:
+                workspace_service.peek(token)
+            except UnknownWorkspaceError:
+                pass
+            else:
+                _resolve_workspace(request, response)
+                return {"status": "existing"}
+
+        backup_token = request.cookies.get(active_settings.product_workspace_cookie_name)
+        if not active_settings.demo_mode_enabled and backup_token is not None:
+            try:
+                product_raw = workspace_service.peek(backup_token)
+            except UnknownWorkspaceError:
+                product_raw = None
+            if product_raw is not None and not product_raw.demo_session_active:
+                _set_workspace_cookie(response, backup_token)
+                _clear_product_backup_cookie(response)
+                return {"status": "existing"}
+
+        workspace = workspace_service.create()
+        _set_workspace_cookie(response, workspace.token)
+
+        return {"status": "created"}
+    @app.post("/api/demo/reset")
     def reset_workspace(
-        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+        response: Response,
+        workspace: Workspace = Depends(require_active_demo),  # noqa: B008
     ) -> dict[str, str]:
         """只重置当前 Workspace 的可变数据。"""
 
-        workspace_service.reset(workspace.token)
+        replacement = workspace_service.create()
+        if workspace.demo_actor_id is None:
+            raise HTTPException(status_code=409, detail="当前没有激活的演示场景")
+        replacement = workspace_service.enter_demo(
+            replacement.token,
+            workspace.demo_actor_id,
+        )
+        # Keep old Demo facts, but clear its session override and fault mode.
+        workspace_service.exit_demo(workspace.token)
+        _set_workspace_cookie(response, replacement.token)
         return {"status": "reset"}
 
     @app.get("/api/workspaces/identity")
@@ -404,27 +523,64 @@ def create_app(
 
         return identity_payload(workspace)
 
-    @app.post("/api/workspaces/identity")
+    @app.post("/api/demo/session")
     def switch_workspace_identity(
-        body: WorkspaceIdentityBody,
-        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+        body: DemoSessionBody,
+        response: Response,
+        workspace: Workspace = Depends(require_demo_feature),  # noqa: B008
     ) -> dict[str, object]:
-        """仅在预置虚构员工之间切换，旧草稿保持原样。"""
+        """为每个 Demo 场景创建独立 Workspace，保留产品空间备份。"""
 
         try:
             with active_session_factory() as session:
                 employee = session.get(EmployeeRecord, body.employee_id)
             if employee is None:
                 raise InvalidDemoActorError(body.employee_id)
-            updated = workspace_service.set_actor(workspace.token, body.employee_id)
         except InvalidDemoActorError as error:
             raise HTTPException(status_code=422, detail="不支持该演示身份") from error
-        return identity_payload(updated)
 
-    @app.post("/api/workspaces/fault-mode")
+        if workspace.demo_session_active:
+            # Keep facts in one Demo Workspace when switching actors.
+            updated = workspace_service.enter_demo(workspace.token, body.employee_id)
+        else:
+            _set_product_backup_cookie(response, workspace.token)
+            replacement = workspace_service.create()
+            updated = workspace_service.enter_demo(replacement.token, body.employee_id)
+        _set_workspace_cookie(response, updated.token)
+        return {**identity_payload(updated), **demo_session_payload(updated)}
+
+    @app.get("/api/demo/session")
+    def read_demo_session(
+        workspace: Workspace = Depends(require_demo_feature),  # noqa: B008
+    ) -> dict[str, object]:
+        return demo_session_payload(workspace)
+
+    @app.post("/api/demo/session/exit")
+    def exit_demo_session(
+        request: Request,
+        response: Response,
+        workspace: Workspace = Depends(require_active_demo),  # noqa: B008
+    ) -> dict[str, object]:
+        workspace_service.exit_demo(workspace.token)
+        backup_token = request.cookies.get(active_settings.product_workspace_cookie_name)
+        restored: Workspace | None = None
+        if backup_token is not None:
+            try:
+                backup = workspace_service.peek(backup_token)
+            except UnknownWorkspaceError:
+                backup = None
+            if backup is not None and not backup.demo_session_active:
+                restored = workspace_service.get(backup_token)
+        if restored is None:
+            restored = workspace_service.create()
+        _set_workspace_cookie(response, restored.token)
+        _clear_product_backup_cookie(response)
+        return {**identity_payload(restored), **demo_session_payload(restored)}
+
+    @app.post("/api/demo/fault-mode")
     def set_workspace_fault_mode(
         body: FaultModeBody,
-        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+        workspace: Workspace = Depends(require_active_demo),  # noqa: B008
     ) -> dict[str, str | None]:
         """为当前 Workspace 设置或清除可控 IAM 故障。"""
 
@@ -473,13 +629,14 @@ def create_app(
         Workspace 查询保持一致，不从 URL 接收敏感 Token。
         """
 
-        return {
-            "draft": (
-                workspace.draft.model_dump(mode="json")
-                if workspace.draft is not None
-                else None
-            )
-        }
+        draft = workspace.draft
+        if (
+            draft is not None
+            and draft.employee_id is not None
+            and draft.employee_id != workspace.actor_id
+        ):
+            draft = None
+        return {"draft": draft.model_dump(mode="json") if draft is not None else None}
 
     @app.post("/api/requests", status_code=201)
     def submit_request(
@@ -647,6 +804,7 @@ def create_app(
                     workspace_token=workspace.token,
                     request_id=request_id,
                     idempotency_key=body.idempotency_key,
+                    fault_mode=workspace.effective_fault_mode(active_settings.demo_mode_enabled),
                     iam=iam_provisioner,
                 )
             except (ProvisioningNotFoundError, ProvisioningWorkspaceMismatchError) as error:

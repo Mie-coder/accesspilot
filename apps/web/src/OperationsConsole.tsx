@@ -21,14 +21,12 @@ import {
   readApprovalInbox,
   readRequestDetail,
   recoverProvisioning,
-  setFaultMode,
   startApproval,
 } from './api'
 import type { ApprovalInbox, RequestDetail } from './types'
 
 interface OperationsViewProps {
   roleLabel: string
-  quotaRemaining: number
   inbox: ApprovalInbox | null
   detail: RequestDetail | null
   isLoading: boolean
@@ -38,7 +36,6 @@ interface OperationsViewProps {
   onSelectRequest: (requestId: string) => void
   onStartApproval: () => void
   onDecision: (decision: 'approve' | 'reject', comment: string | null) => void
-  onFaultMode: (mode: 'iam_failure' | 'iam_timeout' | null) => void
   onProvision: () => void
   onRecover: () => void
   onRetryProvision: () => void
@@ -113,7 +110,6 @@ function ErrorState({ message, onRetry }: { message: string; onRetry: () => void
 
 export function OperationsView({
   roleLabel,
-  quotaRemaining,
   inbox,
   detail,
   isLoading,
@@ -123,7 +119,6 @@ export function OperationsView({
   onSelectRequest,
   onStartApproval,
   onDecision,
-  onFaultMode,
   onProvision,
   onRecover,
   onRetryProvision,
@@ -156,12 +151,6 @@ export function OperationsView({
           </button>
         </div>
 
-        {quotaRemaining === 0 ? (
-          <div className="readonly-banner" role="status">
-            <History size={17} />
-            模型额度已用尽；历史消息和审计事实仍可只读回放。
-          </div>
-        ) : null}
         {error ? (
           <div className="recoverable-banner" role="alert">
             <AlertCircle size={17} />
@@ -350,24 +339,6 @@ export function OperationsView({
 
             {detail.approval?.approval_status === 'approved' && !detail.provisioning.access_granted ? (
               <div className="fault-controls">
-                <label>
-                  <span>演示故障模式</span>
-                  <select
-                    aria-label="演示故障模式"
-                    value={detail.fault_mode ?? ''}
-                    disabled={isBusy || detail.provisioning.provisioning_status === 'unknown'}
-                    onChange={(event) => {
-                      const value = event.target.value
-                      onFaultMode(
-                        value === 'iam_timeout' || value === 'iam_failure' ? value : null,
-                      )
-                    }}
-                  >
-                    <option value="">正常开通</option>
-                    <option value="iam_timeout">模拟响应超时</option>
-                    <option value="iam_failure">模拟明确失败</option>
-                  </select>
-                </label>
                 {detail.provisioning.provisioning_status === 'unknown' ? (
                   <button type="button" disabled={isBusy} onClick={onRecover}>
                     <RefreshCw size={16} />查询原 IAM 操作
@@ -410,11 +381,9 @@ export function OperationsView({
 export function OperationsConsole({
   roleLabel,
   requestId,
-  quotaRemaining,
 }: {
   roleLabel: string
   requestId: string | null
-  quotaRemaining: number
 }) {
   const [inbox, setInbox] = useState<ApprovalInbox | null>(null)
   const [detail, setDetail] = useState<RequestDetail | null>(null)
@@ -480,7 +449,6 @@ export function OperationsConsole({
   return (
     <OperationsView
       roleLabel={roleLabel}
-      quotaRemaining={quotaRemaining}
       inbox={inbox}
       detail={detail}
       isLoading={isLoading}
@@ -496,7 +464,6 @@ export function OperationsConsole({
           void runAction(() => decideApproval(currentCaseId, decision, comment))
         }
       }}
-      onFaultMode={(mode) => void runAction(() => setFaultMode(mode))}
       onProvision={() => {
         if (currentRequestId) void runAction(() => provisionRequest(currentRequestId))
       }}
@@ -506,7 +473,6 @@ export function OperationsConsole({
       onRetryProvision={() => {
         if (currentRequestId) {
           void runAction(async () => {
-            await setFaultMode(null)
             await provisionRequest(currentRequestId)
           })
         }

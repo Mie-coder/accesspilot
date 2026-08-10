@@ -10,7 +10,7 @@ def test_database_url_defaults_to_lightweight_local_postgres(
 
     monkeypatch.delenv("ACCESSPILOT_DATABASE_URL", raising=False)
 
-    assert Settings().database_url == (
+    assert Settings(_env_file=None).database_url == (
         "postgresql+psycopg://accesspilot@127.0.0.1:55432/accesspilot"
     )
 
@@ -37,3 +37,11 @@ def test_dashscope_settings_use_server_environment(monkeypatch) -> None:
     assert settings.dashscope_api_key.get_secret_value() == "local-embedding-key"
     assert settings.dashscope_embedding_model == "text-embedding-v4"
     assert "local-embedding-key" not in repr(settings)
+
+
+def test_demo_mode_supports_constructor_and_environment_values(monkeypatch) -> None:
+    monkeypatch.delenv("ACCESSPILOT_DEMO_MODE_ENABLED", raising=False)
+    assert Settings(demo_mode_enabled=True, _env_file=None).demo_mode_enabled is True
+
+    monkeypatch.setenv("ACCESSPILOT_DEMO_MODE_ENABLED", "true")
+    assert Settings(_env_file=None).demo_mode_enabled is True

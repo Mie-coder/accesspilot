@@ -22,7 +22,7 @@ def test_workspace_draft_survives_new_app_instance() -> None:
     with TestClient(first_app) as first_browser:
         first_browser.post("/api/workspaces")
         switched = first_browser.post(
-            "/api/workspaces/identity",
+            "/api/demo/session",
             json={"employee_id": "EMP-002"},
         )
         assert switched.status_code == 200

@@ -225,7 +225,6 @@ def get_request_detail(
     return {
         # 详情 GET 是可重复读取的事实回放；所有写动作使用独立守卫端点。
         "view_mode": "read_only_replay",
-        "fault_mode": workspace.fault_mode,
         "request": {
             "request_id": str(request.id),
             "requester_id": request.requester_id,

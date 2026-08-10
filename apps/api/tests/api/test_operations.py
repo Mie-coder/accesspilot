@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from accesspilot.agent.embeddings import DeterministicEmbeddingModel
+from accesspilot.config import Settings
 from accesspilot.db.models import PolicyChunkRecord
 from accesspilot.db.seed import seed_catalog
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
@@ -26,6 +27,7 @@ def operations_client(
     client = TestClient(
         create_app(
             store=SqlAlchemyWorkspaceStore(database_session_factory),
+            settings=Settings(demo_mode_enabled=True),
             session_factory=database_session_factory,
             embedding_model=embedding_model,
             risk_review_model=DeterministicRiskReviewModel(),
@@ -59,7 +61,7 @@ def submit_and_start(client: TestClient) -> tuple[str, str]:
 
 def switch_identity(client: TestClient, employee_id: str) -> None:
     response = client.post(
-        "/api/workspaces/identity",
+        "/api/demo/session",
         json={"employee_id": employee_id},
     )
     assert response.status_code == 200
@@ -138,7 +140,7 @@ def test_timeout_detail_exposes_recovery_without_claiming_a_grant(
             json={"decision": "approve"},
         ).status_code == 200
     assert operations_client.post(
-        "/api/workspaces/fault-mode",
+        "/api/demo/fault-mode",
         json={"fault_mode": "iam_timeout"},
     ).status_code == 200
 

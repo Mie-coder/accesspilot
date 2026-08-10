@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from accesspilot.agent.embeddings import DeterministicEmbeddingModel
+from accesspilot.config import Settings
 from accesspilot.db.models import (
     AccessGrantRecord,
     AccessRequestRecord,
@@ -31,6 +32,8 @@ def build_approved_request(
         workspace = WorkspaceRecord(
             token_hash=sha256(token.encode()).hexdigest(),
             fault_mode=fault_mode,
+            demo_actor_id="EMP-001" if fault_mode is not None else None,
+            demo_session_active=fault_mode is not None,
         )
         session.add(workspace)
         session.flush()
@@ -58,6 +61,7 @@ def build_approved_request(
     client = TestClient(
         create_app(
             store=SqlAlchemyWorkspaceStore(database_session_factory),
+            settings=Settings(demo_mode_enabled=True),
             session_factory=database_session_factory,
             embedding_model=DeterministicEmbeddingModel(),
             risk_review_model=DeterministicRiskReviewModel(),
@@ -148,7 +152,7 @@ def test_api_failure_retries_same_key_after_fault_is_cleared(
     assert failed.json()["access_granted"] is False
 
     cleared = client.post(
-        "/api/workspaces/fault-mode",
+        "/api/demo/fault-mode",
         json={"fault_mode": None},
     )
     retried = client.post(

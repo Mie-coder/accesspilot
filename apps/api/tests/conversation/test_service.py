@@ -210,6 +210,15 @@ def test_correction_retry_consumes_a_second_model_call(
     assert model.calls == 2
     assert turn.quota.used == 2
     assert turn.quota.remaining == 0
+    assert turn.quota.retry_consumed == 1
+    with database_session_factory() as session:
+        workspace = session.scalar(
+            select(WorkspaceRecord).where(
+                WorkspaceRecord.token_hash == sha256(token.encode()).hexdigest()
+            )
+        )
+    assert workspace is not None
+    assert workspace.model_retry_consumed == 1
 
 
 def test_editing_confirmed_business_field_requires_new_confirmation(

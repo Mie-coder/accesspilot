@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
 
+from accesspilot.config import Settings
 from accesspilot.db.seed import seed_catalog
 from accesspilot.main import create_app
 from accesspilot.workspaces import InMemoryWorkspaceStore
@@ -14,6 +15,7 @@ def build_client(
     return TestClient(
         create_app(
             store=InMemoryWorkspaceStore(),
+            settings=Settings(demo_mode_enabled=True),
             session_factory=database_session_factory,
         )
     )
@@ -27,7 +29,7 @@ def test_workspace_identity_defaults_to_applicant_and_can_switch(
 
     applicant = client.get("/api/workspaces/identity")
     switched = client.post(
-        "/api/workspaces/identity",
+        "/api/demo/session",
         json={"employee_id": "EMP-002"},
     )
     current = client.get("/api/workspaces/identity")
@@ -38,7 +40,8 @@ def test_workspace_identity_defaults_to_applicant_and_can_switch(
     assert switched.status_code == 200
     assert switched.json()["employee_id"] == "EMP-002"
     assert "manager" in switched.json()["roles"]
-    assert current.json() == switched.json()
+    assert current.json()["employee_id"] == switched.json()["employee_id"]
+    assert current.json()["roles"] == switched.json()["roles"]
 
 
 def test_workspace_identity_rejects_unknown_or_unexposed_demo_actor(
@@ -48,14 +51,15 @@ def test_workspace_identity_rejects_unknown_or_unexposed_demo_actor(
     client.post("/api/workspaces")
 
     unknown = client.post(
-        "/api/workspaces/identity",
+        "/api/demo/session",
         json={"employee_id": "EMP-999"},
     )
-    hidden = client.post(
-        "/api/workspaces/identity",
+    admin = client.post(
+        "/api/demo/session",
         json={"employee_id": "EMP-004"},
     )
 
     assert unknown.status_code == 422
-    assert hidden.status_code == 422
-    assert client.get("/api/workspaces/identity").json()["employee_id"] == "EMP-001"
+    assert admin.status_code == 200
+    assert "permissions_admin" in admin.json()["roles"]
+    assert client.get("/api/workspaces/identity").json()["employee_id"] == "EMP-004"

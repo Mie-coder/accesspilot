@@ -1,26 +1,24 @@
 import { createContext, useContext } from 'react'
 
 import type {
-  ModelQuota,
   RequestDraft,
   RequestResult,
   WorkspaceEvent,
   WorkspaceIdentity,
+  DemoSession,
 } from './types'
 
 export interface WorkbenchContextValue {
   identity: WorkspaceIdentity
   draft: RequestDraft | null
   missingFields: string[]
-  quota: ModelQuota
+  demoSession: DemoSession
   events: WorkspaceEvent[]
   businessStatus: string
   error: string | null
   requestResult: RequestResult | null
-  isSubmitting: boolean
-  switchIdentity: (employeeId: string) => Promise<void>
   submit: () => Promise<void>
-  reset: () => Promise<void>
+  isSubmitting: boolean
 }
 
 export const WorkbenchContext = createContext<WorkbenchContextValue | null>(null)

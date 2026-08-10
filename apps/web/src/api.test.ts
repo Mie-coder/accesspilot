@@ -39,8 +39,8 @@ describe('bootstrapWorkspace', () => {
         expect(init?.method).toBe('POST')
         return Response.json({ status: 'created' }, { status: 201 })
       }
-      if (url === '/api/model-quota') {
-        return Response.json({ used: 0, limit: 20, remaining: 20 })
+      if (url === '/api/demo/session') {
+        return Response.json({ demo_mode_enabled: true, demo_session_active: false })
       }
       if (url === '/api/events') {
         expect(new Headers(init?.headers).get('Last-Event-ID')).toBe('0')
@@ -57,7 +57,7 @@ describe('bootstrapWorkspace', () => {
 
     expect(snapshot.identity.employee_id).toBe('EMP-002')
     expect(snapshot.draft).toBeNull()
-    expect(snapshot.quota.remaining).toBe(20)
+    expect(snapshot.demoSession).toEqual({ demo_mode_enabled: true, demo_session_active: false })
     expect(snapshot.lastEventId).toBe(1)
     expect(snapshot.events[0]?.type).toBe('message.assistant')
     expect(fetchMock).toHaveBeenCalledWith(

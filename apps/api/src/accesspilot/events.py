@@ -85,6 +85,14 @@ FORBIDDEN_EVENT_KEYS = {
     "hidden_thoughts",
     "reasoning_content",
     "secret",
+    "quota",
+    "used",
+    "limit",
+    "remaining",
+    "retry_consumed",
+    "model_calls_used",
+    "model_call_limit",
+    "model_quota",
 }
 
 SENSITIVE_EVENT_VALUE_PATTERNS = (
@@ -102,6 +110,7 @@ class ModelQuota(BaseModel):
     used: int
     limit: int
     remaining: int
+    retry_consumed: int
 
 
 def _load_workspace(session: Session, token: str) -> WorkspaceRecord:
@@ -235,6 +244,7 @@ def _quota(workspace: WorkspaceRecord) -> ModelQuota:
         used=workspace.model_calls_used,
         limit=workspace.model_call_limit,
         remaining=workspace.model_call_limit - workspace.model_calls_used,
+        retry_consumed=workspace.model_retry_consumed,
     )
 
 
@@ -252,6 +262,7 @@ def consume_model_call(
     session: Session,
     *,
     workspace_token: str,
+    is_retry: bool = False,
 ) -> ModelQuota:
     """用 Workspace 行锁原子消费一次模型调用额度。"""
 
@@ -266,6 +277,8 @@ def consume_model_call(
         session.rollback()
         raise ModelQuotaExceededError("模型调用额度已用尽")
     workspace.model_calls_used += 1
+    if is_retry:
+        workspace.model_retry_consumed += 1
     try:
         session.commit()
     except Exception:

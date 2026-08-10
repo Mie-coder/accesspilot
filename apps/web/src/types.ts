@@ -10,7 +10,15 @@ export interface ModelQuota {
   used: number
   limit: number
   remaining: number
+  retry_consumed: number
 }
+export interface DemoSession {
+  demo_mode_enabled: boolean
+  demo_session_active: boolean
+  employee_id?: string
+  fault_mode: 'iam_failure' | 'iam_timeout' | null
+}
+
 
 export interface ChatTurn {
   assistant_message: string
@@ -18,7 +26,6 @@ export interface ChatTurn {
   missing_fields: string[]
   phase: string
   business_status: string
-  quota: ModelQuota
   intent: string
   security_flagged: boolean
   tool_results: Array<Record<string, unknown>>
@@ -45,12 +52,11 @@ export interface WorkspaceIdentity {
 export interface WorkspaceSnapshot {
   identity: WorkspaceIdentity
   draft: RequestDraft | null
-  quota: ModelQuota
+  demoSession: DemoSession
   events: WorkspaceEvent[]
   lastEventId: number
 }
 
-export type DemoRole = 'applicant' | 'manager' | 'data_owner'
 
 export interface ApprovalStep {
   step_id: string
@@ -91,7 +97,6 @@ export interface ApprovalInbox {
 
 export interface RequestDetail {
   view_mode: 'read_only_replay'
-  fault_mode: 'iam_failure' | 'iam_timeout' | null
   request: {
     request_id: string
     requester_id: string

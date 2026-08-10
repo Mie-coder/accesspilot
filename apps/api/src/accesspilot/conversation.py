@@ -249,6 +249,13 @@ def handle_chat_message(
         raise ConversationInputError("消息不能为空")
 
     workspace = workspace_service.get(workspace_token)
+    visible_draft = workspace.draft
+    if (
+        visible_draft is not None
+        and visible_draft.employee_id is not None
+        and visible_draft.employee_id != workspace.actor_id
+    ):
+        visible_draft = None
     active_router = router or DeterministicIntentRouter()
     try:
         route = route_with_validation(normalized_content, active_router)
@@ -256,10 +263,10 @@ def handle_chat_message(
         raise ConversationInputError("暂时无法可靠识别该请求意图") from error
     if (
         route.intent == "help"
-        and workspace.draft is not None
+        and visible_draft is not None
         and _is_request_collection_follow_up(
             normalized_content,
-            workspace.draft.missing_fields(),
+            visible_draft.missing_fields(),
         )
     ):
         # 已经进入申请收集时，“做数据核对”这类简短回答是当前缺失字段。
@@ -268,7 +275,7 @@ def handle_chat_message(
             security_probe=route.security_probe,
         )
     safe_content = _redact_sensitive_content(normalized_content)
-    current_draft = workspace.draft or RequestDraft(employee_id=workspace.actor_id)
+    current_draft = visible_draft or RequestDraft(employee_id=workspace.actor_id)
 
     if route.intent != "request_access":
         with session_factory() as session:
@@ -367,6 +374,7 @@ def handle_chat_message(
                 quota = consume_model_call(
                     retry_session,
                     workspace_token=workspace_token,
+                    is_retry=True,
                 )
 
         parsed = parse_reply_with_retry(

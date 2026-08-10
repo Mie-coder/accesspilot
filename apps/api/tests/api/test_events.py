@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from accesspilot.config import Settings
 from accesspilot.db.models import WorkspaceRecord
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore, hash_workspace_token
 from accesspilot.domain.models import ParsedReply
@@ -29,6 +30,7 @@ def test_sse_reconnect_only_replays_events_after_last_event_id(
     client = TestClient(
         create_app(
             store=SqlAlchemyWorkspaceStore(database_session_factory),
+            settings=Settings(demo_mode_enabled=True),
             session_factory=database_session_factory,
         )
     )
@@ -74,6 +76,7 @@ def test_sse_rejects_invalid_last_event_id(
     client = TestClient(
         create_app(
             store=SqlAlchemyWorkspaceStore(database_session_factory),
+            settings=Settings(demo_mode_enabled=True),
             session_factory=database_session_factory,
         )
     )
@@ -95,11 +98,13 @@ def test_chat_api_returns_429_after_quota_and_history_remains_available(
     client = TestClient(
         create_app(
             store=SqlAlchemyWorkspaceStore(database_session_factory),
+            settings=Settings(demo_mode_enabled=True),
             session_factory=database_session_factory,
             structured_reply_model=model,
         )
     )
     client.post("/api/workspaces")
+    assert client.post("/api/demo/session", json={"employee_id": "EMP-001"}).status_code == 200
     token = client.cookies.get("accesspilot_workspace")
     assert token is not None
     with database_session_factory() as session:
@@ -113,7 +118,7 @@ def test_chat_api_returns_429_after_quota_and_history_remains_available(
     first = client.post("/api/chat/messages", json={"content": "我是 EMP-001"})
     exhausted = client.post("/api/chat/messages", json={"content": "申请 7 天"})
     history = client.get("/api/events")
-    quota = client.get("/api/model-quota")
+    quota = client.get("/api/demo/model-quota")
 
     assert first.status_code == 200
     assert exhausted.status_code == 429
@@ -121,7 +126,7 @@ def test_chat_api_returns_429_after_quota_and_history_remains_available(
     assert history.status_code == 200
     assert "我是 EMP-001" in history.text
     assert "申请 7 天" not in history.text
-    assert quota.json() == {"used": 1, "limit": 1, "remaining": 0}
+    assert quota.json() == {"used": 1, "limit": 1, "remaining": 0, "retry_consumed": 0}
     assert model.calls == 1
 
 
@@ -132,6 +137,7 @@ def test_chat_api_rejects_oversized_message_before_consuming_quota(
     client = TestClient(
         create_app(
             store=SqlAlchemyWorkspaceStore(database_session_factory),
+            settings=Settings(demo_mode_enabled=True),
             session_factory=database_session_factory,
             structured_reply_model=model,
         )
@@ -139,11 +145,12 @@ def test_chat_api_rejects_oversized_message_before_consuming_quota(
     client.post("/api/workspaces")
 
     response = client.post("/api/chat/messages", json={"content": "x" * 10_001})
-    quota = client.get("/api/model-quota")
+    assert client.post("/api/demo/session", json={"employee_id": "EMP-001"}).status_code == 200
+    quota = client.get("/api/demo/model-quota")
     history = client.get("/api/events")
 
     assert response.status_code == 422
-    assert quota.json() == {"used": 0, "limit": 20, "remaining": 20}
+    assert quota.json() == {"used": 0, "limit": 20, "remaining": 20, "retry_consumed": 0}
     assert history.text == ""
     assert model.calls == 0
 
@@ -154,6 +161,7 @@ def test_event_payload_rejects_sensitive_string_values(
     client = TestClient(
         create_app(
             store=SqlAlchemyWorkspaceStore(database_session_factory),
+            settings=Settings(demo_mode_enabled=True),
             session_factory=database_session_factory,
         )
     )

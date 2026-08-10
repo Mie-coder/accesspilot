@@ -11,7 +11,6 @@ vi.mock('./api', () => ({
   readApprovalInbox: vi.fn(),
   readRequestDetail: vi.fn(),
   recoverProvisioning: vi.fn(),
-  setFaultMode: vi.fn(),
   startApproval: vi.fn(),
 }))
 
@@ -44,7 +43,6 @@ const inbox: ApprovalInbox = {
 function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
   return {
     view_mode: 'read_only_replay',
-    fault_mode: null,
     request: {
       request_id: requestId,
       requester_id: 'EMP-001',
@@ -133,7 +131,6 @@ const callbacks = {
   onSelectRequest: vi.fn(),
   onStartApproval: vi.fn(),
   onDecision: vi.fn(),
-  onFaultMode: vi.fn(),
   onProvision: vi.fn(),
   onRecover: vi.fn(),
   onRetryProvision: vi.fn(),
@@ -145,7 +142,6 @@ function renderView(
   render(
     <OperationsView
       roleLabel="直属经理"
-      quotaRemaining={20}
       inbox={inbox}
       detail={detail()}
       isLoading={false}
@@ -226,7 +222,6 @@ describe('OperationsView', () => {
       <OperationsConsole
         roleLabel="直属经理"
         requestId={null}
-        quotaRemaining={20}
       />,
     )
 
@@ -242,7 +237,6 @@ describe('OperationsView', () => {
       <OperationsView
         key="EMP-002"
         roleLabel="直属经理"
-        quotaRemaining={20}
         inbox={inbox}
         detail={detail()}
         isLoading={false}
@@ -258,7 +252,6 @@ describe('OperationsView', () => {
       <OperationsView
         key="EMP-003"
         roleLabel="数据负责人"
-        quotaRemaining={20}
         inbox={inbox}
         detail={detail()}
         isLoading={false}
@@ -275,7 +268,6 @@ describe('OperationsView', () => {
     renderView({
       detail: detail({
         approval: { ...current.approval!, approval_status: 'approved' },
-        fault_mode: 'iam_timeout',
         provisioning: {
           ...current.provisioning,
           provisioning_status: 'unknown',
@@ -290,9 +282,9 @@ describe('OperationsView', () => {
     expect(screen.queryByRole('button', { name: '开始幂等开通' })).not.toBeInTheDocument()
   })
 
-  it('keeps audit replay available when the model quota is exhausted', () => {
-    renderView({ quotaRemaining: 0 })
-    expect(screen.getByRole('status')).toHaveTextContent('历史消息和审计事实仍可只读回放')
+  it('does not expose model budget controls in the product operations view', () => {
+    renderView()
+    expect(screen.queryByText(/模型额度|剩余/)).not.toBeInTheDocument()
     expect(screen.getByText('只读事实回放')).toBeInTheDocument()
   })
 })

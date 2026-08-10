@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from accesspilot.agent.embeddings import DeterministicEmbeddingModel
+from accesspilot.config import Settings
 from accesspilot.db.models import PolicyChunkRecord
 from accesspilot.db.seed import seed_catalog
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
@@ -38,6 +39,7 @@ def approval_client(
     client = TestClient(
         create_app(
             store=SqlAlchemyWorkspaceStore(database_session_factory),
+            settings=Settings(demo_mode_enabled=True),
             session_factory=database_session_factory,
             embedding_model=embedding_model,
             risk_review_model=DeterministicRiskReviewModel(),
@@ -79,7 +81,7 @@ def start_case(client: TestClient, request_id: str) -> dict[str, object]:
 
 def switch_identity(client: TestClient, employee_id: str) -> None:
     response = client.post(
-        "/api/workspaces/identity",
+        "/api/demo/session",
         json={"employee_id": employee_id},
     )
     assert response.status_code == 200
@@ -193,6 +195,7 @@ def test_api_rejects_cross_workspace_before_calling_risk_model(
         index_policy_embeddings(session, embedding_model)
     app = create_app(
         store=SqlAlchemyWorkspaceStore(database_session_factory),
+        settings=Settings(demo_mode_enabled=True),
         session_factory=database_session_factory,
         embedding_model=embedding_model,
         risk_review_model=review_model,

@@ -49,8 +49,22 @@ class WorkspaceRecord(Base):
             "model_calls_used >= 0 AND model_calls_used <= model_call_limit",
             name="model_calls_within_limit",
         ),
+        CheckConstraint(
+            "model_retry_consumed >= 0",
+            name="model_retry_consumed_non_negative",
+        ),
+        CheckConstraint(
+            "model_retry_consumed <= model_calls_used",
+            name="model_retry_within_calls",
+        ),
+        CheckConstraint(
+            (
+                "(demo_session_active AND demo_actor_id IS NOT NULL) OR "
+                "(NOT demo_session_active AND demo_actor_id IS NULL)"
+            ),
+            name="demo_session_actor_consistent",
+        ),
     )
-
     # Mapped[UUID] 是 Python 侧类型；Uuid 是数据库列类型。
     # default=uuid4 传入的是函数，SQLAlchemy 会在每条新记录创建时调用它。
     id: Mapped[UUID] = mapped_column(
@@ -72,6 +86,17 @@ class WorkspaceRecord(Base):
         server_default="EMP-001",
         index=True,
     )
+    # Demo 覆盖与会话状态分开保存，退出 Demo 不会改绑历史业务事实。
+    demo_actor_id: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True,
+    )
+    demo_session_active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+        nullable=False,
+    )
     # 草稿是对话中可反复修改的结构，序列化成 JSONB 保存。
     # 新 Workspace 可能还没有草稿，所以 Python 类型包含 None，数据库也允许 NULL。
     draft: Mapped[dict[str, Any] | None] = mapped_column(
@@ -90,6 +115,12 @@ class WorkspaceRecord(Base):
         server_default="20",
     )
     model_calls_used: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+    )
+    # 结构化回复纠正重试单独计数，不能从总调用次数推断。
+    model_retry_consumed: Mapped[int] = mapped_column(
         Integer,
         default=0,
         server_default="0",

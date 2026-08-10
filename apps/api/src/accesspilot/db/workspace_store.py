@@ -49,6 +49,8 @@ class SqlAlchemyWorkspaceStore:
             return Workspace(
                 token=token,
                 actor_id=record.actor_id,
+                demo_actor_id=record.demo_actor_id,
+                demo_session_active=record.demo_session_active,
                 draft=draft,
                 fault_mode=record.fault_mode,
             )
@@ -76,6 +78,8 @@ class SqlAlchemyWorkspaceStore:
                     WorkspaceRecord(
                         token_hash=token_hash,
                         actor_id=workspace.actor_id,
+                        demo_actor_id=workspace.demo_actor_id,
+                        demo_session_active=workspace.demo_session_active,
                         draft=draft_data,
                         fault_mode=workspace.fault_mode,
                     )
@@ -83,6 +87,8 @@ class SqlAlchemyWorkspaceStore:
             else:
                 # 后续保存：只更新允许变化的草稿和故障模式。
                 record.draft = draft_data
+                record.demo_actor_id = workspace.demo_actor_id
+                record.demo_session_active = workspace.demo_session_active
                 record.fault_mode = workspace.fault_mode
                 record.actor_id = workspace.actor_id
 

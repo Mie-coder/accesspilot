@@ -1,5 +1,4 @@
 """T08 的 12 条固定 API 评测；全部使用虚构数据和确定性适配器。"""
-
 import re
 from collections.abc import Iterator
 from uuid import UUID
@@ -11,6 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from accesspilot.agent.embeddings import DeterministicEmbeddingModel
 from accesspilot.agent.structured_reply import MalformedStructuredOutputError
+from accesspilot.config import Settings
 from accesspilot.db.models import AccessGrantRecord, PolicyChunkRecord, WorkspaceRecord
 from accesspilot.db.seed import seed_catalog
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore, hash_workspace_token
@@ -82,6 +82,7 @@ def eval_client(
     client = TestClient(
         create_app(
             store=SqlAlchemyWorkspaceStore(database_session_factory),
+            settings=Settings(demo_mode_enabled=True),
             session_factory=database_session_factory,
             embedding_model=embedding_model,
             risk_review_model=DeterministicRiskReviewModel(),
@@ -129,7 +130,7 @@ def start_case(client: TestClient, request_id: str) -> str:
 
 def switch_identity(client: TestClient, employee_id: str) -> None:
     response = client.post(
-        "/api/workspaces/identity",
+        "/api/demo/session",
         json={"employee_id": employee_id},
     )
     assert response.status_code == 200
@@ -214,6 +215,7 @@ def test_eval_04_policy_failure_is_recoverable_without_approval(
     client = TestClient(
         create_app(
             store=SqlAlchemyWorkspaceStore(database_session_factory),
+            settings=Settings(demo_mode_enabled=True),
             session_factory=database_session_factory,
             embedding_model=FailingEmbeddingModel(),
             risk_review_model=DeterministicRiskReviewModel(),
@@ -281,7 +283,7 @@ def test_eval_07_timeout_recovers_by_querying_original_operation(
     case_id = start_case(eval_client, request_id)
     approve_all(eval_client, case_id)
     eval_client.post(
-        "/api/workspaces/fault-mode",
+        "/api/demo/fault-mode",
         json={"fault_mode": "iam_timeout"},
     )
     unknown = eval_client.post(
@@ -397,19 +399,23 @@ def test_eval_12_two_malformed_replies_fail_closed(
     client = TestClient(
         create_app(
             store=SqlAlchemyWorkspaceStore(database_session_factory),
+            settings=Settings(demo_mode_enabled=True),
             session_factory=database_session_factory,
             structured_reply_model=model,
         )
     )
     create_workspace(client)
+    assert client.post("/api/demo/session", json={"employee_id": "EMP-001"}).status_code == 200
 
     response = client.post("/api/chat/messages", json={"content": "帮我申请权限"})
-    quota = client.get("/api/model-quota")
+    assert client.post("/api/demo/session", json={"employee_id": "EMP-001"}).status_code == 200
+    quota = client.get("/api/demo/model-quota")
     history = client.get("/api/events")
 
     assert response.status_code == 200
     assert response.json()["business_status"] == "recoverable_error"
     assert response.json()["draft"]["confirmed"] is False
     assert quota.json()["used"] == 2
+    assert quota.json()["retry_consumed"] == 1
     assert model.calls == 2
     assert "MODEL_REPLY_UNAVAILABLE" in history.text

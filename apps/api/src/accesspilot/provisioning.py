@@ -19,6 +19,9 @@ from accesspilot.db.models import (
 )
 from accesspilot.db.workspace_store import hash_workspace_token
 
+_UNSET_FAULT_MODE = object()
+
+
 
 class ProvisioningError(RuntimeError):
     """权限开通业务错误基类。"""
@@ -205,6 +208,7 @@ def provision_access(
     request_id: UUID,
     idempotency_key: str,
     iam: IamProvisioner,
+    fault_mode: str | None | object = _UNSET_FAULT_MODE,
 ) -> ProvisioningAttemptRecord:
     """安全启动或重放同一 IAM 操作，成功时最多创建一条授权。"""
 
@@ -328,10 +332,11 @@ def provision_access(
         raise
 
     try:
+        active_fault_mode = workspace.fault_mode if fault_mode is _UNSET_FAULT_MODE else fault_mode
         outcome = iam.provision(
             request_id=request.id,
             idempotency_key=normalized_key,
-            fault_mode=workspace.fault_mode,
+            fault_mode=active_fault_mode if isinstance(active_fault_mode, str) else None,
         )
     except Exception:
         outcome = IamOutcome(status="unknown", message="IAM 响应无法确认")

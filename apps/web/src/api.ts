@@ -7,6 +7,7 @@ import type {
   RequestDetail,
   WorkspaceEvent,
   WorkspaceIdentity,
+  DemoSession,
   WorkspaceSnapshot,
 } from './types'
 
@@ -48,6 +49,18 @@ async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
 async function readDraft(): Promise<RequestDraft | null> {
   const response = await requestJson<{ draft: RequestDraft | null }>('/api/drafts/current')
   return response.draft
+}
+
+export async function readDemoSession(): Promise<DemoSession> {
+  try {
+    return await requestJson<DemoSession>('/api/demo/session')
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return { demo_mode_enabled: false, demo_session_active: false, fault_mode: null }
+    }
+    throw error
+  }
+
 }
 
 export function parseSseEvents(text: string): WorkspaceEvent[] {
@@ -94,16 +107,16 @@ export async function replayEvents(
 export async function bootstrapWorkspace(): Promise<WorkspaceSnapshot> {
   // 后端原子地复用有效 Workspace 或创建新空间，首次加载无需先触发 401/404。
   await requestJson<{ status: string }>('/api/workspaces/ensure', { method: 'POST' })
-  const [identity, draft, quota, events] = await Promise.all([
+  const [identity, draft, events, demoSession] = await Promise.all([
     requestJson<WorkspaceIdentity>('/api/workspaces/identity'),
     readDraft(),
-    requestJson<ModelQuota>('/api/model-quota'),
     replayEvents(),
+    readDemoSession(),
   ])
   return {
     identity,
     draft,
-    quota,
+    demoSession,
     events,
     lastEventId: events.at(-1)?.id ?? 0,
   }
@@ -123,20 +136,6 @@ export async function sendChatMessage(
 
 export async function submitRequest(signal?: AbortSignal): Promise<RequestResult> {
   return requestJson<RequestResult>('/api/requests', { method: 'POST', signal })
-}
-
-export async function startNewWorkspace(): Promise<void> {
-  await requestJson<{ status: string }>('/api/workspaces', { method: 'POST' })
-}
-
-export async function switchWorkspaceIdentity(
-  employeeId: string,
-): Promise<WorkspaceIdentity> {
-  return requestJson<WorkspaceIdentity>('/api/workspaces/identity', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ employee_id: employeeId }),
-  })
 }
 
 export async function readApprovalInbox(): Promise<ApprovalInbox> {
@@ -168,7 +167,7 @@ export async function decideApproval(
 export async function setFaultMode(
   faultMode: 'iam_failure' | 'iam_timeout' | null,
 ): Promise<void> {
-  await requestJson('/api/workspaces/fault-mode', {
+  await requestJson('/api/demo/fault-mode', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ fault_mode: faultMode }),
@@ -187,4 +186,27 @@ export async function recoverProvisioning(requestId: string): Promise<void> {
   await requestJson(`/api/requests/${encodeURIComponent(requestId)}/provision/recover`, {
     method: 'POST',
   })
+}
+export async function enterDemoSession(
+  employeeId: string,
+): Promise<DemoSession & WorkspaceIdentity> {
+  return requestJson<DemoSession & WorkspaceIdentity>('/api/demo/session', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ employee_id: employeeId }),
+  })
+}
+
+export async function exitDemoSession(): Promise<DemoSession & WorkspaceIdentity> {
+  return requestJson<DemoSession & WorkspaceIdentity>('/api/demo/session/exit', {
+    method: 'POST',
+  })
+}
+
+export async function resetDemoWorkspace(): Promise<void> {
+  await requestJson<{ status: string }>('/api/demo/reset', { method: 'POST' })
+}
+
+export async function readDemoModelQuota(): Promise<ModelQuota> {
+  return requestJson<ModelQuota>('/api/demo/model-quota')
 }

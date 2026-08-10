@@ -13,9 +13,7 @@ import {
 
 import {
   replayEvents,
-  startNewWorkspace,
   submitRequest,
-  switchWorkspaceIdentity,
 } from './api'
 import { createChatModelAdapter } from './runtime'
 import type {
@@ -68,8 +66,7 @@ export function WorkbenchRuntime({
   children: ReactNode
 }) {
   const [draft, setDraft] = useState<RequestDraft | null>(snapshot.draft)
-  const [identity, setIdentity] = useState(snapshot.identity)
-  const [quota, setQuota] = useState(snapshot.quota)
+  const [identity] = useState(snapshot.identity)
   const [events, setEvents] = useState(snapshot.events)
   const [businessStatus, setBusinessStatus] = useState('collecting')
   const [error, setError] = useState<string | null>(null)
@@ -78,11 +75,9 @@ export function WorkbenchRuntime({
   )
   const [isSubmitting, setIsSubmitting] = useState(false)
   const lastEventIdRef = useRef(snapshot.lastEventId)
-  const identitySwitchRef = useRef<Promise<void>>(Promise.resolve())
 
   const onTurn = useCallback((turn: ChatTurn) => {
     setDraft(turn.draft)
-    setQuota(turn.quota)
     setBusinessStatus(turn.business_status)
     setError(null)
   }, [])
@@ -129,48 +124,19 @@ export function WorkbenchRuntime({
     }
   }, [onEvents])
 
-  const reset = useCallback(async () => {
-    setIsSubmitting(true)
-    setError(null)
-    try {
-      // 新 Workspace 比删除旧审计记录更安全，也能得到全新的模型额度和事件游标。
-      await startNewWorkspace()
-      window.location.reload()
-    } catch (resetError) {
-      setError(resetError instanceof Error ? resetError.message : '演示空间重置失败')
-      setIsSubmitting(false)
-    }
-  }, [])
-
-  const switchIdentity = useCallback((employeeId: string): Promise<void> => {
-    // 快速连续切换时串行请求，避免旧响应把 UI 倒退到过期身份。
-    const operation = identitySwitchRef.current.then(async () => {
-      setError(null)
-      try {
-        const nextIdentity = await switchWorkspaceIdentity(employeeId)
-        setIdentity(nextIdentity)
-      } catch (switchError) {
-        setError(switchError instanceof Error ? switchError.message : '演示身份切换失败')
-      }
-    })
-    identitySwitchRef.current = operation
-    return operation
-  }, [])
 
   const context = useMemo<WorkbenchContextValue>(
     () => ({
       identity,
       draft,
       missingFields: missingFields(draft),
-      quota,
+      demoSession: snapshot.demoSession,
       events,
       businessStatus,
       error,
       requestResult,
       isSubmitting,
-      switchIdentity,
       submit,
-      reset,
     }),
     [
       businessStatus,
@@ -179,11 +145,8 @@ export function WorkbenchRuntime({
       events,
       identity,
       isSubmitting,
-      quota,
       requestResult,
-      reset,
       submit,
-      switchIdentity,
     ],
   )
 
