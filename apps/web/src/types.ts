@@ -19,6 +19,8 @@ export interface DemoSession {
   fault_mode: 'iam_failure' | 'iam_timeout' | null
 }
 
+export type ConnectionState = 'connected' | 'reconnecting'
+
 
 export interface ChatTurn {
   assistant_message: string
@@ -55,6 +57,103 @@ export interface WorkspaceSnapshot {
   demoSession: DemoSession
   events: WorkspaceEvent[]
   lastEventId: number
+}
+
+/** Facts returned by the identity-scoped access overview endpoint. */
+export type AccessOverviewState =
+  | 'eligible'
+  | 'owned'
+  | 'pending'
+  | 'expiring_soon'
+  | 'expired'
+
+export interface AccessOverviewItem {
+  state: AccessOverviewState
+  code: string
+  name: string
+  system_code: string
+  system_name: string
+  risk_level: string
+  max_duration_days: number | null
+  approval_policy: string
+  request_id: string | null
+  request_status: string | null
+  grant_id: string | null
+  starts_at: string | null
+  expires_at: string | null
+  next_step: string
+}
+
+export interface AccessOverview {
+  items: AccessOverviewItem[]
+}
+
+export type EntitlementResolutionStatus = 'matched' | 'ambiguous' | 'no_match'
+
+export interface EntitlementCandidate {
+  code: string
+  name: string
+  system_code: string
+  system_name: string
+  risk_level: string
+  max_duration_days: number | null
+  approval_policy: string
+}
+
+export interface EntitlementResolution {
+  status: EntitlementResolutionStatus
+  target_field: 'entitlement_id'
+  query: string
+  candidates: EntitlementCandidate[]
+  eligible_access: EntitlementCandidate[]
+}
+
+export interface DraftPreviewResponse {
+  draft: RequestDraft | null
+  missing_fields: string[]
+  is_complete: boolean
+  can_enter_approval: boolean
+  entitlement_resolution: EntitlementResolution | null
+  issues: Array<{ code: string; message: string }>
+}
+
+export type EntitlementSelectionStatus = 'revalidated' | 'rejected'
+
+export interface EntitlementSelectionResult {
+  status: EntitlementSelectionStatus
+  code: string
+  message: string
+  previous_confirmation_invalidated: boolean
+}
+
+export interface PolicyCatalogItem {
+  policy_code: string
+  title: string
+  content: string
+  version: string
+  source: string
+  similarity?: number | null
+}
+
+export type PolicyAnswerStatus =
+  | 'grounded'
+  | 'insufficient_evidence'
+  | 'retrieval_unavailable'
+
+export interface PolicyEvidence {
+  policy_code: string
+  title: string
+  content: string
+  version: string
+  source: string
+  similarity: number | null
+}
+
+export interface PolicyAnswer {
+  status: PolicyAnswerStatus
+  answer: string
+  evidence: PolicyEvidence[]
+  next_step: string
 }
 
 

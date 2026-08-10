@@ -1,7 +1,9 @@
 """审批收件箱与申请全链路只读查询。"""
 
+from datetime import datetime
 from uuid import UUID
 
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -22,6 +24,112 @@ from accesspilot.db.workspace_store import hash_workspace_token
 
 class OperationsNotFoundError(LookupError):
     """Workspace、演示身份或申请不存在。"""
+
+
+class _PublicRequest(BaseModel):
+    """最新申请产品面只公开固定业务字段。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    request_id: str
+    requester_id: str
+    requester_name: str
+    entitlement_code: str
+    duration_days: int
+    justification: str
+    request_status: str
+    confirmed_at: datetime
+    created_at: datetime
+
+
+class _PublicEntitlement(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    code: str
+    name: str
+    system_code: str
+    risk_level: str
+    approval_policy: str
+    owner_id: str | None
+
+
+class _PublicRiskCitation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    policy_code: str
+    reason: str
+    title: str | None
+    content: str | None
+
+
+class _PublicRiskReview(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    risk_level: str | None
+    outcome: str | None
+    summary: str | None
+    findings: list[str]
+    citations: list[_PublicRiskCitation]
+
+
+class _PublicApprovalStep(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    step_id: str
+    step_order: int
+    approver_id: str
+    approver_role: str
+    step_status: str
+    comment: str | None
+    decided_at: datetime | None
+
+
+class _PublicApproval(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    approval_case_id: str
+    approval_status: str
+    created_at: datetime
+    steps: list[_PublicApprovalStep]
+
+
+class _PublicProvisioning(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provisioning_status: str
+    provisioning_attempt_id: str | None
+    attempt_count: int
+    last_error: str | None
+    updated_at: datetime | None
+    access_granted: bool
+    grant_id: str | None
+    starts_at: datetime | None
+    expires_at: datetime | None
+
+
+class _PublicAuditEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    audit_event_id: str
+    event_type: str
+    actor_type: str
+    actor_id: str | None
+    details: dict[str, str]
+    created_at: datetime
+
+
+class _PublicRequestDetail(BaseModel):
+    """最新申请 API 的严格公开 DTO，拒绝未知字段进入产品响应。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    view_mode: str
+    request: _PublicRequest
+    entitlement: _PublicEntitlement
+    risk_review: _PublicRiskReview | None
+    approval: _PublicApproval | None
+    provisioning: _PublicProvisioning
+    audit_events: list[_PublicAuditEvent]
 
 
 def _load_workspace(session: Session, token: str) -> WorkspaceRecord:
@@ -292,3 +400,234 @@ def get_request_detail(
             for event in audit_events
         ],
     }
+
+
+_PUBLIC_AUDIT_DETAIL_KEYS = ("status", "next_step", "approver_role")
+_PUBLIC_SENSITIVE_MARKERS = (
+    "api_key",
+    "apikey",
+    "access_token",
+    "refresh_token",
+    "client_secret",
+    "idempotency",
+    "password",
+    "private_key",
+    "system_prompt",
+    "system prompt",
+    "system promote",
+    "system instructions",
+    "developer prompt",
+    "api key",
+    "api token",
+    "密钥",
+    "系统提示词",
+    "internal",
+    "localhost",
+    "127.0.0.1",
+    "http://",
+    "https://",
+    "sk-",
+)
+
+
+def _safe_public_detail_text(value: object) -> str | None:
+    """仅保留可展示的短文本，阻止敏感值借允许字段回流。"""
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.casefold()
+    if any(marker in normalized for marker in _PUBLIC_SENSITIVE_MARKERS):
+        return None
+    return value
+
+
+def _public_audit_details(value: object) -> dict[str, str]:
+    """审计时间线只允许页面确需的三个稳定字段。"""
+
+    if not isinstance(value, dict):
+        return {}
+    details: dict[str, str] = {}
+    for key in _PUBLIC_AUDIT_DETAIL_KEYS:
+        safe_value = _safe_public_detail_text(value.get(key))
+        if safe_value is not None:
+            details[key] = safe_value
+    return details
+
+
+def _public_provisioning_error(status: object) -> str | None:
+    """不回显下游异常；只按状态返回固定的业务提示。"""
+
+    if status == "failed":
+        return "权限开通失败，请稍后重试或联系人工流程。"
+    if status == "unknown":
+        return "开通结果未知，请查询原 IAM 操作。"
+    return None
+
+
+def _safe_risk_text(value: object, *, fallback: str) -> str:
+    """净化风险模型自由文本；政策正文不经过此函数。"""
+
+    return _safe_public_detail_text(value) or fallback
+
+
+def _project_public_request_detail(detail: dict[str, object]) -> dict[str, object]:
+    """将内部事实投影为严格公开 DTO，丢弃未知键和原始错误。"""
+
+    raw_risk = detail.get("risk_review")
+    public_risk: _PublicRiskReview | None = None
+    if isinstance(raw_risk, dict):
+        raw_findings = raw_risk.get("findings")
+        findings = [
+            safe_value
+            for value in (raw_findings if isinstance(raw_findings, list) else [])
+            if (safe_value := _safe_public_detail_text(value)) is not None
+        ]
+        raw_citations = raw_risk.get("citations")
+        citations: list[_PublicRiskCitation] = []
+        for citation in raw_citations if isinstance(raw_citations, list) else []:
+            if not isinstance(citation, dict):
+                continue
+            if not isinstance(citation.get("policy_code"), str):
+                continue
+            if not isinstance(citation.get("reason"), str):
+                continue
+            citations.append(
+                _PublicRiskCitation(
+                    policy_code=citation["policy_code"],
+                    reason=_safe_risk_text(
+                        citation["reason"],
+                        fallback="风险审查引用已由政策事实源校验。",
+                    ),
+                    title=(
+                        citation["title"]
+                        if isinstance(citation.get("title"), str)
+                        else None
+                    ),
+                    content=(
+                        citation["content"]
+                        if isinstance(citation.get("content"), str)
+                        else None
+                    ),
+                )
+            )
+        public_risk = _PublicRiskReview(
+            risk_level=(
+                raw_risk["risk_level"]
+                if isinstance(raw_risk.get("risk_level"), str)
+                else None
+            ),
+            outcome=(
+                raw_risk["outcome"]
+                if isinstance(raw_risk.get("outcome"), str)
+                else None
+            ),
+            summary=_safe_risk_text(
+                raw_risk.get("summary"),
+                fallback="风险审查结果已生成，详情按政策事实展示。",
+            ),
+            findings=findings,
+            citations=citations,
+        )
+
+    raw_approval = detail.get("approval")
+    public_approval: _PublicApproval | None = None
+    if isinstance(raw_approval, dict):
+        public_steps: list[_PublicApprovalStep] = []
+        raw_steps = raw_approval.get("steps")
+        for step in raw_steps if isinstance(raw_steps, list) else []:
+            if not isinstance(step, dict):
+                continue
+            public_steps.append(_PublicApprovalStep.model_validate(step))
+        public_approval = _PublicApproval.model_validate(
+            {
+                "approval_case_id": raw_approval.get("approval_case_id"),
+                "approval_status": raw_approval.get("approval_status"),
+                "created_at": raw_approval.get("created_at"),
+                "steps": public_steps,
+            }
+        )
+
+    raw_provisioning = detail.get("provisioning")
+    if not isinstance(raw_provisioning, dict):
+        raw_provisioning = {}
+    provisioning_status = raw_provisioning.get("provisioning_status")
+    public_provisioning = _PublicProvisioning.model_validate(
+        {
+            "provisioning_status": provisioning_status,
+            "provisioning_attempt_id": raw_provisioning.get(
+                "provisioning_attempt_id"
+            ),
+            "attempt_count": raw_provisioning.get("attempt_count", 0),
+            "last_error": _public_provisioning_error(provisioning_status),
+            "updated_at": raw_provisioning.get("updated_at"),
+            "access_granted": raw_provisioning.get("access_granted", False),
+            "grant_id": raw_provisioning.get("grant_id"),
+            "starts_at": raw_provisioning.get("starts_at"),
+            "expires_at": raw_provisioning.get("expires_at"),
+        }
+    )
+
+    public_events: list[_PublicAuditEvent] = []
+    raw_events = detail.get("audit_events")
+    for event in raw_events if isinstance(raw_events, list) else []:
+        if not isinstance(event, dict):
+            continue
+        public_events.append(
+            _PublicAuditEvent.model_validate(
+                {
+                    "audit_event_id": event.get("audit_event_id"),
+                    "event_type": event.get("event_type"),
+                    "actor_type": event.get("actor_type"),
+                    "actor_id": event.get("actor_id"),
+                    "details": _public_audit_details(event.get("details")),
+                    "created_at": event.get("created_at"),
+                }
+            )
+        )
+
+    public_detail = _PublicRequestDetail.model_validate(
+        {
+            "view_mode": detail.get("view_mode"),
+            "request": detail.get("request"),
+            "entitlement": detail.get("entitlement"),
+            "risk_review": public_risk,
+            "approval": public_approval,
+            "provisioning": public_provisioning,
+            "audit_events": public_events,
+        }
+    )
+    return public_detail.model_dump(mode="json")
+
+
+def get_latest_request_detail(
+    session: Session,
+    *,
+    workspace_token: str,
+) -> dict[str, object] | None:
+    """读取当前 Workspace/员工最新正式申请的完整只读事实。
+
+    查询先按 Workspace 和后端绑定的 actor_id 限定，再复用
+    :func:`get_request_detail`，避免“最新”接口意外读取其他身份或空间。
+    """
+
+    workspace = _load_workspace(session, workspace_token)
+    if session.get(EmployeeRecord, workspace.actor_id) is None:
+        raise OperationsNotFoundError("当前员工不存在")
+    request = session.scalar(
+        select(AccessRequestRecord)
+        .where(
+            AccessRequestRecord.workspace_id == workspace.id,
+            AccessRequestRecord.requester_id == workspace.actor_id,
+        )
+        .order_by(AccessRequestRecord.created_at.desc(), AccessRequestRecord.id.desc())
+        .limit(1)
+    )
+    if request is None:
+        return None
+    return _project_public_request_detail(
+        get_request_detail(
+            session,
+            workspace_token=workspace_token,
+            request_id=request.id,
+        )
+    )

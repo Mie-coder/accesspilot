@@ -6,6 +6,8 @@ import type {
   WorkspaceEvent,
   WorkspaceIdentity,
   DemoSession,
+  EntitlementSelectionResult,
+  ConnectionState,
 } from './types'
 
 export interface WorkbenchContextValue {
@@ -18,7 +20,9 @@ export interface WorkbenchContextValue {
   error: string | null
   requestResult: RequestResult | null
   retryableInterruption: boolean
+  connectionState: ConnectionState
   submit: () => Promise<void>
+  selectEntitlement: (entitlementId: string) => Promise<EntitlementSelectionResult>
   isSubmitting: boolean
 }
 

@@ -71,7 +71,12 @@ const recoveredSnapshot: WorkspaceSnapshot = {
 
 function Probe() {
   const workbench = useWorkbench()
-  return <output data-testid="workbench-error">{workbench.error}</output>
+  return (
+    <>
+      <output data-testid="workbench-error">{workbench.error}</output>
+      <output data-testid="connection-state">{workbench.connectionState}</output>
+    </>
+  )
 }
 
 afterEach(() => {
@@ -131,6 +136,23 @@ describe('WorkbenchRuntime hydration', () => {
     })
     expect(screen.getByTestId('workbench-error')).toBeEmptyDOMElement()
     expect(screen.queryByText('旧错误不应继续显示')).not.toBeInTheDocument()
+    view.unmount()
+  })
+
+  it('exposes reconnecting without turning the activity stream failure into a turn error', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new Error('activity stream offline')
+    }))
+    const view = render(
+      <WorkbenchRuntime snapshot={{ ...snapshot, events: [], lastEventId: 0 }}>
+        <Probe />
+      </WorkbenchRuntime>,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByTestId('connection-state')).toHaveTextContent('reconnecting')
+    })
+    expect(screen.getByTestId('workbench-error')).toBeEmptyDOMElement()
     view.unmount()
   })
 

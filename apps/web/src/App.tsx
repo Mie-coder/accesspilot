@@ -13,10 +13,13 @@ import { useEffect, useState } from 'react'
 
 import { approvalRoleFor } from './approval'
 import { ApiError, bootstrapWorkspace } from './api'
+import { AccessCards } from './AccessCards'
 import { ChatThread } from './ChatThread'
 import { DraftCard } from './DraftCard'
 import { DemoConsole } from './DemoConsole'
 import { OperationsConsole } from './OperationsConsole'
+import { PolicyCard } from './PolicyCard'
+import { RequestTimeline } from './RequestTimeline'
 import type { WorkspaceEvent, WorkspaceSnapshot } from './types'
 import { WorkbenchRuntime } from './WorkbenchRuntime'
 import { useWorkbench } from './workbench-context'
@@ -98,6 +101,7 @@ function WorkbenchPage() {
   const workbench = useWorkbench()
   const approvalRole = approvalRoleFor(workbench.identity)
   const [showOperations, setShowOperations] = useState(false)
+  const [activeView, setActiveView] = useState<'assistant' | 'access' | 'policy' | 'request'>('assistant')
   const aui = useAui()
   const isRunning = useAuiState((state) => state.thread.isRunning)
   const confirm = () => {
@@ -127,15 +131,41 @@ function WorkbenchPage() {
           <DemoConsole session={workbench.demoSession} />
           {approvalRole ? (
             <button className="demo-console-toggle" type="button" onClick={() => setShowOperations((value) => !value)}>
-              {showOperations ? '返回申请工作台' : '打开审批工作台'}
+              {showOperations ? '返回产品工作台' : '打开审批工作台'}
             </button>
           ) : null}
-          <div className="api-health">
+          <div
+            className={`api-health is-${workbench.connectionState}`}
+            role={workbench.connectionState === 'reconnecting' ? 'status' : undefined}
+            aria-live="polite"
+          >
             <span aria-hidden="true" />
-            API 已连接
+            {workbench.connectionState === 'reconnecting' ? '活动流重连中' : 'API 已连接'}
           </div>
         </div>
       </header>
+
+      <nav className="product-nav" aria-label="产品导航">
+        {([
+          ['assistant', '权限助手'],
+          ['access', '我的权限'],
+          ['policy', '政策中心'],
+          ['request', '我的申请'],
+        ] as const).map(([view, label]) => (
+          <button
+            key={view}
+            className={activeView === view && !showOperations ? 'is-active' : ''}
+            type="button"
+            aria-current={activeView === view && !showOperations ? 'page' : undefined}
+            onClick={() => {
+              setShowOperations(false)
+              setActiveView(view)
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
 
       {workbench.demoSession.demo_session_active ? (
         <div className="demo-session-banner" role="status">
@@ -144,8 +174,21 @@ function WorkbenchPage() {
         </div>
       ) : null}
 
+      {(activeView !== 'assistant' || showOperations) && workbench.error ? (
+        <div className="recoverable-banner product-global-error" role="alert">
+          <AlertCircle size={17} />
+          <span>{workbench.error}</span>
+        </div>
+      ) : null}
+
       {showOperations && approvalRole ? (
         <OperationsConsole roleLabel={approvalRole} requestId={workbench.requestResult?.request_id ?? null} />
+      ) : activeView === 'access' ? (
+        <main className="business-view-shell" id="main-workbench"><AccessCards /></main>
+      ) : activeView === 'policy' ? (
+        <main className="business-view-shell" id="main-workbench"><PolicyCard /></main>
+      ) : activeView === 'request' ? (
+        <main className="business-view-shell" id="main-workbench"><RequestTimeline /></main>
       ) : (
         <main className="workspace-grid" id="main-workbench">
         <section className="chat-panel" aria-labelledby="chat-title">

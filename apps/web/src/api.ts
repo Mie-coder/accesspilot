@@ -9,6 +9,11 @@ import type {
   WorkspaceIdentity,
   DemoSession,
   WorkspaceSnapshot,
+  AccessOverview,
+  DraftPreviewResponse,
+  EntitlementResolution,
+  PolicyAnswer,
+  PolicyCatalogItem,
 } from './types'
 
 export class ApiError extends Error {
@@ -255,6 +260,7 @@ export async function* streamChatMessage(
 export interface WorkspaceEventSubscriptionOptions {
   afterId?: number
   signal?: AbortSignal
+  onOpen?: () => void
 }
 
 export async function* subscribeWorkspaceEvents(
@@ -274,6 +280,7 @@ export async function* subscribeWorkspaceEvents(
     signal: options.signal,
   })
   if (!response.ok) throw new ApiError(response.status, await errorMessage(response))
+  options.onOpen?.()
   for await (const frame of parseSseStream(responseStream(response), options.signal)) {
     const id = Number(frame.id)
     if (!Number.isSafeInteger(id) || id < 0 || !isRecord(frame.data)) {
@@ -403,6 +410,68 @@ export async function sendChatMessage(
     body: JSON.stringify({ content }),
     signal,
   })
+}
+
+/** Read the current actor's permission facts; never derive these from chat text. */
+export async function readAccessOverview(signal?: AbortSignal): Promise<AccessOverview> {
+  return requestJson<AccessOverview>('/api/access-overview', { signal })
+}
+
+/** Resolve a human permission name against the server-owned entitlement catalog. */
+export async function resolveEntitlement(
+  query: string,
+  signal?: AbortSignal,
+): Promise<EntitlementResolution> {
+  return requestJson<EntitlementResolution>('/api/entitlements/resolve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query }),
+    signal,
+  })
+}
+
+/** Persist a preview/revalidation result through the deterministic draft endpoint. */
+export async function previewDraft(
+  draft: RequestDraft,
+  signal?: AbortSignal,
+): Promise<DraftPreviewResponse> {
+  return requestJson<DraftPreviewResponse>('/api/drafts/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(draft),
+    signal,
+  })
+}
+
+export async function readPolicyCatalog(signal?: AbortSignal): Promise<PolicyCatalogItem[]> {
+  const payload = await requestJson<{ policies?: PolicyCatalogItem[]; status?: string }>(
+    '/api/policies',
+    { signal },
+  )
+  if (payload.status === 'retrieval_unavailable') {
+    throw new Error('政策服务暂时不可用，请稍后重试。')
+  }
+  return Array.isArray(payload.policies) ? payload.policies : []
+}
+
+export async function queryPolicy(
+  query: string,
+  signal?: AbortSignal,
+): Promise<PolicyAnswer> {
+  return requestJson<PolicyAnswer>('/api/policies/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query }),
+    signal,
+  })
+}
+
+export async function readLatestRequest(signal?: AbortSignal): Promise<RequestDetail | null> {
+  const payload = await requestJson<{ request: RequestDetail | null }>(
+    '/api/requests/latest',
+    { signal },
+  )
+  return payload.request ?? null
 }
 
 export async function submitRequest(signal?: AbortSignal): Promise<RequestResult> {

@@ -15,6 +15,7 @@ import {
 
 import {
   replayEvents,
+  previewDraft,
   submitRequest,
   subscribeWorkspaceEvents,
   type TurnSseFrame,
@@ -22,8 +23,10 @@ import {
 import { createChatModelAdapter } from './runtime'
 import type {
   ChatTurn,
+  ConnectionState,
   RequestDraft,
   RequestResult,
+  EntitlementSelectionResult,
   WorkspaceEvent,
   WorkspaceSnapshot,
 } from './types'
@@ -175,6 +178,7 @@ export function WorkbenchRuntime({
   )
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [retryableInterruption, setRetryableInterruption] = useState(false)
+  const [connectionState, setConnectionState] = useState<ConnectionState>('connected')
   const lastEventIdRef = useRef(snapshot.lastEventId)
 
   const onTurn = useCallback((turn: ChatTurn) => {
@@ -204,6 +208,7 @@ export function WorkbenchRuntime({
   }, [])
   const onEvents = useCallback((newEvents: WorkspaceEvent[]) => {
     if (newEvents.length === 0) return
+    setConnectionState('connected')
     lastEventIdRef.current = Math.max(
       lastEventIdRef.current,
       ...newEvents.map((event) => event.id),
@@ -265,14 +270,22 @@ export function WorkbenchRuntime({
       while (active && !controller.signal.aborted) {
         const before = lastEventIdRef.current
         try {
-          for await (const event of subscribeWorkspaceEvents(before, controller.signal)) {
+          for await (const event of subscribeWorkspaceEvents({
+            afterId: before,
+            signal: controller.signal,
+            onOpen: () => setConnectionState('connected'),
+          })) {
             if (!active) return
+            setConnectionState('connected')
             onEvents([event])
           }
           if (!active || controller.signal.aborted) return
-        } catch (streamError) {
+          setConnectionState('reconnecting')
+        } catch {
           if (!active || controller.signal.aborted) return
-          setError(streamError instanceof Error ? streamError.message : '活动流暂时断开')
+          // Connection state is independent from the current turn's error. A
+          // reconnect should not make the assistant answer look failed.
+          setConnectionState('reconnecting')
         }
         if (lastEventIdRef.current > before) reconnectDelay = 250
         const shouldReconnect = await waitForReconnect(reconnectDelay, controller.signal)
@@ -308,6 +321,38 @@ export function WorkbenchRuntime({
     }
   }, [onEvents])
 
+  const selectEntitlement = useCallback(async (
+    entitlementId: string,
+  ): Promise<EntitlementSelectionResult> => {
+    const candidateDraft: RequestDraft = {
+      employee_id: identity.employee_id,
+      entitlement_id: entitlementId,
+      duration_days: draft?.duration_days ?? null,
+      justification: draft?.justification ?? null,
+      // Selecting a different candidate is a new business fact. The server
+      // revalidates it and never accepts a stale confirmation from the UI.
+      confirmed: false,
+    }
+    const preview = await previewDraft(candidateDraft)
+    if (preview.draft !== null) setDraft(preview.draft)
+    const nonMissingIssues = preview.issues.filter((issue) => !issue.code.startsWith('missing_fields:'))
+    const revalidated = preview.draft?.entitlement_id === entitlementId
+      && preview.entitlement_resolution?.status === 'matched'
+      && preview.entitlement_resolution.candidates.length === 1
+      && preview.entitlement_resolution.candidates[0]?.code === entitlementId
+      && nonMissingIssues.length === 0
+    const result: EntitlementSelectionResult = {
+      status: revalidated ? 'revalidated' : 'rejected',
+      code: entitlementId,
+      message: revalidated
+        ? '重新校验通过，可以继续补充申请字段。'
+        : (nonMissingIssues[0]?.message ?? '当前身份已不再具备申请资格。'),
+      previous_confirmation_invalidated: draft?.confirmed === true,
+    }
+    setError(null)
+    return result
+  }, [draft, identity.employee_id])
+
 
   const context = useMemo<WorkbenchContextValue>(
     () => ({
@@ -321,6 +366,8 @@ export function WorkbenchRuntime({
       requestResult,
       isSubmitting,
       retryableInterruption,
+      connectionState,
+      selectEntitlement,
       submit,
     }),
     [
@@ -332,6 +379,8 @@ export function WorkbenchRuntime({
       isSubmitting,
       requestResult,
       retryableInterruption,
+      connectionState,
+      selectEntitlement,
       submit,
     ],
   )

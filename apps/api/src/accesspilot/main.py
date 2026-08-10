@@ -13,6 +13,10 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
+from accesspilot.access_overview import (
+    AccessOverviewNotFoundError,
+    get_access_overview,
+)
 from accesspilot.agent.deepseek import DeepSeekStructuredReplyModel
 from accesspilot.agent.embeddings import (
     DashScopeEmbeddingModel,
@@ -68,6 +72,7 @@ from accesspilot.events import (
 )
 from accesspilot.operations import (
     OperationsNotFoundError,
+    get_latest_request_detail,
     get_request_detail,
     list_approval_inbox,
 )
@@ -179,6 +184,22 @@ class PolicyQueryBody(BaseModel):
         normalized = value.strip()
         if not normalized:
             raise ValueError("政策问题不能为空")
+        return normalized
+
+
+class EntitlementResolveBody(BaseModel):
+    """权限名称解析只接收一个严格的非空查询词。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: StrictStr = Field(min_length=1, max_length=2_000)
+
+    @field_validator("query")
+    @classmethod
+    def reject_blank_query(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("权限查询不能为空")
         return normalized
 
 
@@ -469,6 +490,62 @@ def create_app(
                 next_step="请稍后重试；如问题紧急，请联系人工安全流程。",
             ).model_dump(mode="json")
         return result.policy_answer.model_dump(mode="json")
+
+    @app.get("/api/access-overview")
+    def read_access_overview(
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> dict[str, object]:
+        """读取当前员工的权限生命周期卡片事实。"""
+
+        try:
+            with active_session_factory() as session:
+                overview = get_access_overview(
+                    session,
+                    workspace_token=workspace.token,
+                )
+        except AccessOverviewNotFoundError as error:
+            raise HTTPException(status_code=404, detail="权限事实不存在") from error
+        except Exception as error:
+            # 不向浏览器回显 SQL、连接串或其他内部异常。
+            raise HTTPException(
+                status_code=503,
+                detail="权限事实暂时不可用，请稍后重试",
+            ) from error
+        return overview.model_dump(mode="json")
+
+    @app.post("/api/entitlements/resolve")
+    def resolve_entitlement(
+        body: EntitlementResolveBody,
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> dict[str, object]:
+        """在当前员工可申请目录内解析权限名称，不修改草稿。"""
+
+        try:
+            with active_session_factory() as session:
+                result = execute_read_only_tool(
+                    session,
+                    workspace_token=workspace.token,
+                    call=ReadOnlyToolCall(
+                        tool="resolve_entitlement",
+                        query=body.query,
+                    ),
+                )
+        except Exception as error:
+            # 解析是只读能力；数据库或执行器故障只能安全映射为重试。
+            raise HTTPException(
+                status_code=503,
+                detail="权限目录暂时不可用，请稍后重试",
+            ) from error
+        if result.status == "workspace_not_found":
+            raise HTTPException(status_code=404, detail="Workspace not found")
+        if result.status == "employee_not_found":
+            raise HTTPException(status_code=404, detail="当前员工不存在")
+        if result.entitlement_resolution is None:
+            raise HTTPException(
+                status_code=503,
+                detail="权限目录暂时不可用，请稍后重试",
+            )
+        return result.entitlement_resolution.model_dump(mode="json")
 
     @app.get("/api/events")
     async def replay_events(
@@ -1221,6 +1298,28 @@ def create_app(
                 )
             except OperationsNotFoundError as error:
                 raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.get("/api/requests/latest")
+    def read_latest_request(
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> dict[str, object]:
+        """读取当前后端身份最新正式申请，避免被 UUID 动态路由拦截。"""
+
+        try:
+            with active_session_factory() as session:
+                detail = get_latest_request_detail(
+                    session,
+                    workspace_token=workspace.token,
+                )
+        except OperationsNotFoundError as error:
+            raise HTTPException(status_code=404, detail="申请不存在") from error
+        except Exception as error:
+            # 不能把数据库异常或请求内部字段泄露给浏览器。
+            raise HTTPException(
+                status_code=503,
+                detail="申请事实暂时不可用，请稍后重试",
+            ) from error
+        return {"request": detail}
 
     @app.get("/api/requests/{request_id}")
     def read_request_detail(
