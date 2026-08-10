@@ -339,12 +339,12 @@ def test_eval_09_sse_reconnect_only_replays_newer_events(
     assert eval_client.post(
         "/api/chat/messages", json={"content": "申请 14 天"}
     ).status_code == 200
-    history = eval_client.get("/api/events")
+    history = eval_client.get("/api/events?follow=false")
     event_ids = [int(value) for value in re.findall(r"^id: (\d+)$", history.text, re.M)]
     cursor = event_ids[len(event_ids) // 2]
 
     replayed = eval_client.get(
-        "/api/events",
+        "/api/events?follow=false",
         headers={"Last-Event-ID": str(cursor)},
     )
     replayed_ids = [
@@ -375,7 +375,7 @@ def test_eval_10_quota_exhaustion_keeps_history_readable(
 
     first = eval_client.post("/api/chat/messages", json={"content": "我是 EMP-001"})
     exhausted = eval_client.post("/api/chat/messages", json={"content": "申请 7 天"})
-    history = eval_client.get("/api/events")
+    history = eval_client.get("/api/events?follow=false")
 
     assert first.status_code == 200
     assert exhausted.status_code == 429
@@ -413,7 +413,7 @@ def test_eval_12_two_malformed_replies_fail_closed(
     response = client.post("/api/chat/messages", json={"content": "帮我申请权限"})
     assert client.post("/api/demo/session", json={"employee_id": "EMP-001"}).status_code == 200
     quota = client.get("/api/demo/model-quota")
-    history = client.get("/api/events")
+    history = client.get("/api/events?follow=false")
 
     assert response.status_code == 200
     assert response.json()["business_status"] == "recoverable_error"

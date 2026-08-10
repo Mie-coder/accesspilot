@@ -3,6 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createChatModelAdapter } from './runtime'
 
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
 function frame(event: string, seq: number, payload: Record<string, unknown>): string {
   const data = JSON.stringify({
     schema_version: 'v1',
@@ -24,56 +28,56 @@ function streamFromText(text: string): ReadableStream<Uint8Array> {
   })
 }
 
-afterEach(() => {
-  vi.unstubAllGlobals()
-})
-
-describe('createChatModelAdapter', () => {
-  it('sends the latest visible user text and consumes the current-turn stream', async () => {
+describe('createChatModelAdapter T14 stream contract', () => {
+  it('yields each real delta and does not duplicate completed content', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(String(input)).toBe('/api/chat/messages/stream')
       expect(init?.signal).toBeInstanceOf(AbortSignal)
       expect(JSON.parse(String(init?.body))).toEqual({ content: '我是 EMP-001' })
       return new Response(
         streamFromText(
-          frame('message.delta', 1, { text: '请提供' }) +
-            frame('message.completed', 2, { content: '请提供' }),
+          frame('message.delta', 1, { text: '第一段' }) +
+            frame('message.delta', 2, { text: '第二段' }) +
+            frame('message.completed', 3, {
+              message_id: 'message-1',
+              content: '第一段第二段',
+              persisted_event_id: 8,
+            }),
         ),
         { headers: { 'Content-Type': 'text/event-stream' } },
       )
     })
     vi.stubGlobal('fetch', fetchMock)
-    const onError = vi.fn()
+
     const adapter = createChatModelAdapter({
       getLastEventId: () => 12,
       onTurn: vi.fn(),
       onEvents: vi.fn(),
-      onError,
+      onError: vi.fn(),
     })
     const output = adapter.run({
       messages: [{ role: 'user', content: [{ type: 'text', text: '我是 EMP-001' }] }],
       abortSignal: new AbortController().signal,
     } as never) as AsyncGenerator<ChatModelRunResult>
 
-    const result = await output.next()
+    const first = await output.next()
+    const second = await output.next()
     const done = await output.next()
-
-    expect(result.value).toEqual({ content: [{ type: 'text', text: '请提供' }] })
+    expect(first.value).toEqual({ content: [{ type: 'text', text: '第一段' }] })
+    expect(second.value).toEqual({ content: [{ type: 'text', text: '第一段第二段' }] })
     expect(done).toEqual({ done: true, value: undefined })
-    expect(onError).not.toHaveBeenCalled()
     expect(fetchMock).toHaveBeenCalledOnce()
   })
 
-  it('surfaces a safe backend error through assistant-ui', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () =>
-        Response.json(
-          { detail: '模型调用额度已用尽，当前为只读回放模式' },
-          { status: 429 },
-        ),
-      ),
-    )
+  it('reports recoverable stream errors exactly once', async () => {
+    const fetchMock = vi.fn(async () => new Response(
+      streamFromText(frame('error.recoverable', 1, {
+        code: 'UPSTREAM_UNAVAILABLE',
+        message: '本轮可安全重试',
+      })),
+      { headers: { 'Content-Type': 'text/event-stream' } },
+    ))
+    vi.stubGlobal('fetch', fetchMock)
     const onError = vi.fn()
     const adapter = createChatModelAdapter({
       getLastEventId: () => 0,
@@ -86,7 +90,9 @@ describe('createChatModelAdapter', () => {
       abortSignal: new AbortController().signal,
     } as never) as AsyncGenerator<ChatModelRunResult>
 
-    await expect(output.next()).rejects.toThrow('模型调用额度已用尽')
-    expect(onError).toHaveBeenCalledWith('模型调用额度已用尽，当前为只读回放模式')
+    await expect(output.next()).rejects.toThrow('本轮可安全重试')
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onError).toHaveBeenCalledWith('本轮可安全重试')
   })
+
 })

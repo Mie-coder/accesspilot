@@ -42,7 +42,7 @@ describe('bootstrapWorkspace', () => {
       if (url === '/api/demo/session') {
         return Response.json({ demo_mode_enabled: true, demo_session_active: false })
       }
-      if (url === '/api/events') {
+      if (url === '/api/events?follow=false') {
         expect(new Headers(init?.headers).get('Last-Event-ID')).toBe('0')
         return new Response(
           'id: 1\nevent: message.assistant\ndata: {"content":"请告诉我你需要什么权限。"}\n\n',

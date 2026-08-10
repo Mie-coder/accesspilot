@@ -17,6 +17,7 @@ export interface WorkbenchContextValue {
   businessStatus: string
   error: string | null
   requestResult: RequestResult | null
+  retryableInterruption: boolean
   submit: () => Promise<void>
   isSubmitting: boolean
 }

@@ -1,7 +1,10 @@
 """FastAPI 应用入口"""
 
+import asyncio
+import time
+from collections.abc import AsyncIterator
 from typing import Literal
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
@@ -35,6 +38,7 @@ from accesspilot.conversation import (
     ConversationInputError,
     DeterministicStructuredReplyModel,
     handle_chat_message,
+    prepare_chat_message,
 )
 from accesspilot.db.models import (
     AccessGrantRecord,
@@ -42,15 +46,21 @@ from accesspilot.db.models import (
     ApprovalStepRecord,
     EmployeeRecord,
     ProvisioningAttemptRecord,
+    WorkspaceEventRecord,
 )
 from accesspilot.db.session import build_engine, build_session_factory
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
 from accesspilot.domain.models import RequestDraft
 from accesspilot.events import (
     ModelQuotaExceededError,
+    TurnInProgressError,
+    append_turn_started,
+    append_turn_terminal,
     format_sse_event,
     get_model_quota,
+    list_turn_events,
     list_workspace_events,
+    validate_event_payload,
 )
 from accesspilot.operations import (
     OperationsNotFoundError,
@@ -82,6 +92,13 @@ from accesspilot.risk.review import (
     RiskReviewModel,
     RiskReviewRequestNotFoundError,
     review_request_risk,
+)
+from accesspilot.streaming import (
+    AnswerStreamModel,
+    DeterministicAnswerStreamModel,
+    SafeStreamingResponse,
+    encode_persisted_frame,
+    encode_sse_frame,
 )
 from accesspilot.tools.catalog import ToolResult, validate_access_request
 from accesspilot.tools.executor import ReadOnlyToolCall, execute_read_only_tool
@@ -152,6 +169,7 @@ def create_app(
     risk_review_model: RiskReviewModel | None = None,
     iam_provisioner: IamProvisioner | None = None,
     structured_reply_model: StructuredReplyModel | None = None,
+    answer_stream_model: AnswerStreamModel | None = None,
 ) -> FastAPI:
     """创建一个可配置、可测试的 FastAPI 应用。"""
     active_settings = settings or Settings()
@@ -191,6 +209,9 @@ def create_app(
                 model_name=active_settings.deepseek_model,
                 base_url=active_settings.deepseek_base_url,
             )
+    active_answer_stream_model: AnswerStreamModel = (
+        answer_stream_model or DeterministicAnswerStreamModel()
+    )
     workspace_service = WorkspaceService(
         store,
         product_actor_id=active_settings.product_actor_id,
@@ -376,11 +397,12 @@ def create_app(
         return {"status": "ready"}
 
     @app.get("/api/events")
-    def replay_events(
+    async def replay_events(
         request: Request,
+        follow: bool = True,
         workspace: Workspace = Depends(require_workspace),  # noqa: B008
     ) -> StreamingResponse:
-        """按 Last-Event-ID 回放当前 Workspace 尚未收到的安全事件。"""
+        """回放安全事件；默认持续跟随，follow=false 只返回有限历史。"""
 
         raw_last_event_id = request.headers.get("Last-Event-ID", "0")
         try:
@@ -395,17 +417,35 @@ def create_app(
                 status_code=400,
                 detail="Last-Event-ID 必须是非负整数",
             )
-        with active_session_factory() as session:
-            chunks = [
-                format_sse_event(event)
-                for event in list_workspace_events(
-                    session,
-                    workspace_token=workspace.token,
-                    after_id=after_id,
-                )
-            ]
+
+        async def replay_generator() -> AsyncIterator[str]:
+            cursor = after_id
+            last_heartbeat = time.monotonic()
+            while True:
+                with active_session_factory() as session:
+                    events = list_workspace_events(
+                        session,
+                        workspace_token=workspace.token,
+                        after_id=cursor,
+                    )
+                if events:
+                    for event in events:
+                        cursor = max(cursor, event.id)
+                        # 历史回放保留旧 message.assistant 合同；当前轮客户端
+                        # 使用 /stream 的 v1 envelope 与 turn:seq 游标。
+                        yield format_sse_event(event)
+                if not follow:
+                    return
+                if await request.is_disconnected():
+                    return
+                now = time.monotonic()
+                if now - last_heartbeat >= 15:
+                    yield ": heartbeat\n\n"
+                    last_heartbeat = now
+                await asyncio.sleep(0.5)
+
         return StreamingResponse(
-            iter(chunks),
+            replay_generator(),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -425,6 +465,266 @@ def create_app(
                 workspace_token=workspace.token,
             )
         return quota.model_dump()
+
+    @app.post("/api/chat/messages/stream")
+    async def create_chat_message_stream(
+        body: ChatMessageBody,
+        request: Request,
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> SafeStreamingResponse:
+        """当前轮真实 SSE：先发 started，再在线程池执行同步 prepare。"""
+
+        turn_id = str(uuid4())
+        try:
+            with active_session_factory() as session:
+                started_event = append_turn_started(
+                    session,
+                    workspace_token=workspace.token,
+                    turn_id=turn_id,
+                )
+        except TurnInProgressError as error:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "TURN_IN_PROGRESS",
+                    "message": "当前 Workspace 已有进行中的对话轮",
+                },
+            ) from error
+
+        def persist_terminal(
+            event_type: str,
+            payload: dict[str, object],
+        ) -> WorkspaceEventRecord | None:
+            with active_session_factory() as session:
+                return append_turn_terminal(
+                    session,
+                    workspace_token=workspace.token,
+                    turn_id=turn_id,
+                    event_type=event_type,
+                    payload=payload,
+                )
+
+        async def persist_interrupted() -> None:
+            persist_terminal(
+                "turn.interrupted",
+                {
+                    "turn_id": turn_id,
+                    "reason": "client_cancelled",
+                    "retryable": True,
+                },
+            )
+
+        async def stream_generator() -> AsyncIterator[str]:
+            seq = 1
+            # 首帧只依赖已提交的 started 事实，不等待同步结构化提取。
+            yield encode_persisted_frame(
+                started_event,
+                turn_id=turn_id,
+                seq=seq,
+            )
+            seq += 1
+            prepared = None
+            try:
+                prepared = await asyncio.to_thread(
+                    prepare_chat_message,
+                    active_session_factory,
+                    workspace_service=workspace_service,
+                    workspace_token=workspace.token,
+                    content=body.content,
+                    model=structured_reply_model,
+                    turn_id=turn_id,
+                )
+            except ModelQuotaExceededError:
+                message = "模型调用额度已用尽，当前为只读回放模式"
+                event = persist_terminal(
+                    "error.recoverable",
+                    {
+                        "turn_id": turn_id,
+                        "code": "MODEL_QUOTA_EXCEEDED",
+                        "message": message,
+                    },
+                )
+                if event is not None:
+                    yield encode_persisted_frame(event, turn_id=turn_id, seq=seq)
+                return
+            except ConversationInputError:
+                message = "我暂时没能可靠理解这条消息，请稍后重试或换一种说法。"
+                event = persist_terminal(
+                    "error.recoverable",
+                    {
+                        "turn_id": turn_id,
+                        "code": "INVALID_CONVERSATION_INPUT",
+                        "message": message,
+                    },
+                )
+                if event is not None:
+                    yield encode_persisted_frame(event, turn_id=turn_id, seq=seq)
+                return
+            except Exception:
+                # 流式边界不泄漏供应商异常、请求头、Key 或配额细节。
+                message = "我暂时没能可靠理解这条消息，请稍后重试或换一种说法。"
+                event = persist_terminal(
+                    "error.recoverable",
+                    {
+                        "turn_id": turn_id,
+                        "code": "MODEL_REPLY_UNAVAILABLE",
+                        "message": message,
+                    },
+                )
+                if event is not None:
+                    yield encode_persisted_frame(event, turn_id=turn_id, seq=seq)
+                return
+
+            assert prepared is not None
+            with active_session_factory() as session:
+                facts = list_turn_events(
+                    session,
+                    workspace_token=workspace.token,
+                    turn_id=turn_id,
+                )
+            for event in facts:
+                if event.id == started_event.id:
+                    continue
+                if event.event_type not in {
+                    "intent.detected",
+                    "tool.summary",
+                    "draft.updated",
+                    "business.status",
+                }:
+                    # message.user/security.notice/message.assistant 等审计事实仍
+                    # 保留在 Workspace event log，但不进入 current v1 UI contract。
+                    continue
+                if event.event_type == "tool.summary":
+                    tool = str(event.payload.get("tool", "read_only_tool"))
+                    tool_call_id = str(
+                        uuid5(NAMESPACE_URL, f"accesspilot:{turn_id}:{event.id}")
+                    )
+                    started_payload: dict[str, object] = {
+                        "turn_id": turn_id,
+                        "tool": tool,
+                        "tool_call_id": tool_call_id,
+                    }
+                    yield encode_sse_frame(
+                        event_type="tool.started",
+                        turn_id=turn_id,
+                        seq=seq,
+                        payload=started_payload,
+                    )
+                    seq += 1
+                    completed_payload = dict(event.payload)
+                    completed_payload["turn_id"] = turn_id
+                    completed_payload["tool_call_id"] = tool_call_id
+                    yield encode_sse_frame(
+                        event_type="tool.completed",
+                        turn_id=turn_id,
+                        seq=seq,
+                        payload=completed_payload,
+                        occurred_at=event.created_at,
+                    )
+                    seq += 1
+                    continue
+                yield encode_persisted_frame(event, turn_id=turn_id, seq=seq)
+                seq += 1
+
+            if prepared.business_status in {
+                "recoverable_error",
+                "validation_failed",
+                "resolution_unavailable",
+            }:
+                message = prepared.assistant_message
+                event = persist_terminal(
+                    "error.recoverable",
+                    {
+                        "turn_id": turn_id,
+                        "code": "BUSINESS_VALIDATION_FAILED",
+                        "message": message,
+                    },
+                )
+                if event is not None:
+                    yield encode_persisted_frame(event, turn_id=turn_id, seq=seq)
+                return
+
+            chunks: list[str] = []
+            try:
+                async for delta in active_answer_stream_model.stream_answer(
+                    assistant_message=prepared.assistant_message,
+                    turn_id=turn_id,
+                ):
+                    if await request.is_disconnected():
+                        raise asyncio.CancelledError
+                    if not isinstance(delta, str):
+                        raise ValueError("回答增量类型不安全")
+                    if not delta:
+                        continue
+                    candidate = "".join(chunks) + delta
+                    # 校验累计文本后再发送，跨 chunk 拼成凭证时阻断后续片段；
+                    # message.delta 从不落库，错误只闭合为安全 recoverable terminal。
+                    validate_event_payload(
+                        "message.assistant",
+                        {"turn_id": turn_id, "content": candidate},
+                    )
+                    chunks.append(delta)
+                    yield encode_sse_frame(
+                        event_type="message.delta",
+                        turn_id=turn_id,
+                        seq=seq,
+                        payload={"text": delta},
+                    )
+                    seq += 1
+            except asyncio.CancelledError:
+                event = persist_terminal(
+                    "turn.interrupted",
+                    {
+                        "turn_id": turn_id,
+                        "reason": "client_cancelled",
+                        "retryable": True,
+                    },
+                )
+                if event is not None:
+                    yield encode_persisted_frame(event, turn_id=turn_id, seq=seq)
+                return
+            except Exception:
+                event = persist_terminal(
+                    "error.recoverable",
+                    {
+                        "turn_id": turn_id,
+                        "code": "ANSWER_STREAM_UNAVAILABLE",
+                        "message": "回答流暂时不可用，请稍后重试。",
+                    },
+                )
+                if event is not None:
+                    yield encode_persisted_frame(event, turn_id=turn_id, seq=seq)
+                return
+
+            content = "".join(chunks) or prepared.assistant_message
+            event = persist_terminal(
+                "message.completed",
+                {
+                    "turn_id": turn_id,
+                    "message_id": str(uuid4()),
+                    "content": content,
+                },
+            )
+            if event is None:
+                return
+            payload = dict(event.payload)
+            payload["persisted_event_id"] = event.id
+            yield encode_persisted_frame(
+                event,
+                turn_id=turn_id,
+                seq=seq,
+                payload_override=payload,
+            )
+
+        return SafeStreamingResponse(
+            stream_generator(),
+            media_type="text/event-stream",
+            on_disconnect=persist_interrupted,
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.post("/api/chat/messages")
     def create_chat_message(

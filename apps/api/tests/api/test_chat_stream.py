@@ -1,0 +1,244 @@
+"""T14 当前轮 SSE 红测。
+
+这些测试只固定可观察的 HTTP/事件合同；它们不依赖模型供应商，也不允许用
+前端定时器把一个完整字符串伪装成流式响应。
+"""
+
+import asyncio
+import json
+from collections.abc import AsyncIterator
+from typing import Any
+
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from accesspilot.config import Settings
+from accesspilot.db.models import WorkspaceEventRecord
+from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
+from accesspilot.domain.models import ParsedReply
+from accesspilot.main import create_app
+
+
+class CompleteStructuredReplyModel:
+    """让当前轮可以直接进入严格 Schema 通过后的回答阶段。"""
+
+    def parse_reply(
+        self,
+        user_reply: str,
+        correction: str | None = None,
+    ) -> ParsedReply:
+        del user_reply, correction
+        return ParsedReply(
+            employee_id="EMP-001",
+            entitlement_id="insighthub.customer_export",
+            duration_days=14,
+            justification="用于季度客户分析",
+            confirmed=False,
+        )
+
+
+class TwoDeltaAnswerStream:
+    """真实增量假模型：至少两个独立 chunk，禁止前端打字机模拟。"""
+
+    async def stream_answer(
+        self,
+        *,
+        assistant_message: str,
+        turn_id: str,
+    ) -> AsyncIterator[str]:
+        del assistant_message, turn_id
+        yield "第一段"
+        yield "第二段"
+
+
+class CancelAfterFirstDeltaAnswerStream:
+    """用于验证取消终态；半截文本不能产生 completed。"""
+
+    async def stream_answer(
+        self,
+        *,
+        assistant_message: str,
+        turn_id: str,
+    ) -> AsyncIterator[str]:
+        del assistant_message, turn_id
+        yield "半截"
+        raise asyncio.CancelledError
+
+
+class BrokenAnswerStream:
+    """用于验证模型错误只能落到 recoverable error 终态。"""
+
+    async def stream_answer(
+        self,
+        *,
+        assistant_message: str,
+        turn_id: str,
+    ) -> AsyncIterator[str]:
+        del assistant_message, turn_id
+        raise RuntimeError("upstream failure")
+        yield "unreachable"
+
+
+def _parse_sse_frames(text: str) -> list[dict[str, Any]]:
+    frames: list[dict[str, Any]] = []
+    for block in text.split("\n\n"):
+        block = block.strip()
+        if not block or block.startswith(":"):
+            continue
+        fields: dict[str, str] = {}
+        data_lines: list[str] = []
+        for line in block.splitlines():
+            if line.startswith("data:"):
+                data_lines.append(line.removeprefix("data:").lstrip())
+                continue
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            fields[key] = value.lstrip()
+        if "event" not in fields or not data_lines:
+            continue
+        frames.append(
+            {
+                "id": fields.get("id"),
+                "event": fields["event"],
+                "data": json.loads("\n".join(data_lines)),
+            }
+        )
+    return frames
+
+
+def _stream_app(
+    database_session_factory: sessionmaker[Session],
+    answer_stream_model: object,
+):
+    return create_app(
+        store=SqlAlchemyWorkspaceStore(database_session_factory),
+        settings=Settings(demo_mode_enabled=True),
+        session_factory=database_session_factory,
+        structured_reply_model=CompleteStructuredReplyModel(),
+        answer_stream_model=answer_stream_model,
+    )
+
+
+def _start_workspace(client: TestClient) -> None:
+    assert client.post("/api/workspaces").status_code == 201
+
+
+def test_current_turn_sse_emits_ordered_real_deltas_and_persists_before_completed(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    client = TestClient(_stream_app(database_session_factory, TwoDeltaAnswerStream()))
+    _start_workspace(client)
+    response = client.post(
+        "/api/chat/messages/stream",
+        json={"content": "申请仪表盘查看权限"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    frames = _parse_sse_frames(response.text)
+    event_names = [frame["event"] for frame in frames]
+    assert event_names[0:2] == ["turn.started", "intent.detected"]
+    assert event_names.index("tool.started") < event_names.index("tool.completed")
+    assert event_names.index("tool.completed") < event_names.index("draft.updated")
+    assert event_names[-1] == "message.completed"
+    assert event_names.count("message.completed") == 1
+    assert not any(
+        name in {"error.recoverable", "turn.interrupted"} for name in event_names
+    )
+
+    turn_ids = {frame["data"]["turn_id"] for frame in frames}
+    assert len(turn_ids) == 1
+    turn_id = next(iter(turn_ids))
+    seqs = [frame["data"]["seq"] for frame in frames]
+    assert seqs == list(range(1, len(frames) + 1))
+    assert all(frame["id"] == f"{turn_id}:{frame['data']['seq']}" for frame in frames)
+
+    deltas = [
+        frame["data"]["payload"]["text"]
+        for frame in frames
+        if frame["event"] == "message.delta"
+    ]
+    assert deltas == ["第一段", "第二段"]
+    completed = next(frame for frame in frames if frame["event"] == "message.completed")
+    persisted_event_id = completed["data"]["payload"]["persisted_event_id"]
+    assert isinstance(persisted_event_id, int)
+
+    with database_session_factory() as session:
+        persisted = session.scalar(
+            select(WorkspaceEventRecord).where(
+                WorkspaceEventRecord.id == persisted_event_id,
+            )
+        )
+        assert persisted is not None
+        assert persisted.event_type == "message.completed"
+        assert persisted.payload["turn_id"] == turn_id
+        all_events = list(session.scalars(select(WorkspaceEventRecord)).all())
+        assert all(event.event_type != "message.delta" for event in all_events)
+
+    assert "upstream failure" not in response.text
+    assert all(
+        key not in response.text
+        for key in ("api_key", "authorization", "quota", "hidden_reasoning")
+    )
+
+
+def test_current_turn_sse_model_error_has_single_recoverable_terminal(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    client = TestClient(_stream_app(database_session_factory, BrokenAnswerStream()))
+    _start_workspace(client)
+    response = client.post(
+        "/api/chat/messages/stream",
+        json={"content": "申请仪表盘查看权限"},
+    )
+
+    assert response.status_code == 200
+    frames = _parse_sse_frames(response.text)
+    terminal_names = {"message.completed", "error.recoverable", "turn.interrupted"}
+    terminals = [frame for frame in frames if frame["event"] in terminal_names]
+    assert [frame["event"] for frame in terminals] == ["error.recoverable"]
+    assert "upstream failure" not in response.text
+    assert "message.delta" not in response.text
+
+
+def test_current_turn_cancellation_persists_interrupted_without_completed(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    client = TestClient(
+        _stream_app(database_session_factory, CancelAfterFirstDeltaAnswerStream())
+    )
+    _start_workspace(client)
+    response = client.post(
+        "/api/chat/messages/stream",
+        json={"content": "申请仪表盘查看权限"},
+    )
+
+    assert response.status_code == 200
+    frames = _parse_sse_frames(response.text)
+    turn_id = frames[0]["data"]["turn_id"]
+    terminals = [
+        frame["event"]
+        for frame in frames
+        if frame["event"]
+        in {"message.completed", "error.recoverable", "turn.interrupted"}
+    ]
+    assert terminals == ["turn.interrupted"]
+    assert [
+        frame["data"]["payload"]["text"]
+        for frame in frames
+        if frame["event"] == "message.delta"
+    ] == ["半截"]
+
+    with database_session_factory() as session:
+        events = list(
+            session.scalars(
+                select(WorkspaceEventRecord).where(
+                    WorkspaceEventRecord.payload["turn_id"].astext == turn_id,
+                )
+            ).all()
+        )
+        assert any(event.event_type == "turn.interrupted" for event in events)
+        assert all(event.event_type != "message.completed" for event in events)
+        assert all(event.payload.get("content") != "半截" for event in events)

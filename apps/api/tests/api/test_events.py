@@ -58,7 +58,7 @@ def test_sse_reconnect_only_replays_events_after_last_event_id(
         )
 
     response = client.get(
-        "/api/events",
+        "/api/events?follow=false",
         headers={"Last-Event-ID": str(first.id)},
     )
 
@@ -83,7 +83,7 @@ def test_sse_rejects_invalid_last_event_id(
     client.post("/api/workspaces")
 
     response = client.get(
-        "/api/events",
+        "/api/events?follow=false",
         headers={"Last-Event-ID": "not-an-integer"},
     )
 
@@ -117,7 +117,7 @@ def test_chat_api_returns_429_after_quota_and_history_remains_available(
 
     first = client.post("/api/chat/messages", json={"content": "我是 EMP-001"})
     exhausted = client.post("/api/chat/messages", json={"content": "申请 7 天"})
-    history = client.get("/api/events")
+    history = client.get("/api/events?follow=false")
     quota = client.get("/api/demo/model-quota")
 
     assert first.status_code == 200
@@ -147,7 +147,7 @@ def test_chat_api_rejects_oversized_message_before_consuming_quota(
     response = client.post("/api/chat/messages", json={"content": "x" * 10_001})
     assert client.post("/api/demo/session", json={"employee_id": "EMP-001"}).status_code == 200
     quota = client.get("/api/demo/model-quota")
-    history = client.get("/api/events")
+    history = client.get("/api/events?follow=false")
 
     assert response.status_code == 422
     assert quota.json() == {"used": 0, "limit": 20, "remaining": 20, "retry_consumed": 0}

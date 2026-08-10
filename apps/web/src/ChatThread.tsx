@@ -7,11 +7,14 @@ import {
   useAui,
   useAuiState,
 } from '@assistant-ui/react'
+import { useCallback, useEffect, useRef } from 'react'
+
 import {
   AlertCircle,
   ArrowDown,
   ArrowUp,
   Bot,
+  CircleStop,
   LoaderCircle,
   SendHorizontal,
   UserRound,
@@ -76,6 +79,53 @@ function StarterPrompts() {
 }
 
 function Composer() {
+  const aui = useAui()
+  const messages = useAuiState((state) => state.thread.messages)
+  const isRunning = useAuiState((state) => state.thread.isRunning)
+  const pendingCancelIds = useRef(new Set<string>())
+  const interruptionKeys = useRef(new Set<string>())
+  const cancelSequence = useRef(0)
+
+  const appendInterruptedState = useCallback((key: string) => {
+    if (interruptionKeys.current.has(key)) return
+    interruptionKeys.current.add(key)
+    aui.thread.append({
+      role: 'assistant',
+      content: [{ type: 'text', text: '本轮已中断，可以重新发送。' }],
+      startRun: false,
+    })
+  }, [aui])
+
+  const deleteCancelledMessage = useCallback((messageId: string) => {
+    void Promise.resolve(aui.thread.deleteMessage(messageId)).catch(() => undefined)
+  }, [aui])
+
+  useEffect(() => {
+    for (const messageId of pendingCancelIds.current) {
+      if (messages.some((message) => message.id === messageId)) {
+        deleteCancelledMessage(messageId)
+      } else if (!isRunning) {
+        pendingCancelIds.current.delete(messageId)
+      }
+    }
+  }, [deleteCancelledMessage, isRunning, messages])
+
+  const cancel = useCallback(() => {
+    const assistant = [...messages].reverse().find(
+      (message) => message.role === 'assistant' && message.status?.type === 'running',
+    )
+    const messageId = assistant?.id
+    const key = messageId ?? `cancel-${cancelSequence.current++}`
+    if (messageId) pendingCancelIds.current.add(messageId)
+    aui.thread.cancelRun()
+    if (messageId) {
+      const deletion = Promise.resolve(aui.thread.deleteMessage(messageId)).catch(() => undefined)
+      void deletion.then(() => appendInterruptedState(key))
+    } else {
+      appendInterruptedState(key)
+    }
+  }, [appendInterruptedState, aui, messages])
+
   return (
     <div className="composer-wrap">
       <AuiIf condition={(state) => state.thread.isRunning}>
@@ -98,8 +148,13 @@ function Composer() {
           </ComposerPrimitive.Send>
         </AuiIf>
         <AuiIf condition={(state) => state.thread.isRunning}>
-          <button className="composer-send is-running" type="button" disabled aria-label="正在处理">
-            <LoaderCircle className="spin" size={18} />
+          <button
+            className="composer-send is-running"
+            type="button"
+            aria-label="停止生成"
+            onClick={cancel}
+          >
+            <CircleStop size={18} />
           </button>
         </AuiIf>
       </ComposerPrimitive.Root>

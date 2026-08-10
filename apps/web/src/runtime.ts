@@ -1,6 +1,6 @@
 import type { ChatModelAdapter } from '@assistant-ui/react'
 
-import { ApiError, replayEvents, sendChatMessage } from './api'
+import { ApiError, streamChatMessage, type TurnSseFrame } from './api'
 import type { ChatTurn, WorkspaceEvent } from './types'
 
 interface AdapterCallbacks {
@@ -8,6 +8,7 @@ interface AdapterCallbacks {
   onTurn: (turn: ChatTurn) => void
   onEvents: (events: WorkspaceEvent[]) => void
   onError: (message: string) => void
+  onStreamEvent?: (event: TurnSseFrame) => void
 }
 
 function latestUserText(messages: Parameters<ChatModelAdapter['run']>[0]['messages']): string {
@@ -29,30 +30,74 @@ function latestUserText(messages: Parameters<ChatModelAdapter['run']>[0]['messag
 }
 
 function safeErrorMessage(error: unknown): string {
-  if (error instanceof ApiError || error instanceof Error) return error.message
+  if (error instanceof ApiError) return error.message
+  if (error instanceof Error && error.name === 'AbortError') return '请求已取消'
+  if (error instanceof Error && error.message.length > 0) {
+    if (error.message.includes('SSE') || error.message.includes('后端')) {
+      return '实时响应格式无效，请稍后重试。'
+    }
+    return error.message
+  }
   return '对话服务暂时不可用，请稍后重试。'
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+    || error instanceof Error && error.name === 'AbortError'
+}
+
+function textField(payload: Record<string, unknown>, key: string): string | null {
+  return typeof payload[key] === 'string' ? payload[key] : null
 }
 
 export function createChatModelAdapter(callbacks: AdapterCallbacks): ChatModelAdapter {
   return {
     async *run({ messages, abortSignal }) {
+      let cumulative = ''
+      let errorReported = false
       try {
-        const turn = await sendChatMessage(latestUserText(messages), abortSignal)
-        callbacks.onTurn(turn)
+        for await (const event of streamChatMessage(latestUserText(messages), abortSignal)) {
+          callbacks.onStreamEvent?.(event)
+          const payload = event.data.payload
 
-        try {
-          const events = await replayEvents(callbacks.getLastEventId(), abortSignal)
-          callbacks.onEvents(events)
-        } catch (error) {
-          if (error instanceof DOMException && error.name === 'AbortError') throw error
-          // 本轮业务结果已由 POST 返回；SSE 回放失败只降级活动流，不重复调用模型。
-          callbacks.onError('本轮结果已保存，但实时事件同步失败，可稍后刷新重试。')
+          if (event.event === 'message.delta') {
+            const delta = textField(payload, 'text') ?? textField(payload, 'delta')
+            if (!delta) throw new Error('当前轮 SSE 增量缺少文本')
+            cumulative += delta
+            yield { content: [{ type: 'text', text: cumulative }] }
+            continue
+          }
+
+          if (event.event === 'message.completed') {
+            const completionDelta = textField(payload, 'delta') ?? textField(payload, 'text')
+            if (completionDelta && !cumulative.endsWith(completionDelta)) {
+              cumulative += completionDelta
+              yield { content: [{ type: 'text', text: cumulative }] }
+            }
+            const content = textField(payload, 'content')
+            if (content && content !== cumulative) {
+              const suffix = content.startsWith(cumulative) ? content.slice(cumulative.length) : content
+              if (suffix) yield { content: [{ type: 'text', text: content }] }
+              cumulative = content
+            }
+            continue
+          }
+
+          if (event.event === 'turn.interrupted') {
+            yield { status: { type: 'incomplete', reason: 'cancelled' } }
+            continue
+          }
+
+          if (event.event === 'error.recoverable') {
+            const message = textField(payload, 'message') ?? '本轮可安全重试，请稍后再试。'
+            callbacks.onError(message)
+            errorReported = true
+            throw new Error(message)
+          }
         }
-
-        yield { content: [{ type: 'text', text: turn.assistant_message }] }
       } catch (error) {
-        if (error instanceof DOMException && error.name === 'AbortError') throw error
-        callbacks.onError(safeErrorMessage(error))
+        if (isAbortError(error)) throw error
+        if (!errorReported) callbacks.onError(safeErrorMessage(error))
         throw error
       }
     },

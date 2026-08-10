@@ -71,7 +71,7 @@ def test_submitted_request_is_recoverable_from_safe_event_replay(
     save_complete_draft(client, confirmed=True)
 
     submitted = client.post("/api/requests")
-    history = client.get("/api/events")
+    history = client.get("/api/events?follow=false")
 
     assert submitted.status_code == 201
     assert history.status_code == 200

@@ -1,6 +1,7 @@
 """模型配额保护下的申请对话、草稿合并与安全事件写入。"""
 
 import re
+from contextvars import ContextVar
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -39,6 +40,17 @@ from accesspilot.workspaces import WorkspaceService
 
 class ConversationInputError(ValueError):
     """聊天消息不满足最小输入要求。"""
+
+
+_CURRENT_TURN_ID: ContextVar[str | None] = ContextVar(
+    "accesspilot_current_turn_id", default=None
+)
+_PERSIST_TERMINAL: ContextVar[bool] = ContextVar(
+    "accesspilot_persist_terminal", default=True
+)
+_TURN_STARTED: ContextVar[bool] = ContextVar(
+    "accesspilot_turn_started", default=False
+)
 
 
 class ConversationTurn(BaseModel):
@@ -95,12 +107,23 @@ def _append_event(
     event_type: str,
     payload: dict[str, object],
 ) -> None:
+    # prepare 阶段共享旧业务逻辑，但禁止写入 terminal；流式层在模型回答后
+    # 通过 append_turn_terminal 原子写入唯一 completed/error/interrupted。
+    if not _PERSIST_TERMINAL.get() and event_type in {
+        "message.assistant",
+        "error.recoverable",
+    }:
+        return
+    turn_id = _CURRENT_TURN_ID.get()
+    event_payload = dict(payload)
+    if turn_id is not None:
+        event_payload.setdefault("turn_id", turn_id)
     with session_factory() as session:
         append_workspace_event(
             session,
             workspace_token=workspace_token,
             event_type=event_type,
-            payload=payload,
+            payload=event_payload,
         )
 
 
@@ -267,7 +290,7 @@ def _append_security_notice(
     )
 
 
-def handle_chat_message(
+def _process_chat_message(
     session_factory: sessionmaker[Session],
     *,
     workspace_service: WorkspaceService,
@@ -283,6 +306,14 @@ def handle_chat_message(
         raise ConversationInputError("消息不能为空")
 
     workspace = workspace_service.get(workspace_token)
+    turn_id = _CURRENT_TURN_ID.get()
+    if turn_id is not None and not _TURN_STARTED.get():
+        _append_event(
+            session_factory,
+            workspace_token=workspace_token,
+            event_type="turn.started",
+            payload={"turn_id": turn_id},
+        )
     visible_draft = workspace.draft
     if (
         visible_draft is not None
@@ -307,6 +338,17 @@ def handle_chat_message(
         route = IntentRoute(
             intent="request_access",
             security_probe=route.security_probe,
+        )
+    if turn_id is not None:
+        _append_event(
+            session_factory,
+            workspace_token=workspace_token,
+            event_type="intent.detected",
+            payload={
+                "turn_id": turn_id,
+                "intent": route.intent,
+                "security_flagged": route.security_probe,
+            },
         )
     safe_content = _redact_sensitive_content(normalized_content)
     current_draft = visible_draft or RequestDraft(employee_id=workspace.actor_id)
@@ -629,3 +671,54 @@ def handle_chat_message(
             else []
         ),
     )
+
+
+def handle_chat_message(
+    session_factory: sessionmaker[Session],
+    *,
+    workspace_service: WorkspaceService,
+    workspace_token: str,
+    content: str,
+    model: StructuredReplyModel,
+    router: IntentRouter | None = None,
+) -> ConversationTurn:
+    """旧 JSON 入口：保留完整 terminal 事件和原有返回合同。"""
+
+    return _process_chat_message(
+        session_factory,
+        workspace_service=workspace_service,
+        workspace_token=workspace_token,
+        content=content,
+        model=model,
+        router=router,
+    )
+
+
+def prepare_chat_message(
+    session_factory: sessionmaker[Session],
+    *,
+    workspace_service: WorkspaceService,
+    workspace_token: str,
+    content: str,
+    model: StructuredReplyModel,
+    turn_id: str,
+    router: IntentRouter | None = None,
+) -> ConversationTurn:
+    """流式入口第一阶段：复用字段/工具校验，但不写 assistant terminal。"""
+
+    id_token = _CURRENT_TURN_ID.set(turn_id)
+    terminal_token = _PERSIST_TERMINAL.set(False)
+    started_token = _TURN_STARTED.set(True)
+    try:
+        return _process_chat_message(
+            session_factory,
+            workspace_service=workspace_service,
+            workspace_token=workspace_token,
+            content=content,
+            model=model,
+            router=router,
+        )
+    finally:
+        _TURN_STARTED.reset(started_token)
+        _PERSIST_TERMINAL.reset(terminal_token)
+        _CURRENT_TURN_ID.reset(id_token)

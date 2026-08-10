@@ -141,7 +141,7 @@ def test_product_events_never_expose_model_quota_fields(
             payload={"status": "answered"},
         )
 
-    response = client.get("/api/events")
+    response = client.get("/api/events?follow=false")
     assert response.status_code == 200
     assert all(key not in response.text for key in ("quota", "used", "limit", "remaining"))
 
@@ -254,7 +254,7 @@ def test_demo_reset_rotates_workspace_and_clears_events_and_quota(
     assert new_token is not None
     assert new_token != demo_token
     assert client.get("/api/drafts/current").json() == {"draft": None}
-    assert client.get("/api/events").text == ""
+    assert client.get("/api/events?follow=false").text == ""
     assert client.get("/api/demo/model-quota").json() == {
         "used": 0,
         "limit": 20,
@@ -308,7 +308,7 @@ def test_product_and_demo_facts_are_isolated_across_cookie_switches(
     assert entered.status_code == 200
     demo_token = client.cookies.get("accesspilot_workspace")
     assert demo_token is not None and demo_token != product_token
-    assert "product-only-fact" not in client.get("/api/events").text
+    assert "product-only-fact" not in client.get("/api/events?follow=false").text
     assert client.get(f"/api/requests/{product_request_id}").status_code == 404
     with database_session_factory() as session:
         append_workspace_event(
@@ -317,7 +317,7 @@ def test_product_and_demo_facts_are_isolated_across_cookie_switches(
             event_type="message.assistant",
             payload={"content": "demo-only-fact"},
         )
-    assert "demo-only-fact" in client.get("/api/events").text
+    assert "demo-only-fact" in client.get("/api/events?follow=false").text
 
     demo_preview = client.post(
         "/api/drafts/preview",
@@ -337,7 +337,7 @@ def test_product_and_demo_facts_are_isolated_across_cookie_switches(
     exited = client.post("/api/demo/session/exit")
     assert exited.status_code == 200
     assert client.cookies.get("accesspilot_workspace") == product_token
-    product_events = client.get("/api/events").text
+    product_events = client.get("/api/events?follow=false").text
     assert "product-only-fact" in product_events
     assert "demo-only-fact" not in product_events
     assert client.get(f"/api/requests/{demo_request_id}").status_code == 404
