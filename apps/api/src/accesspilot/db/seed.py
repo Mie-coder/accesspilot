@@ -72,7 +72,10 @@ def seed_catalog(session: Session) -> None:
                         title=policy.title,
                         chunk_index=0,
                         content=policy.content,
-                        chunk_metadata={"source": "fictional_access_policy"},
+                        chunk_metadata={
+                            "version": policy.version,
+                            "source": policy.source,
+                        },
                         embedding=None,
                     )
                 )
@@ -83,7 +86,10 @@ def seed_catalog(session: Session) -> None:
                 chunk.embedding = None
             chunk.title = policy.title
             chunk.content = policy.content
-            chunk.chunk_metadata = {"source": "fictional_access_policy"}
+            chunk.chunk_metadata = {
+                "version": policy.version,
+                "source": policy.source,
+            }
 
         # 全部目录作为一个事务提交，不留只有部分目录的半成品。
         session.commit()

@@ -40,6 +40,7 @@ class Settings(BaseSettings):
         default="https://dashscope.aliyuncs.com/compatible-mode/v1",
         validation_alias="DASHSCOPE_BASE_URL",
     )
+    policy_similarity_threshold: float = Field(default=0.20, ge=0.0, le=1.0)
 
     model_config = SettingsConfigDict(
         env_prefix="ACCESSPILOT_",

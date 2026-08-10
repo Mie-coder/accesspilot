@@ -71,6 +71,8 @@ class PolicyClause:
     code: str
     title: str
     content: str
+    version: str = "v1"
+    source: str = "fictional_access_policy"
 
 POLICIES = (
     PolicyClause(
@@ -113,7 +115,9 @@ POLICIES = (
         title="开通失败审计与幂等重试",
         content="权限开通失败必须记录审计事件；重试必须使用幂等键，不能产生重复授权。",
     ),
-)    
+)
+
+POLICY_CODES = tuple(policy.code for policy in POLICIES)
 
 EMPLOYEES = {
     "EMP-001": Employee(

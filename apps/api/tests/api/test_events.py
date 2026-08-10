@@ -155,8 +155,17 @@ def test_chat_api_rejects_oversized_message_before_consuming_quota(
     assert model.calls == 0
 
 
+@pytest.mark.parametrize(
+    "sensitive_value",
+    [
+        "API_KEY=sk-secret-123456",
+        "client_secret=plainsecret123",
+        "access_token=plain-token-123456",
+    ],
+)
 def test_event_payload_rejects_sensitive_string_values(
     database_session_factory: sessionmaker[Session],
+    sensitive_value: str,
 ) -> None:
     client = TestClient(
         create_app(
@@ -176,7 +185,7 @@ def test_event_payload_rejects_sensitive_string_values(
                 workspace_token=token,
                 event_type="draft.updated",
                 payload={
-                    "draft": {"justification": "API_KEY=sk-secret-123456"},
+                    "draft": {"justification": sensitive_value},
                     "missing_fields": [],
                     "can_enter_approval": False,
                 },

@@ -8,7 +8,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -37,8 +37,12 @@ from accesspilot.config import Settings
 from accesspilot.conversation import (
     ConversationInputError,
     DeterministicStructuredReplyModel,
+    _redact_sensitive_content,
+    contains_protected_internal_content,
     handle_chat_message,
+    is_suspicious_protected_prefix,
     prepare_chat_message,
+    split_safe_model_output_prefix,
 )
 from accesspilot.db.models import (
     AccessGrantRecord,
@@ -102,6 +106,7 @@ from accesspilot.streaming import (
 )
 from accesspilot.tools.catalog import ToolResult, validate_access_request
 from accesspilot.tools.executor import ReadOnlyToolCall, execute_read_only_tool
+from accesspilot.tools.policies import PolicyAnswer, PolicyService
 from accesspilot.workspaces import (
     InvalidDemoActorError,
     UnknownWorkspaceError,
@@ -161,6 +166,22 @@ class ChatMessageBody(BaseModel):
     content: str = Field(max_length=10_000)
 
 
+class PolicyQueryBody(BaseModel):
+    """政策检索入口只接收用户可见问题，不接受身份或工具参数。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: StrictStr = Field(min_length=1, max_length=2_000)
+
+    @field_validator("query")
+    @classmethod
+    def reject_blank_query(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("政策问题不能为空")
+        return normalized
+
+
 def create_app(
     settings: Settings | None = None,
     store: WorkspaceStore | None = None,
@@ -170,6 +191,7 @@ def create_app(
     iam_provisioner: IamProvisioner | None = None,
     structured_reply_model: StructuredReplyModel | None = None,
     answer_stream_model: AnswerStreamModel | None = None,
+    policy_service: PolicyService | None = None,
 ) -> FastAPI:
     """创建一个可配置、可测试的 FastAPI 应用。"""
     active_settings = settings or Settings()
@@ -189,6 +211,11 @@ def create_app(
                 model_name=active_settings.dashscope_embedding_model,
                 base_url=active_settings.dashscope_base_url,
             )
+    assert embedding_model is not None
+    active_policy_service = policy_service or PolicyService(
+        embedding_model=embedding_model,
+        similarity_threshold=active_settings.policy_similarity_threshold,
+    )
     if risk_review_model is None:
         if active_settings.deepseek_api_key is None:
             risk_review_model = DeterministicRiskReviewModel()
@@ -396,6 +423,53 @@ def create_app(
             raise HTTPException(status_code=503, detail="数据库暂不可用") from error
         return {"status": "ready"}
 
+    @app.get("/api/policies")
+    def read_policy_catalog() -> dict[str, object]:
+        """返回完整政策目录；政策目录是公开只读事实，不依赖 Workspace。"""
+
+        try:
+            with active_session_factory() as session:
+                result = execute_read_only_tool(
+                    session,
+                    workspace_token="policy-catalog-api",
+                    call=ReadOnlyToolCall(tool="list_policy_catalog"),
+                    policy_service=active_policy_service,
+                )
+        except Exception:
+            return {"policies": [], "status": "retrieval_unavailable"}
+        if result.policy_catalog is None:
+            return {"policies": [], "status": "retrieval_unavailable"}
+        return {
+            "policies": [item.model_dump(mode="json") for item in result.policy_catalog]
+        }
+
+    @app.post("/api/policies/query")
+    def query_policy(body: PolicyQueryBody) -> dict[str, object]:
+        """返回带证据和三态状态的政策答案，绝不回显供应商异常。"""
+
+        safe_query = _redact_sensitive_content(body.query)
+        if not safe_query.strip():
+            raise HTTPException(status_code=422, detail="政策问题不能为空")
+        try:
+            with active_session_factory() as session:
+                result = execute_read_only_tool(
+                    session,
+                    workspace_token="policy-query-api",
+                    call=ReadOnlyToolCall(tool="search_policies", query=safe_query),
+                    policy_service=active_policy_service,
+                )
+        except Exception:
+            result = None
+        if result is None or result.policy_answer is None:
+            # 执行器异常也要闭合为稳定业务状态，而不是 HTTP 500 或空文本。
+            return PolicyAnswer(
+                status="retrieval_unavailable",
+                answer="政策检索暂时不可用，当前无法提供可靠依据。",
+                evidence=[],
+                next_step="请稍后重试；如问题紧急，请联系人工安全流程。",
+            ).model_dump(mode="json")
+        return result.policy_answer.model_dump(mode="json")
+
     @app.get("/api/events")
     async def replay_events(
         request: Request,
@@ -533,6 +607,7 @@ def create_app(
                     content=body.content,
                     model=structured_reply_model,
                     turn_id=turn_id,
+                    policy_service=active_policy_service,
                 )
             except ModelQuotaExceededError:
                 message = "模型调用额度已用尽，当前为只读回放模式"
@@ -645,6 +720,8 @@ def create_app(
                 return
 
             chunks: list[str] = []
+            pending = ""
+            full_content = ""
             try:
                 async for delta in active_answer_stream_model.stream_answer(
                     assistant_message=prepared.assistant_message,
@@ -656,21 +733,27 @@ def create_app(
                         raise ValueError("回答增量类型不安全")
                     if not delta:
                         continue
-                    candidate = "".join(chunks) + delta
+                    candidate = full_content + delta
                     # 校验累计文本后再发送，跨 chunk 拼成凭证时阻断后续片段；
                     # message.delta 从不落库，错误只闭合为安全 recoverable terminal。
+                    if contains_protected_internal_content(candidate):
+                        raise ValueError("回答增量包含不可展示的内部内容")
                     validate_event_payload(
                         "message.assistant",
                         {"turn_id": turn_id, "content": candidate},
                     )
-                    chunks.append(delta)
-                    yield encode_sse_frame(
-                        event_type="message.delta",
-                        turn_id=turn_id,
-                        seq=seq,
-                        payload={"text": delta},
-                    )
-                    seq += 1
+                    full_content = candidate
+                    pending += delta
+                    safe_delta, pending = split_safe_model_output_prefix(pending)
+                    if safe_delta:
+                        chunks.append(safe_delta)
+                        yield encode_sse_frame(
+                            event_type="message.delta",
+                            turn_id=turn_id,
+                            seq=seq,
+                            payload={"text": safe_delta},
+                        )
+                        seq += 1
             except asyncio.CancelledError:
                 event = persist_terminal(
                     "turn.interrupted",
@@ -696,6 +779,28 @@ def create_app(
                     yield encode_persisted_frame(event, turn_id=turn_id, seq=seq)
                 return
 
+            if pending and is_suspicious_protected_prefix(pending):
+                event = persist_terminal(
+                    "error.recoverable",
+                    {
+                        "turn_id": turn_id,
+                        "code": "ANSWER_STREAM_UNAVAILABLE",
+                        "message": "回答流暂时不可用，请稍后重试。",
+                    },
+                )
+                if event is not None:
+                    yield encode_persisted_frame(event, turn_id=turn_id, seq=seq)
+                return
+
+            if pending:
+                chunks.append(pending)
+                yield encode_sse_frame(
+                    event_type="message.delta",
+                    turn_id=turn_id,
+                    seq=seq,
+                    payload={"text": pending},
+                )
+                seq += 1
             content = "".join(chunks) or prepared.assistant_message
             event = persist_terminal(
                 "message.completed",
@@ -740,6 +845,7 @@ def create_app(
                 workspace_token=workspace.token,
                 content=body.content,
                 model=structured_reply_model,
+                policy_service=active_policy_service,
             )
         except ModelQuotaExceededError as error:
             raise HTTPException(

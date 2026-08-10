@@ -21,6 +21,7 @@ from accesspilot.db.models import (
 )
 from accesspilot.db.workspace_store import hash_workspace_token
 from accesspilot.domain.models import RequestDraft
+from accesspilot.tools.policies import PolicyAnswer, PolicyEvidence
 
 '''给审批流程看的员工资料包'''
 class EmployeeContext(BaseModel):
@@ -223,6 +224,8 @@ class ToolResult(BaseModel):
     active_access: list[ActiveAccessSummary] | None = None
     issues: list[ValidationIssue] | None = None
     request_status: RequestStatusSummary | None = None
+    policy_catalog: list[PolicyEvidence] | None = None
+    policy_answer: PolicyAnswer | None = None
 
 def get_employee_context(session: Session, employee_id: str) -> ToolResult:
     """按员工编号查询审批所需的员工和直属经理信息。"""

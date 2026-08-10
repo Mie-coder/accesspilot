@@ -174,7 +174,10 @@ FORBIDDEN_EVENT_KEYS = {
 SENSITIVE_EVENT_VALUE_PATTERNS = (
     re.compile(r"(?i)\b(?:sk|ds)-[a-z0-9_-]{8,}"),
     re.compile(r"(?i)\bbearer\s+\S+"),
-    re.compile(r"(?i)\bapi[_ -]?key\s*[:=]\s*\S+"),
+    re.compile(
+        r"(?i)(?:api[_ -]?key|client[_ -]?secret|access[_ -]?token|"
+        r"refresh[_ -]?token|private[_ -]?key|password)\s*[:=]\s*\S+"
+    ),
 )
 
 

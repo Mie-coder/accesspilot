@@ -1,5 +1,6 @@
 """政策向量写入与 pgvector 相似度检索。"""
 
+from collections.abc import Sequence
 from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict
@@ -8,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from accesspilot.agent.embeddings import EMBEDDING_DIMENSIONS, EmbeddingModel
 from accesspilot.db.models import PolicyChunkRecord
+from accesspilot.domain.catalog import POLICY_CODES
 
 
 class PolicyEmbeddingError(RuntimeError):
@@ -22,6 +24,15 @@ class PolicyIndexUnavailableError(PolicyRetrievalError):
     """数据库中没有可检索的政策向量。"""
 
 
+def _is_complete_policy_catalog(
+    chunks: Sequence[PolicyChunkRecord],
+) -> bool:
+    return (
+        tuple(chunk.policy_code for chunk in chunks) == POLICY_CODES
+        and all(chunk.chunk_index == 0 for chunk in chunks)
+    )
+
+
 class PolicyMatch(BaseModel):
     """风险审查可以引用的一条只读政策检索结果。"""
 
@@ -31,6 +42,8 @@ class PolicyMatch(BaseModel):
     title: str
     content: str
     similarity: float
+    version: str = "v1"
+    source: str = "fictional_access_policy"
 
 
 def _policy_text(chunk: PolicyChunkRecord) -> str:
@@ -60,6 +73,8 @@ def index_policy_embeddings(
             PolicyChunkRecord.chunk_index,
         )
     ).all()
+    if not _is_complete_policy_catalog(chunks):
+        raise PolicyEmbeddingError("政策事实源必须完整包含 POL-001 至 POL-008")
     texts = [_policy_text(chunk) for chunk in chunks]
 
     try:
@@ -93,6 +108,20 @@ def search_policies(
         raise PolicyRetrievalError("政策检索数量必须为正数")
 
     try:
+        stored_chunks = session.scalars(
+            select(PolicyChunkRecord).order_by(
+                PolicyChunkRecord.policy_code,
+                PolicyChunkRecord.chunk_index,
+            )
+        ).all()
+    except Exception as error:
+        raise PolicyRetrievalError("政策索引状态读取失败") from error
+    if not _is_complete_policy_catalog(stored_chunks) or any(
+        chunk.embedding is None for chunk in stored_chunks
+    ):
+        raise PolicyIndexUnavailableError("政策向量索引不完整，可重试初始化")
+
+    try:
         query_vectors = embedding_model.embed([query])
     except Exception as error:
         raise PolicyRetrievalError("政策问题向量化失败") from error
@@ -114,12 +143,21 @@ def search_policies(
     matches: list[PolicyMatch] = []
     for chunk, raw_distance in rows:
         similarity = max(0.0, min(1.0, 1.0 - float(raw_distance)))
+        metadata = chunk.chunk_metadata
+        version = metadata.get("version")
+        source = metadata.get("source")
         matches.append(
             PolicyMatch(
                 policy_code=chunk.policy_code,
                 title=chunk.title,
                 content=chunk.content,
                 similarity=similarity,
+                version=version if isinstance(version, str) and version else "v1",
+                source=(
+                    source
+                    if isinstance(source, str) and source
+                    else "fictional_access_policy"
+                ),
             )
         )
     return matches

@@ -7,6 +7,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session, sessionmaker
 
+from accesspilot.agent.embeddings import DeterministicEmbeddingModel
 from accesspilot.agent.routing import (
     ConversationIntent,
     DeterministicIntentRouter,
@@ -35,6 +36,7 @@ from accesspilot.tools.executor import (
     execute_read_only_tool,
     tool_call_for_intent,
 )
+from accesspilot.tools.policies import PolicyService
 from accesspilot.workspaces import WorkspaceService
 
 
@@ -69,6 +71,17 @@ class ConversationTurn(BaseModel):
     tool_results: list[ToolResult] = Field(default_factory=list)
 
 
+def _explicit_confirmation_from_text(content: str) -> bool | None:
+    """确认是写入门控，只从用户明确原文推导，不信任模型布尔值。"""
+
+    normalized = content.casefold()
+    if any(marker in normalized for marker in ("不确认", "暂不确认", "不要提交")):
+        return False
+    if any(marker in normalized for marker in ("确认提交", "确认申请", "我确认")):
+        return True
+    return None
+
+
 class DeterministicStructuredReplyModel:
     """无 Key 时使用的透明离线字段提取器。"""
 
@@ -85,12 +98,7 @@ class DeterministicStructuredReplyModel:
         )
         duration = re.search(r"(\d+)\s*天", user_reply)
         justification = re.search(r"(?:用于|为了)([^，。,.]+)", user_reply)
-        normalized = user_reply.casefold()
-        confirmed: bool | None = None
-        if any(marker in normalized for marker in ("不确认", "暂不确认", "不要提交")):
-            confirmed = False
-        elif any(marker in normalized for marker in ("确认提交", "确认申请", "我确认")):
-            confirmed = True
+        confirmed = _explicit_confirmation_from_text(user_reply)
         return ParsedReply(
             employee_id=employee.group(0).upper() if employee else None,
             entitlement_id=entitlement.group(0).lower() if entitlement else None,
@@ -193,8 +201,11 @@ def _redact_sensitive_content(content: str) -> str:
         content,
     )
     redacted = re.sub(
-        r"(?i)api[_ -]?key\s*[:=]\s*\S+",
-        "[已隐藏 API Key]",
+        (
+            r"(?i)(?:api[_ -]?key|client[_ -]?secret|access[_ -]?token|"
+            r"refresh[_ -]?token|private[_ -]?key|password)\s*[:=]\s*\S+"
+        ),
+        "[已隐藏凭证]",
         redacted,
     )
     return re.sub(
@@ -202,6 +213,78 @@ def _redact_sensitive_content(content: str) -> str:
         "[已隐藏 Bearer 凭证]",
         redacted,
     )
+
+
+_PROTECTED_INTERNAL_CONTENT_MARKERS = (
+    "你是 accesspilot",
+    "只允许 employee_id",
+    "json 示例",
+    "你只能依据输入中的申请事实",
+    "citations 中每项只能包含",
+)
+
+_MIN_PROTECTED_PREFIX_LENGTH = 8
+
+_UNSAFE_STRUCTURED_FIELD_MARKERS = (
+    "system prompt",
+    "developer prompt",
+    "developer message",
+    "developer instructions",
+    "chain of thought",
+    "系统提示词",
+    "开发者消息",
+    "隐藏推理",
+)
+
+
+def contains_protected_internal_content(content: str) -> bool:
+    """识别不得进入草稿或回答流的内部指令片段。"""
+
+    normalized = " ".join(content.casefold().split())
+    return any(
+        marker in normalized for marker in _PROTECTED_INTERNAL_CONTENT_MARKERS
+    )
+
+
+def split_safe_model_output_prefix(pending: str) -> tuple[str, str]:
+    """保留可能继续拼成内部指令的后缀，其余文本可立即流出。"""
+
+    for start in range(len(pending)):
+        normalized_suffix = " ".join(pending[start:].casefold().split())
+        if normalized_suffix and any(
+            marker.startswith(normalized_suffix)
+            for marker in _PROTECTED_INTERNAL_CONTENT_MARKERS
+        ):
+            return pending[:start], pending[start:]
+    return pending, ""
+
+
+def is_suspicious_protected_prefix(content: str) -> bool:
+    """识别流结束时仍可识别的内部指令前缀。
+
+    流式检查会暂存所有可能继续拼成受保护标记的后缀。极短的自然
+    结尾（如“你”）可正常释放；达到可识别长度的前缀必须失败闭合。
+    """
+
+    normalized = " ".join(content.casefold().split())
+    return len(normalized) >= _MIN_PROTECTED_PREFIX_LENGTH and any(
+        marker.startswith(normalized)
+        for marker in _PROTECTED_INTERNAL_CONTENT_MARKERS
+    )
+
+
+def _sanitize_model_text(content: str | None) -> str | None:
+    """模型字符串既要脱敏，也不得把内部提示复述进业务事实。"""
+
+    if content is None:
+        return None
+    redacted = _redact_sensitive_content(content)
+    normalized = " ".join(redacted.casefold().split())
+    if contains_protected_internal_content(redacted) or any(
+        marker in normalized for marker in _UNSAFE_STRUCTURED_FIELD_MARKERS
+    ):
+        return None
+    return redacted
 
 
 def _is_request_collection_follow_up(
@@ -246,6 +329,15 @@ def _is_request_collection_follow_up(
 def _tool_answer(route: IntentRoute, result: ToolResult | None) -> str:
     """用确定性模板把工具事实转成用户可读回答。"""
 
+    if route.intent == "policy_question":
+        if result is not None and result.policy_catalog is not None:
+            items = "；".join(
+                f"{item.policy_code}《{item.title}》" for item in result.policy_catalog
+            )
+            return f"当前基本政策共 {len(result.policy_catalog)} 条：{items}。"
+        if result is not None and result.policy_answer is not None:
+            return result.policy_answer.answer
+        return "政策事实源暂时不可用，当前无法提供可靠依据。"
     if result is not None and result.status not in {"success", "request_not_found"}:
         return "当前无法在后端事实源中完成查询，请检查演示身份后重试。"
     if route.intent == "discover_eligible_access" and result is not None:
@@ -267,8 +359,6 @@ def _tool_answer(route: IntentRoute, result: ToolResult | None) -> str:
         approval = status.approval_status or "尚未启动审批"
         granted = "已开通" if status.access_granted else "未开通"
         return f"最近申请状态为 {status.request_status}，审批为 {approval}，权限{granted}。"
-    if route.intent == "policy_question":
-        return "我已识别到这是政策问题。完整政策检索将在下一阶段接入；现在不会编造政策依据。"
     if route.intent == "security_probe":
         return SECURITY_MESSAGE
     return "我可以帮你查询可申请权限、当前有效授权、申请状态，或发起权限申请。"
@@ -298,6 +388,7 @@ def _process_chat_message(
     content: str,
     model: StructuredReplyModel,
     router: IntentRouter | None = None,
+    policy_service: PolicyService | None = None,
 ) -> ConversationTurn:
     """先路由再执行；只有申请意图消费模型额度并修改草稿。"""
 
@@ -306,6 +397,9 @@ def _process_chat_message(
         raise ConversationInputError("消息不能为空")
 
     workspace = workspace_service.get(workspace_token)
+    active_policy_service = policy_service or PolicyService(
+        embedding_model=DeterministicEmbeddingModel()
+    )
     turn_id = _CURRENT_TURN_ID.get()
     if turn_id is not None and not _TURN_STARTED.get():
         _append_event(
@@ -356,12 +450,13 @@ def _process_chat_message(
     if route.intent != "request_access":
         with session_factory() as session:
             quota = get_model_quota(session, workspace_token=workspace_token)
-            call = tool_call_for_intent(route.intent)
+            call = tool_call_for_intent(route.intent, content=safe_content)
             result = (
                 execute_read_only_tool(
                     session,
                     workspace_token=workspace_token,
                     call=call,
+                    policy_service=active_policy_service,
                 )
                 if call is not None
                 else None
@@ -459,20 +554,16 @@ def _process_chat_message(
             model,
             before_retry=consume_retry_quota,
         )
+        explicit_confirmation = _explicit_confirmation_from_text(normalized_content)
+        if route.security_probe and explicit_confirmation is None:
+            explicit_confirmation = False
         # 模型可以理解用户文本，但无权更改身份事实或把疑似密钥写入草稿。
         parsed = parsed.model_copy(
             update={
                 "employee_id": workspace.actor_id,
-                "entitlement_id": (
-                    _redact_sensitive_content(parsed.entitlement_id)
-                    if parsed.entitlement_id is not None
-                    else None
-                ),
-                "justification": (
-                    _redact_sensitive_content(parsed.justification)
-                    if parsed.justification is not None
-                    else None
-                ),
+                "entitlement_id": _sanitize_model_text(parsed.entitlement_id),
+                "justification": _sanitize_model_text(parsed.justification),
+                "confirmed": explicit_confirmation,
             }
         )
         if parsed.entitlement_id is not None:
@@ -681,6 +772,7 @@ def handle_chat_message(
     content: str,
     model: StructuredReplyModel,
     router: IntentRouter | None = None,
+    policy_service: PolicyService | None = None,
 ) -> ConversationTurn:
     """旧 JSON 入口：保留完整 terminal 事件和原有返回合同。"""
 
@@ -691,6 +783,7 @@ def handle_chat_message(
         content=content,
         model=model,
         router=router,
+        policy_service=policy_service,
     )
 
 
@@ -703,6 +796,7 @@ def prepare_chat_message(
     model: StructuredReplyModel,
     turn_id: str,
     router: IntentRouter | None = None,
+    policy_service: PolicyService | None = None,
 ) -> ConversationTurn:
     """流式入口第一阶段：复用字段/工具校验，但不写 assistant terminal。"""
 
@@ -717,6 +811,7 @@ def prepare_chat_message(
             content=content,
             model=model,
             router=router,
+            policy_service=policy_service,
         )
     finally:
         _TURN_STARTED.reset(started_token)
