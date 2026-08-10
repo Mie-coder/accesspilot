@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from accesspilot.config import Settings
+from accesspilot.domain.models import RequestDraft
 from accesspilot.main import create_app
 from accesspilot.workspaces import InMemoryWorkspaceStore, WorkspaceService
 
@@ -65,19 +66,20 @@ def test_reset_only_clears_the_current_browser_workspace() -> None:
     assert second_token is not None
     WorkspaceService(store).set_actor(second_token, "EMP-002")
 
-    first_browser.post(
-        "/api/drafts/preview",
-        json={
-            "employee_id": "EMP-001",
-            "entitlement_id": "ENT-CUSTOMER-EXPORT",
-        },
+    workspace_service = WorkspaceService(store)
+    workspace_service.save_draft(
+        first_token,
+        RequestDraft(
+            employee_id="EMP-001",
+            entitlement_id="insighthub.customer_export",
+        ),
     )
-    second_browser.post(
-        "/api/drafts/preview",
-        json={
-            "employee_id": "EMP-002",
-            "entitlement_id": "ENT-OPS-LOG-READ",
-        },
+    workspace_service.save_draft(
+        second_token,
+        RequestDraft(
+            employee_id="EMP-002",
+            entitlement_id="opsdesk.log_view",
+        ),
     )
 
     assert (
@@ -104,7 +106,7 @@ def test_reset_only_clears_the_current_browser_workspace() -> None:
     assert second_workspace is not None
     assert second_workspace.draft is not None
     assert second_workspace.draft.employee_id == "EMP-002"
-    assert second_workspace.draft.entitlement_id == "ENT-OPS-LOG-READ"
+    assert second_workspace.draft.entitlement_id == "opsdesk.log_view"
 
 
 def test_feature_off_restores_product_workspace_from_demo_cookie() -> None:

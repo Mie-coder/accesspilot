@@ -83,6 +83,8 @@ from accesspilot.risk.review import (
     RiskReviewRequestNotFoundError,
     review_request_risk,
 )
+from accesspilot.tools.catalog import ToolResult, validate_access_request
+from accesspilot.tools.executor import ReadOnlyToolCall, execute_read_only_tool
 from accesspilot.workspaces import (
     InvalidDemoActorError,
     UnknownWorkspaceError,
@@ -595,7 +597,7 @@ def create_app(
         draft: RequestDraft,
         workspace: Workspace = Depends(require_workspace),  # noqa: B008
     ) -> dict[str, object]:
-        """保存草稿并返回仍需补充的字段。"""
+        """解析权限、预校验草稿并返回仍需补充的字段。"""
 
         if (
             workspace.draft is not None
@@ -607,16 +609,91 @@ def create_app(
                 status_code=409,
                 detail="当前草稿属于另一演示身份，请先切回原身份",
             )
+
         # employee_id 是后端事实；请求体中的同名字段只为兼容旧表单。
         bound_draft = draft.model_copy(update={"employee_id": workspace.actor_id})
+        resolution_result: ToolResult | None = None
+        resolution = None
+        if bound_draft.entitlement_id is not None:
+            with active_session_factory() as session:
+                resolution_result = execute_read_only_tool(
+                    session,
+                    workspace_token=workspace.token,
+                    call=ReadOnlyToolCall(
+                        tool="resolve_entitlement",
+                        query=bound_draft.entitlement_id,
+                    ),
+                )
+            resolution = resolution_result.entitlement_resolution
+            matched = (
+                resolution_result.status == "success"
+                and resolution is not None
+                and resolution.status == "matched"
+                and len(resolution.candidates) == 1
+            )
+            if not matched:
+                current_draft = workspace.draft or RequestDraft(
+                    employee_id=workspace.actor_id
+                )
+                return {
+                    "draft": (
+                        workspace.draft.model_dump(mode="json")
+                        if workspace.draft is not None
+                        else None
+                    ),
+                    "missing_fields": current_draft.missing_fields(),
+                    "is_complete": not current_draft.missing_fields(),
+                    "can_enter_approval": False,
+                    "entitlement_resolution": (
+                        resolution.model_dump(mode="json")
+                        if resolution is not None
+                        else None
+                    ),
+                    "issues": [],
+                }
+            assert resolution is not None
+            bound_draft = bound_draft.model_copy(
+                update={"entitlement_id": resolution.candidates[0].code}
+            )
+
+        existing_draft = workspace.draft
+        business_fields = ("entitlement_id", "duration_days", "justification")
+        if existing_draft is not None and any(
+            getattr(existing_draft, field) != getattr(bound_draft, field)
+            for field in business_fields
+        ):
+            # 任一业务字段变化后，旧确认不能沿用到新业务事实。
+            bound_draft = bound_draft.model_copy(update={"confirmed": False})
+
+        with active_session_factory() as session:
+            validation_result = validate_access_request(session, bound_draft)
+        issues = validation_result.issues or []
+        has_non_missing_issue = any(
+            not issue.code.startswith("missing_fields:") for issue in issues
+        )
+        if validation_result.status != "success" and (
+            not issues or has_non_missing_issue
+        ):
+            # 任何资格、目录或期限问题都必须重新确认；纯缺字段仍保留
+            # 旧 preview 的渐进式收集行为。
+            bound_draft = bound_draft.model_copy(update={"confirmed": False})
+
         workspace_service.save_draft(workspace.token, bound_draft)
         missing_fields = bound_draft.missing_fields()
         return {
             "draft": bound_draft.model_dump(mode="json"),
             "missing_fields": missing_fields,
             "is_complete": not missing_fields,
-            # 这里只返回送审资格，不创建审批记录，也不代表权限已经开通。
-            "can_enter_approval": bound_draft.can_enter_approval(),
+            "can_enter_approval": (
+                validation_result.status == "success"
+                and bound_draft.can_enter_approval()
+            ),
+            "entitlement_resolution": (
+                resolution.model_dump(mode="json")
+                if resolution is not None
+                else None
+            ),
+            "issues": [issue.model_dump(mode="json") for issue in issues],
         }
 
     @app.get("/api/drafts/current")

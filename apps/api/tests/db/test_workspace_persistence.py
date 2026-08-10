@@ -32,17 +32,18 @@ def test_workspace_draft_survives_new_app_instance() -> None:
             json={"employee_id": "EMP-002"},
         )
         assert switched.status_code == 200
-        first_browser.post(
+        preview = first_browser.post(
             "/api/drafts/preview",
             json={
                 # 请求体即使伪造员工编号，草稿也必须绑定后端身份。
                 "employee_id": "EMP-999",
-                "entitlement_id": "ENT-CUSTOMER-EXPORT",
+                "entitlement_id": "insighthub.customer_export",
                 "duration_days": 14,
                 "justification": "核验项目运营数据",
                 "confirmed": False,
             },
         )
+        assert preview.status_code == 200
         token = first_browser.cookies.get("accesspilot_workspace")
 
     assert token is not None
@@ -58,7 +59,7 @@ def test_workspace_draft_survives_new_app_instance() -> None:
     assert identity.json()["employee_id"] == "EMP-002"
     assert response.json()["draft"] == {
         "employee_id": "EMP-002",
-        "entitlement_id": "ENT-CUSTOMER-EXPORT",
+        "entitlement_id": "insighthub.customer_export",
         "duration_days": 14,
         "justification": "核验项目运营数据",
         "confirmed": False,

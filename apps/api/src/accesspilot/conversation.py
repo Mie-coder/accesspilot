@@ -29,7 +29,11 @@ from accesspilot.events import (
     validate_event_payload,
 )
 from accesspilot.tools.catalog import ToolResult, validate_access_request
-from accesspilot.tools.executor import execute_read_only_tool, tool_call_for_intent
+from accesspilot.tools.executor import (
+    ReadOnlyToolCall,
+    execute_read_only_tool,
+    tool_call_for_intent,
+)
 from accesspilot.workspaces import WorkspaceService
 
 
@@ -120,6 +124,36 @@ def _missing_field_question(field_name: str) -> str:
         "justification": "请说明申请这项权限的业务理由。",
     }
     return questions[field_name]
+
+
+def _entitlement_resolution_message(result: ToolResult) -> str:
+    """把解析事实转成不回显未知查询的确定性提示。"""
+
+    resolution = result.entitlement_resolution
+    if resolution is None:
+        return "当前无法可靠解析权限，请检查演示身份后重试。"
+    if resolution.status == "ambiguous":
+        choices = "、".join(
+            f"{candidate.name}（{candidate.code}）"
+            for candidate in resolution.candidates
+        )
+        return f"检测到多个可能的权限，请明确选择：{choices}。"
+    if resolution.status == "no_match":
+        choices = "、".join(
+            f"{candidate.name}（{candidate.code}）"
+            for candidate in resolution.eligible_access
+        )
+        if choices:
+            return f"未能匹配到权限。当前可申请权限：{choices}。"
+        return "未能匹配到权限；当前身份暂无可申请权限。"
+    return "权限解析成功"
+
+
+def _entitlement_resolution_status(result: ToolResult) -> str:
+    """工具摘要只记录稳定解析状态或外层事实状态。"""
+
+    resolution = result.entitlement_resolution
+    return resolution.status if resolution is not None else result.status
 
 
 SECURITY_MESSAGE = (
@@ -366,6 +400,7 @@ def handle_chat_message(
             workspace_token=workspace_token,
         )
 
+    entitlement_resolution_result: ToolResult | None = None
     try:
 
         def consume_retry_quota() -> None:
@@ -398,6 +433,89 @@ def handle_chat_message(
                 ),
             }
         )
+        if parsed.entitlement_id is not None:
+            if parsed.entitlement_id.strip():
+                with session_factory() as session:
+                    entitlement_resolution_result = execute_read_only_tool(
+                        session,
+                        workspace_token=workspace_token,
+                        call=ReadOnlyToolCall(
+                            tool="resolve_entitlement",
+                            query=parsed.entitlement_id,
+                        ),
+                    )
+            else:
+                entitlement_resolution_result = ToolResult(status="invalid_argument")
+
+            assert entitlement_resolution_result is not None
+            resolution = entitlement_resolution_result.entitlement_resolution
+            resolution_status = (
+                resolution.status if resolution is not None else None
+            )
+            matched = (
+                entitlement_resolution_result.status == "success"
+                and resolution is not None
+                and resolution.status == "matched"
+                and len(resolution.candidates) == 1
+            )
+            resolution_summary = _entitlement_resolution_message(
+                entitlement_resolution_result
+            )
+            _append_event(
+                session_factory,
+                workspace_token=workspace_token,
+                event_type="tool.summary",
+                payload={
+                    "tool": "resolve_entitlement",
+                    "status": _entitlement_resolution_status(
+                        entitlement_resolution_result
+                    ),
+                    "summary": resolution_summary,
+                },
+            )
+            if not matched:
+                business_status = (
+                    f"entitlement_{resolution_status}"
+                    if resolution_status in {"ambiguous", "no_match"}
+                    else "resolution_unavailable"
+                )
+                assistant_message = resolution_summary
+                if route.security_probe:
+                    assistant_message = f"{SECURITY_MESSAGE}\n\n{assistant_message}"
+                _append_event(
+                    session_factory,
+                    workspace_token=workspace_token,
+                    event_type="business.status",
+                    payload={"status": business_status},
+                )
+                _append_event(
+                    session_factory,
+                    workspace_token=workspace_token,
+                    event_type="message.assistant",
+                    payload={"content": assistant_message},
+                )
+                missing_fields = current_draft.missing_fields()
+                phase = (
+                    ConversationPhase.COLLECTING
+                    if missing_fields
+                    else ConversationPhase.AWAITING_CONFIRMATION
+                )
+                return ConversationTurn(
+                    assistant_message=assistant_message,
+                    draft=current_draft,
+                    missing_fields=missing_fields,
+                    phase=phase,
+                    business_status=business_status,
+                    quota=quota,
+                    intent=route.intent,
+                    security_flagged=route.security_probe,
+                    tool_results=[entitlement_resolution_result],
+                )
+
+            assert resolution is not None
+            parsed = parsed.model_copy(
+                update={"entitlement_id": resolution.candidates[0].code}
+            )
     except (ReplyParsingFailed, httpx.HTTPError, TimeoutError):
         # 模型和网络错误都失败闭合；不把异常详情、请求头或隐藏推理发给浏览器。
         assistant_message = "我暂时没能可靠理解这条消息，请稍后重试或换一种说法。"
@@ -505,4 +623,9 @@ def handle_chat_message(
         quota=quota,
         intent=route.intent,
         security_flagged=route.security_probe,
+        tool_results=(
+            [entitlement_resolution_result]
+            if entitlement_resolution_result is not None
+            else []
+        ),
     )

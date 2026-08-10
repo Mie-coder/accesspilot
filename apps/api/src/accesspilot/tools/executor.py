@@ -1,8 +1,8 @@
 """只读工具白名单；工具参数不允许模型提供身份。"""
 
-from typing import Literal
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 from sqlalchemy.orm import Session
 
 from accesspilot.agent.routing import ConversationIntent
@@ -11,12 +11,14 @@ from accesspilot.tools.catalog import (
     get_latest_request_status,
     list_active_access,
     list_eligible_access,
+    resolve_entitlement_candidates,
 )
 
 ReadOnlyToolName = Literal[
     "list_eligible_access",
     "list_active_access",
     "get_latest_request_status",
+    "resolve_entitlement",
 ]
 
 
@@ -26,6 +28,16 @@ class ReadOnlyToolCall(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     tool: ReadOnlyToolName
+    query: Annotated[StrictStr, Field(min_length=1)] | None = None
+
+    @model_validator(mode="after")
+    def validate_query(self) -> Self:
+        if self.tool == "resolve_entitlement":
+            if self.query is None or not self.query.strip():
+                raise ValueError("resolve_entitlement requires a non-empty query")
+        elif self.query is not None:
+            raise ValueError("query is only allowed for resolve_entitlement")
+        return self
 
 
 class UnknownReadOnlyToolError(ValueError):
@@ -52,6 +64,20 @@ def execute_read_only_tool(
 ) -> ToolResult:
     """从服务端 Workspace 注入身份，且只执行确定性读工具。"""
 
+    if call.tool == "resolve_entitlement":
+        if call.query is None or not call.query.strip():
+            return ToolResult(status="invalid_argument")
+        eligible_result = list_eligible_access(
+            session,
+            workspace_token=workspace_token,
+        )
+        if eligible_result.status != "success" or eligible_result.eligible_access is None:
+            return eligible_result
+        resolution = resolve_entitlement_candidates(
+            eligible_result.eligible_access,
+            call.query,
+        )
+        return ToolResult(status="success", entitlement_resolution=resolution)
     if call.tool == "list_eligible_access":
         return list_eligible_access(session, workspace_token=workspace_token)
     if call.tool == "list_active_access":

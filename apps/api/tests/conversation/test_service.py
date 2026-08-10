@@ -11,7 +11,7 @@ from accesspilot.conversation import ConversationInputError, handle_chat_message
 from accesspilot.db.models import WorkspaceRecord
 from accesspilot.db.seed import seed_catalog
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
-from accesspilot.domain.models import ParsedReply
+from accesspilot.domain.models import ParsedReply, RequestDraft
 from accesspilot.events import (
     ModelQuotaExceededError,
     list_workspace_events,
@@ -98,6 +98,7 @@ def test_chat_turn_merges_strict_reply_and_emits_only_safe_events(
         events = list_workspace_events(session, workspace_token=token)
     assert [event.event_type for event in events] == [
         "message.user",
+        "tool.summary",
         "draft.updated",
         "tool.summary",
         "business.status",
@@ -487,7 +488,211 @@ def test_model_entitlement_credentials_are_redacted_before_persistence(
     with database_session_factory() as session:
         events = list_workspace_events(session, workspace_token=token)
 
-    assert turn.draft.entitlement_id is not None
-    assert secret not in turn.draft.entitlement_id
+    assert turn.draft.entitlement_id is None
+    assert workspace_service.get(token).draft is None
     assert secret not in str([event.payload for event in events])
     assert secret not in str(workspace_service.get(token).draft)
+
+
+def test_chat_resolves_unique_entitlement_alias_into_the_draft(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    token, workspace_service = create_workspace(database_session_factory)
+    model = StaticStructuredReplyModel(
+        ParsedReply(
+            entitlement_id="仪表盘查看",
+            duration_days=14,
+            justification="核验虚构数据",
+        )
+    )
+
+    turn = handle_chat_message(
+        database_session_factory,
+        workspace_service=workspace_service,
+        workspace_token=token,
+        content="申请仪表盘查看 14 天，用于核验虚构数据",
+        model=model,
+    )
+
+    assert turn.draft.entitlement_id == "insighthub.dashboard_view"
+    resolutions = [
+        result.entitlement_resolution
+        for result in turn.tool_results
+        if result.entitlement_resolution is not None
+    ]
+    assert len(resolutions) == 1
+    resolution = resolutions[0]
+    assert resolution.status == "matched"
+    assert resolution.target_field == "entitlement_id"
+    assert [candidate.code for candidate in resolution.candidates] == ["insighthub.dashboard_view"]
+
+
+def test_ambiguous_entitlement_keeps_existing_draft_unchanged(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    token, workspace_service = create_workspace(database_session_factory)
+    existing = RequestDraft(
+        employee_id="EMP-001",
+        entitlement_id="codeforge.repo_read",
+        duration_days=7,
+        justification="原有虚构理由",
+        confirmed=False,
+    )
+    workspace_service.save_draft(token, existing)
+    snapshot = existing.model_copy(deep=True)
+    model = StaticStructuredReplyModel(
+        ParsedReply(
+            entitlement_id="数据洞察中心",
+            duration_days=30,
+            justification="新虚构理由",
+        )
+    )
+
+    turn = handle_chat_message(
+        database_session_factory,
+        workspace_service=workspace_service,
+        workspace_token=token,
+        content="申请数据洞察中心 30 天，用于新虚构理由",
+        model=model,
+    )
+
+    assert turn.draft == snapshot
+    assert workspace_service.get(token).draft == snapshot
+    resolutions = [
+        result.entitlement_resolution
+        for result in turn.tool_results
+        if result.entitlement_resolution is not None
+    ]
+    assert len(resolutions) == 1
+    resolution = resolutions[0]
+    assert resolution.status == "ambiguous"
+    assert resolution.target_field == "entitlement_id"
+    assert [candidate.code for candidate in resolution.candidates] == [
+        "insighthub.customer_export",
+        "insighthub.dashboard_view",
+    ]
+
+
+def test_forged_entitlement_does_not_create_draft_or_echo_valid_code(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    token, workspace_service = create_workspace(database_session_factory)
+    model = StaticStructuredReplyModel(
+        ParsedReply(
+            entitlement_id="invented.admin",
+            duration_days=14,
+            justification="执行虚构排查",
+        )
+    )
+
+    turn = handle_chat_message(
+        database_session_factory,
+        workspace_service=workspace_service,
+        workspace_token=token,
+        content="申请 invented.admin 14 天，用于执行虚构排查",
+        model=model,
+    )
+
+    assert workspace_service.get(token).draft is None
+    assert turn.draft.entitlement_id is None
+    resolutions = [
+        result.entitlement_resolution
+        for result in turn.tool_results
+        if result.entitlement_resolution is not None
+    ]
+    assert len(resolutions) == 1
+    resolution = resolutions[0]
+    assert resolution.status == "no_match"
+    assert resolution.candidates == []
+    assert resolution.eligible_access
+    assert all(item.code != "invented.admin" for item in resolution.eligible_access)
+    assert "invented.admin" not in turn.assistant_message
+
+
+def test_new_entitlement_selection_invalidates_old_confirmation(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    token, workspace_service = create_workspace(database_session_factory)
+    existing = RequestDraft(
+        employee_id="EMP-001",
+        entitlement_id="insighthub.customer_export",
+        duration_days=14,
+        justification="继续核验虚构数据",
+        confirmed=True,
+    )
+    workspace_service.save_draft(token, existing)
+    model = StaticStructuredReplyModel(
+        ParsedReply(
+            entitlement_id="仪表盘查看",
+            duration_days=14,
+            justification="继续核验虚构数据",
+        )
+    )
+
+    turn = handle_chat_message(
+        database_session_factory,
+        workspace_service=workspace_service,
+        workspace_token=token,
+        content="改申请仪表盘查看 14 天，用于继续核验虚构数据",
+        model=model,
+    )
+
+    assert turn.draft.entitlement_id == "insighthub.dashboard_view"
+    assert turn.draft.confirmed is False
+    saved = workspace_service.get(token).draft
+    assert saved is not None
+    assert saved.entitlement_id == "insighthub.dashboard_view"
+    assert saved.confirmed is False
+
+
+def test_entitlement_resolution_reloads_eligibility_after_identity_switch(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    token, workspace_service = create_workspace(database_session_factory)
+    model = StaticStructuredReplyModel(
+        ParsedReply(
+            entitlement_id="数据洞察中心",
+            duration_days=14,
+            justification="核验虚构数据",
+        )
+    )
+
+    ambiguous = handle_chat_message(
+        database_session_factory,
+        workspace_service=workspace_service,
+        workspace_token=token,
+        content="申请数据洞察中心 14 天，用于核验虚构数据",
+        model=model,
+    )
+
+    assert ambiguous.business_status == "entitlement_ambiguous"
+    assert workspace_service.get(token).draft is None
+
+    workspace_service.set_actor(token, "EMP-004")
+    model.reply = ParsedReply(
+        entitlement_id="insighthub.customer_export",
+        duration_days=14,
+        justification="执行虚构排查",
+    )
+    no_match = handle_chat_message(
+        database_session_factory,
+        workspace_service=workspace_service,
+        workspace_token=token,
+        content="申请 insighthub.customer_export 14 天，用于执行虚构排查",
+        model=model,
+    )
+
+    assert no_match.business_status == "entitlement_no_match"
+    assert no_match.draft.entitlement_id is None
+    assert workspace_service.get(token).draft is None
+    resolutions = [
+        result.entitlement_resolution
+        for result in no_match.tool_results
+        if result.entitlement_resolution is not None
+    ]
+    assert len(resolutions) == 1
+    resolution = resolutions[0]
+    assert resolution.status == "no_match"
+    assert all(
+        candidate.code != "insighthub.customer_export" for candidate in resolution.eligible_access
+    )

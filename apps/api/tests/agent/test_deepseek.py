@@ -116,3 +116,26 @@ def test_deepseek_adapter_includes_correction_without_changing_user_reply() -> N
         {"role": "system", "content": "请只输出 JSON"},
         {"role": "user", "content": "申请 14 天"},
     ]
+
+
+def test_deepseek_prompt_preserves_user_entitlement_wording_for_backend_resolution() -> None:
+    client = FakeHttpClient(FakeResponse('{"entitlement_id":"仪表盘查看"}'))
+    model = DeepSeekStructuredReplyModel(
+        api_key="test-api-key",
+        model_name="deepseek-v4-flash",
+        client=client,
+    )
+
+    result = model.parse_reply("申请仪表盘查看")
+
+    assert result.entitlement_id == "仪表盘查看"
+    assert client.last_json is not None
+    system_prompt = client.last_json["messages"][0]["content"]
+    assert "稳定 code" in system_prompt or "稳定编码" in system_prompt
+    assert "权限名称" in system_prompt
+    assert "系统名" in system_prompt
+    assert "受控别名" in system_prompt
+    assert "原样" in system_prompt
+    assert "entitlement_id" in system_prompt
+    assert "不得猜测" in system_prompt
+    assert "编造" in system_prompt

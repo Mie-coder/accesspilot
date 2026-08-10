@@ -1,9 +1,12 @@
-
+"""只读工具目录与权限实体解析。"""
+import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -51,7 +54,120 @@ class EligibleAccessSummary(BaseModel):
     system_name: str
     risk_level: str
     max_duration_days: int | None
+
     approval_policy: str
+
+
+class EntitlementResolutionCandidate(BaseModel):
+    """权限解析器返回的、已通过当前资格过滤的候选。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    code: str
+    name: str
+    system_code: str
+    system_name: str
+    risk_level: str
+    max_duration_days: int | None
+    approval_policy: str
+
+
+class EntitlementResolution(BaseModel):
+    """自然语言权限名称的确定性解析结果。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: Literal["matched", "ambiguous", "no_match"]
+    target_field: Literal["entitlement_id"] = "entitlement_id"
+    query: str
+    candidates: list[EntitlementResolutionCandidate] = Field(default_factory=list)
+    eligible_access: list[EntitlementResolutionCandidate] = Field(
+        default_factory=list
+    )
+
+
+ENTITLEMENT_ALIAS_VERSION = "v1"
+ENTITLEMENT_ALIASES = MappingProxyType(
+    {
+        "仪表盘查看": "insighthub.dashboard_view",
+        "看板查看": "insighthub.dashboard_view",
+        "脱敏客户导出": "insighthub.customer_export",
+        "客户数据导出": "insighthub.customer_export",
+        "代码仓库只读": "codeforge.repo_read",
+        "仓库只读": "codeforge.repo_read",
+        "运维日志查看": "opsdesk.log_view",
+    }
+)
+
+
+_ENTITLEMENT_NORMALIZATION_RE = re.compile(r"[\s._-]+")
+
+
+def _normalize_entitlement_text(value: str) -> str:
+    """折叠大小写、空白和受控分隔符，不进行模糊或子串匹配。"""
+
+    return _ENTITLEMENT_NORMALIZATION_RE.sub("", value.casefold())
+
+
+def _resolution_candidate(
+    candidate: EligibleAccessSummary,
+) -> EntitlementResolutionCandidate:
+    """复制目录摘要为不可变的解析候选，避免暴露 ORM 或修改调用方。"""
+
+    return EntitlementResolutionCandidate.model_validate(candidate.model_dump())
+
+
+def resolve_entitlement_candidates(
+    eligible_access: Sequence[EligibleAccessSummary],
+    query: str,
+) -> EntitlementResolution:
+    """在当前员工可申请目录中精确解析权限名称、编码或系统。"""
+
+    eligible = sorted(
+        (_resolution_candidate(candidate) for candidate in eligible_access),
+        key=lambda candidate: candidate.code,
+    )
+    safe_query = query.strip()
+    normalized_query = _normalize_entitlement_text(safe_query)
+    alias_target = ENTITLEMENT_ALIASES.get(normalized_query)
+    normalized_alias_target = (
+        _normalize_entitlement_text(alias_target)
+        if alias_target is not None
+        else None
+    )
+
+    matched_codes: set[str] = set()
+    for candidate in eligible:
+        normalized_fields = {
+            _normalize_entitlement_text(candidate.code),
+            _normalize_entitlement_text(candidate.name),
+            _normalize_entitlement_text(candidate.system_code),
+            _normalize_entitlement_text(candidate.system_name),
+        }
+        direct_match = bool(normalized_query) and normalized_query in normalized_fields
+        alias_match = (
+            normalized_alias_target is not None
+            and _normalize_entitlement_text(candidate.code)
+            == normalized_alias_target
+        )
+        # 受控别名和直接字段是并集，最终仍只从当前可申请候选中选择。
+        if direct_match or alias_match:
+            matched_codes.add(candidate.code)
+
+    matches = [candidate for candidate in eligible if candidate.code in matched_codes]
+    if len(matches) == 1:
+        status: Literal["matched", "ambiguous", "no_match"] = "matched"
+    elif matches:
+        status = "ambiguous"
+    else:
+        status = "no_match"
+
+    return EntitlementResolution(
+        status=status,
+        query=safe_query,
+        candidates=matches,
+        eligible_access=eligible if status == "no_match" else [],
+    )
 
 
 class ActiveAccessSummary(BaseModel):
@@ -103,6 +219,7 @@ class ToolResult(BaseModel):
     systems:list[SystemSummary] | None = None
     entitlements: list[EntitlementSummary] | None = None
     eligible_access: list[EligibleAccessSummary] | None = None
+    entitlement_resolution: EntitlementResolution | None = None
     active_access: list[ActiveAccessSummary] | None = None
     issues: list[ValidationIssue] | None = None
     request_status: RequestStatusSummary | None = None

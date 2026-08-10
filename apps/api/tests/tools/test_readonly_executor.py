@@ -117,3 +117,36 @@ def test_executor_fails_closed_if_schema_validation_is_bypassed(
             workspace_token="unused-token",
             call=call,
         )
+
+
+def test_entitlement_resolver_tool_requires_strict_query_without_identity_argument() -> None:
+    call = ReadOnlyToolCall.model_validate(
+        {
+            "tool": "resolve_entitlement",
+            "query": "仪表盘查看",
+        }
+    )
+
+    assert call.tool == "resolve_entitlement"
+    assert call.query == "仪表盘查看"
+
+    with pytest.raises(ValidationError):
+        ReadOnlyToolCall.model_validate(
+            {"tool": "resolve_entitlement", "query": 123}
+        )
+    with pytest.raises(ValidationError):
+        ReadOnlyToolCall.model_validate(
+            {
+                "tool": "resolve_entitlement",
+                "query": "仪表盘查看",
+                "employee_id": "EMP-003",
+            }
+        )
+    with pytest.raises(ValidationError):
+        ReadOnlyToolCall.model_validate(
+            {"tool": "resolve_entitlement", "query": ""}
+        )
+    with pytest.raises(ValidationError):
+        ReadOnlyToolCall.model_validate(
+            {"tool": "resolve_entitlement"}
+        )
