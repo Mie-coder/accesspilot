@@ -1,0 +1,196 @@
+{
+  "schema_version": "accesspilot.eval.v1",
+  "source": {
+    "git_revision": "a45b5f7",
+    "command": "./scripts/run-evals.sh",
+    "adapter_mode": "deterministic_offline"
+  },
+  "scenarios": [
+    {
+      "scenario_id": "T17-01",
+      "category": "identity_demo",
+      "expected_case_count": 3,
+      "case_count": 3,
+      "passed": 3,
+      "passed_cases": [
+        "test_product_identity_ignores_legacy_workspace_actor_and_hides_controls",
+        "test_demo_session_requires_explicit_entry_and_exit_restores_product_identity",
+        "test_product_and_demo_facts_are_isolated_across_cookie_switches"
+      ],
+      "failed_cases": [],
+      "duration_ms": 299.00000000000006,
+      "observations": {}
+    },
+    {
+      "scenario_id": "T17-02",
+      "category": "resolution",
+      "expected_case_count": 4,
+      "case_count": 4,
+      "passed": 4,
+      "passed_cases": [
+        "test_resolution_matches_code_name_and_controlled_alias",
+        "test_system_name_can_return_typed_ambiguous_candidates_without_draft_mutation",
+        "test_no_match_returns_current_eligible_access_and_never_fuzzy_matches",
+        "test_selected_entitlement_is_revalidated_and_invalidates_old_confirmation"
+      ],
+      "failed_cases": [],
+      "duration_ms": 94.0,
+      "observations": {}
+    },
+    {
+      "scenario_id": "T17-03",
+      "category": "current_turn_stream",
+      "expected_case_count": 2,
+      "case_count": 2,
+      "passed": 2,
+      "passed_cases": [
+        "test_current_turn_sse_emits_ordered_real_deltas_and_persists_before_completed",
+        "test_direct_asgi_stream_records_observed_latency_and_model_calls"
+      ],
+      "failed_cases": [],
+      "duration_ms": 198.0,
+      "observations": {
+        "first_event_ms": 7.666417,
+        "first_token_ms": 35.480167,
+        "completion_ms": 39.017833,
+        "terminal_event": "message.completed",
+        "model_calls": 1,
+        "adapter_mode": "deterministic_offline"
+      }
+    },
+    {
+      "scenario_id": "T17-04",
+      "category": "workspace_reconnect",
+      "expected_case_count": 2,
+      "case_count": 2,
+      "passed": 2,
+      "passed_cases": [
+        "test_sse_reconnect_only_replays_events_after_last_event_id",
+        "test_reconnect_observation_has_no_duplicate_persisted_event_ids"
+      ],
+      "failed_cases": [],
+      "duration_ms": 109.0,
+      "observations": {
+        "reconnect_replayed_events": 2,
+        "reconnect_duplicate_count": 0
+      }
+    },
+    {
+      "scenario_id": "T17-05",
+      "category": "turn_interrupted",
+      "expected_case_count": 2,
+      "case_count": 2,
+      "passed": 2,
+      "passed_cases": [
+        "test_current_turn_cancellation_persists_interrupted_without_completed",
+        "test_terminal_event_is_compare_and_set_and_second_terminal_is_a_noop"
+      ],
+      "failed_cases": [],
+      "duration_ms": 94.0,
+      "observations": {}
+    },
+    {
+      "scenario_id": "T17-06",
+      "category": "policy_states",
+      "expected_case_count": 4,
+      "case_count": 4,
+      "passed": 4,
+      "passed_cases": [
+        "test_policy_catalog_returns_all_eight_fact_source_records",
+        "test_policy_query_is_grounded_only_in_current_matches",
+        "test_low_similarity_returns_insufficient_without_policy_body",
+        "test_partial_index_maps_to_retrieval_unavailable"
+      ],
+      "failed_cases": [],
+      "duration_ms": 105.0,
+      "observations": {}
+    },
+    {
+      "scenario_id": "T17-07",
+      "category": "self_approval",
+      "expected_case_count": 4,
+      "case_count": 4,
+      "passed": 4,
+      "passed_cases": [
+        "test_self_approval_conversation_is_explicitly_forbidden",
+        "test_self_approval_conversation_is_explicitly_forbidden#2",
+        "test_self_approval_conversation_is_explicitly_forbidden#3",
+        "test_self_approval_conversation_is_explicitly_forbidden#4"
+      ],
+      "failed_cases": [],
+      "duration_ms": 154.0,
+      "observations": {}
+    },
+    {
+      "scenario_id": "T17-08",
+      "category": "budget_degradation",
+      "expected_case_count": 2,
+      "case_count": 2,
+      "passed": 2,
+      "passed_cases": [
+        "test_budget_exhaustion_keeps_read_only_facts_and_confirmed_submit_available",
+        "test_access_consultation_uses_read_only_tool_without_mutating_draft_or_quota"
+      ],
+      "failed_cases": [],
+      "duration_ms": 159.0,
+      "observations": {}
+    },
+    {
+      "scenario_id": "T17-09",
+      "category": "draft_isolation",
+      "expected_case_count": 3,
+      "case_count": 3,
+      "passed": 3,
+      "passed_cases": [
+        "test_other_demo_identity_draft_is_not_exposed_or_rebound",
+        "test_product_draft_is_hidden_during_demo_and_restored_after_exit",
+        "test_eval_11_workspace_cannot_read_another_request"
+      ],
+      "failed_cases": [],
+      "duration_ms": 286.00000000000006,
+      "observations": {}
+    },
+    {
+      "scenario_id": "T17-10",
+      "category": "compound_security",
+      "expected_case_count": 4,
+      "case_count": 4,
+      "passed": 4,
+      "passed_cases": [
+        "test_compound_security_inputs_preserve_business_boundary",
+        "test_compound_security_inputs_preserve_business_boundary#2",
+        "test_compound_security_inputs_preserve_business_boundary#3",
+        "test_compound_security_inputs_preserve_business_boundary#4"
+      ],
+      "failed_cases": [],
+      "duration_ms": 193.0,
+      "observations": {}
+    }
+  ],
+  "summary": {
+    "scenarios_passed": 10,
+    "scenarios_total": 10,
+    "fixed_scenario_pass_rate": 1.0,
+    "cases_passed": 30,
+    "cases_total": 30,
+    "case_pass_rate": 1.0,
+    "security_attack_cases": 4,
+    "security_blocked_cases": 4,
+    "security_block_rate": 1.0,
+    "latency_sample": {
+      "first_event_ms": 7.666417,
+      "first_token_ms": 35.480167,
+      "completion_ms": 39.017833,
+      "terminal_event": "message.completed"
+    },
+    "charged_model_calls": 1,
+    "reconnect_replayed_events": 2,
+    "reconnect_duplicate_count": 0,
+    "reconnect_duplicate_rate": 0.0,
+    "unmeasured_metrics": [
+      "provider_token_latency",
+      "policy_recall_at_k",
+      "production_sla"
+    ]
+  }
+}

@@ -5,9 +5,9 @@ AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent�
 ## 当前版本与进度
 
 - **稳定基线：MVP v1.0** — T01–T08 已完成本地实现和验收；没有推送、部署或接入真实企业系统。
-- **开发版本：v1.1** — T09–T16 已完成本地实现与验证；T17 已确认，待按顺序实施。
+- **本地完成版本：v1.1** — T09–T17 已完成本地实现与验证；没有推送、合并、部署或接入真实企业系统。
 - **当前能力：** 固定服务端产品身份并隔离受保护的 Demo 控制面，支持按身份发现权限、多意图路由、只读工具白名单、确定性权限名称解析、8 条基本政策主题问答、基于本轮证据的 `grounded`/`insufficient_evidence`/`retrieval_unavailable` 三态政策回答、自审批禁止规则，以及当前轮增量 SSE、Workspace 长连接事件、取消、断线重连和刷新恢复。产品工作台还提供类型化业务卡片：权限按 `eligible`、`owned`、`pending`、`expiring_soon`、`expired` 五态展示；权限名称解析按 `matched`、`ambiguous`、`no_match` 三态展示候选和重新校验结果；政策按三态展示证据、提示和下一步；申请页按事实展示草稿、提交、风险审查、两级审批、开通与恢复时间线，断线时在业务页面显示可恢复的重连状态。
-- **后续目标：** 产品化评测、指标与作品集证据（T17）。
+- **后续演进：** provider token 延迟、政策召回率和生产 SLA 尚未测量；它们不属于本地 deterministic_offline 单样本结论。
 
 ## 项目目标
 
@@ -30,7 +30,7 @@ AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent�
 - T05：安全事件白名单、SSE `Last-Event-ID` 回放、对话入口和 Workspace 模型配额已完成；
 - T06：assistant-ui `LocalRuntime + ChatModelAdapter`、申请草稿卡、明确确认、正式提交与刷新恢复已完成；
 - T07：按当前演示身份过滤的审批收件箱、政策/审批/开通/审计详情、故障恢复与只读回放已完成；
-- T08：12 条固定评测、容器化配置和本地最终验收已完成，等待用户最终验收。
+- T08：12 条固定评测、容器化配置和本地最终验收已完成。
 - T09：Workspace 后端演示身份、身份迁移、刷新恢复和申请/审批越权守卫已完成；
 - T10：按后端身份查询可自助申请权限与当前有效 `AccessGrant` 已完成；
 - T11：7 类意图路由、只读工具执行器、咨询/草稿隔离、基础敏感信息拒绝与脱敏已完成。
@@ -39,7 +39,7 @@ AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent�
 - T14：当前轮增量 SSE、Workspace 回放后长连接、稳定游标与关联 ID、取消/唯一终态、刷新恢复和 Nginx 禁缓冲已完成并本地验证；
 - T15：政策问答与提示词攻击防护、8 条基本政策主题、三态证据回答、自审批规则（`POL-006`）和复合攻击安全回归已完成并本地验证；模型输出、草稿、事件和错误正文均通过敏感信息边界检查。
 - T16：权限、政策与申请状态业务卡片已完成；权限五态、名称解析三态、政策证据三态、申请生命周期时间线、加载/空/错误/安全拒绝和断线重连状态均已接入产品导航并本地验证。
-- T17：产品化评测、指标与作品集证据已确认，待按序实施。
+- T17：10 个固定场景、30 个案例全部通过；后端全量 339 passed（1 warning）、前端 14 files/48 passed、Ruff、MyPy（41 sources）、Alembic（无漂移/head 0006）、TypeScript app+node、ESLint 和正式构建均通过。脱敏单样本观测来自本机 direct-ASGI `deterministic_offline`：首事件 7.666417 ms、首个非空 `message.delta` 35.480167 ms、完成 39.017833 ms、计费模型调用 1 次；Workspace 重连回放 2 条、重复 0 条；复合攻击 4/4 阻断。上述延迟不是 provider token、p50/p95 或生产 SLA，不代表真实模型质量。
 
 Demo 控制台只能切换独立演示 Workspace 中的预置虚构员工，不是真实 SSO 或生产级授权边界；普通产品身份始终由服务端配置，真实系统仍必须由可信登录态确定操作者身份。
 
@@ -122,12 +122,14 @@ pnpm --filter @accesspilot/web exec vite --host 127.0.0.1 --port 5173
 
 ## 固定评测与统一检查
 
-12 条固定场景覆盖黄金路径、缺项、未确认、政策失败、审批乱序、驳回、IAM 超时恢复、重复幂等调用、SSE 重连、配额、Workspace 隔离和模型结构错误：
+T08 的 12 条固定场景覆盖黄金路径、缺项、未确认、政策失败、审批乱序、驳回、IAM 超时恢复、重复幂等调用、SSE 重连、配额、Workspace 隔离和模型结构错误；T17 另有 10 个产品化场景、30 个案例：
 
 ```bash
 ./scripts/run-evals.sh
 ./scripts/verify-local.sh
 ```
+
+T17 的脱敏评测摘要保存在 [`docs/evidence/accesspilot-v1.1-evaluation-2026-08-11.json`](docs/evidence/accesspilot-v1.1-evaluation-2026-08-11.json)，作品集证据和限制见 [`docs/evidence/accesspilot-v1.1-portfolio-evidence.md`](docs/evidence/accesspilot-v1.1-portfolio-evidence.md)，最终验收见 [`docs/reviews/accesspilot-t17-final-acceptance-review-2026-08-11.md`](docs/reviews/accesspilot-t17-final-acceptance-review-2026-08-11.md)。JSON 的 `source.git_revision=a45b5f7` 是 T16 基线加 T17 工作树运行来源；评测运行时不能预先写入包含自身文档修改的未来提交哈希。
 
 统一脚本运行后端全量测试、Ruff、MyPy、Alembic 漂移检查、前端测试、ESLint、TypeScript/生产构建和固定评测。Docker 配置及 1440px/390px 真实浏览器检查仍需单独执行并保留证据。
 
@@ -164,7 +166,8 @@ docker compose ps
 - Workspace cookie、调用配额和数据隔离面向单机演示，不等于生产级多租户、防滥用或限流体系。
 - 离线提取、向量和风险审查是透明的确定性回退，不等同于 DeepSeek/百炼真实效果。
 - `/health` 只表示进程存活，`/ready` 才检查数据库；两者都不会调用外部模型或 IAM。
-- 当前前端主包约 524 KB，Vite 会提示后续可按页面拆包；不影响 MVP 功能，但不应视为最终性能优化结果。
+- 当前前端主包约 524 KB，T17 正式构建报告 561.02 KB chunk warning（P2）；不影响本地功能，但不应视为最终性能优化结果。
+- T17 尚未测量 provider token latency、policy recall@k 或 production SLA；本地 deterministic_offline 单样本不能外推这些生产指标。
 - 当前未配置备份、集中日志、监控告警、任务队列、高可用或线上部署。
 
 ## 架构文档

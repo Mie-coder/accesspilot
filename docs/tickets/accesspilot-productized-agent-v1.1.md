@@ -123,7 +123,7 @@
 
 ## T17 — 产品化评测、指标与作品集证据
 
-**状态：** 已确认，待串行实施。
+**状态：** 已完成，本地验证通过。
 
 **目标：** 用固定场景和可复现指标证明身份感知、实体解析、真实流式、政策依据和安全边界。
 
@@ -134,6 +134,14 @@
 3. 形成只引用已验证能力的前后对比和简历候选表述；正式简历是否修改由用户单独确认。
 
 **依赖：** T09–T16。
+
+**验收记录（2026-08-11）：** T17 10 个固定场景、30 个案例全部通过。场景覆盖产品/Demo 身份隔离（3）、权限名称解析（4）、当前轮流式（2）、Workspace 重连（2）、`turn.interrupted`（2）、政策状态（4）、自审批（4）、预算降级（2）、草稿隔离（3）和复合安全攻击（4）。后端全量 339 passed、1 warning；前端 14 个文件、48 tests passed；Ruff 通过；MyPy 41 个源文件通过；Alembic 无漂移、head `0006`；TypeScript app+node、ESLint 和正式构建通过，构建保留 561.02 KB chunk warning（P2）。
+
+脱敏评测摘要见 `docs/evidence/accesspilot-v1.1-evaluation-2026-08-11.json`。本机 direct-ASGI、`deterministic_offline` 单样本观测为：首事件 7.666417 ms、首个非空 `message.delta` 35.480167 ms、完成 39.017833 ms、计费模型调用 1 次；重连回放 2 条、重复 0 条；复合攻击 4/4 阻断。它们不是 provider token 延迟、p50/p95、生产 SLA 或真实模型质量结论；`provider_token_latency`、`policy_recall@k`、`production_sla` 标记为 N/A。
+
+浏览器验收覆盖 1440×900、1024×768、390×844，均无横向溢出；歧义候选支持键盘选择并回到服务端重新校验；政策中心展示 8 条目录，具体回答保留三态证据；自审批回答引用 `POL-006`；390px 断线显示 `role=status` 重连提示。T17 前后对比和作品集证据见 `docs/evidence/accesspilot-v1.1-portfolio-evidence.md`。
+
+正式简历未修改。T17 专项未获 DeepSeek 或 Claude 外发授权，未发送验收包，不将其写成通过或失败结论。结论仅限本地实现与验证，不代表推送、合并、部署或生产发布。
 
 ## 委派边界
 
