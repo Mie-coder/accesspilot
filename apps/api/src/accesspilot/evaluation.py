@@ -1,4 +1,4 @@
-"""Deterministic T17 evaluation registry, SSE observations, and safe reports."""
+"""Deterministic product evaluation registry, SSE observations, and safe reports."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ EvaluationCategory = Literal[
     "budget_degradation",
     "draft_isolation",
     "compound_security",
+    "numeric_context",
 ]
 JsonScalar: TypeAlias = str | int | float | bool | None
 TerminalEvent = Literal[
@@ -35,7 +36,7 @@ class EvaluationScenario(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    scenario_id: str = Field(pattern=r"^T17-\d{2}$")
+    scenario_id: str = Field(pattern=r"^T\d{2}-\d{2}$")
     category: EvaluationCategory
     selectors: tuple[str, ...]
     expected_case_count: int = Field(ge=1)
@@ -156,6 +157,30 @@ T17_SCENARIOS: tuple[EvaluationScenario, ...] = (
         "test_compound_security_inputs_preserve_business_boundary",
     ),
 )
+
+
+T18_SCENARIOS: tuple[EvaluationScenario, ...] = (
+    _scenario(
+        "T18-01",
+        "numeric_context",
+        11,
+        "apps/api/tests/conversation/test_t18_cursor.py::"
+        "test_duration_cursor_accepts_111_up_to_catalog_limit_without_model",
+        "apps/api/tests/conversation/test_t18_cursor.py::"
+        "test_duration_cursor_rejects_catalog_over_limit_without_mutation",
+        "apps/api/tests/conversation/test_t18_cursor.py::"
+        "test_numeric_follow_up_respects_non_duration_cursor",
+        "apps/api/tests/conversation/test_t18_cursor.py::"
+        "test_numeric_message_without_active_cursor_needs_clarification_without_model_call",
+        "apps/api/tests/conversation/test_t18_cursor.py::"
+        "test_help_has_priority_and_clears_active_cursor",
+        "apps/api/tests/conversation/test_t18_cursor.py::"
+        "test_invalid_duration_keeps_cursor_and_revision",
+    ),
+)
+
+
+PRODUCT_SCENARIOS: tuple[EvaluationScenario, ...] = T17_SCENARIOS + T18_SCENARIOS
 
 
 class ScenarioResult(BaseModel):

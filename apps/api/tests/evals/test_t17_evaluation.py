@@ -148,7 +148,7 @@ def test_t17_runner_removes_stale_output_when_a_scenario_fails(
         )
         return SimpleNamespace(returncode=1, stdout="", stderr="forced failure")
 
-    monkeypatch.setattr(runner, "T17_SCENARIOS", (scenario,))
+    monkeypatch.setattr(runner, "PRODUCT_SCENARIOS", (scenario,))
     monkeypatch.setattr(runner.subprocess, "run", fake_subprocess_run)
     monkeypatch.setattr(
         runner,

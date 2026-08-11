@@ -13,6 +13,7 @@ ConversationIntent = Literal[
     "request_status",
     "security_probe",
     "help",
+    "unknown",
 ]
 
 PolicyQuestionKind = Literal["catalog", "self_approval", "search"]
@@ -186,6 +187,11 @@ def route_message(content: str) -> IntentRoute:
 
     normalized = " ".join(content.casefold().split())
     security_probe = _contains_any(normalized, SECURITY_MARKERS)
+    # T18 只把纯数字无上下文标记为 unknown；ConversationService 在发现
+    # 活动 Cursor 后会把同一输入提升为 request_access 的确定性续答。
+    bare_numeric = bool(
+        re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", normalized)
+    )
 
     if _contains_any(
         normalized,
@@ -252,6 +258,8 @@ def route_message(content: str) -> IntentRoute:
         or re.search(r"\b[a-z][a-z0-9_]*\.[a-z][a-z0-9_.]*\b", normalized) is not None
     ):
         intent = "request_access"
+    elif bare_numeric:
+        intent = "unknown"
     elif security_probe:
         intent = "security_probe"
     else:

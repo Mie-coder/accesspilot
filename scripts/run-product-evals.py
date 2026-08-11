@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the fixed v1.1 evaluation registry and write a redacted JSON report."""
+"""Run the fixed product evaluation registry and write a redacted JSON report."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 from accesspilot.evaluation import (
-    T17_SCENARIOS,
+    PRODUCT_SCENARIOS,
     build_evaluation_report,
     parse_junit_suite,
 )
@@ -18,12 +18,12 @@ from accesspilot.evaluation import (
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run AccessPilot's deterministic productized evaluation suite.",
+        description="Run AccessPilot's deterministic product evaluation suite.",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("/private/tmp/accesspilot-t17-evaluation.json"),
+        default=Path("/private/tmp/accesspilot-product-evaluation.json"),
         help="Redacted JSON report destination.",
     )
     parser.add_argument(
@@ -48,7 +48,7 @@ def _git_revision(repo_root: Path) -> str:
 def main() -> int:
     args = _parse_args()
     if args.list:
-        for scenario in T17_SCENARIOS:
+        for scenario in PRODUCT_SCENARIOS:
             print(f"{scenario.scenario_id}\t{scenario.category}")
         return 0
 
@@ -58,9 +58,9 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     results = []
     failed_scenarios: list[str] = []
-    with tempfile.TemporaryDirectory(prefix="accesspilot-t17-") as temp_dir:
+    with tempfile.TemporaryDirectory(prefix="accesspilot-product-") as temp_dir:
         temp_root = Path(temp_dir)
-        for scenario in T17_SCENARIOS:
+        for scenario in PRODUCT_SCENARIOS:
             junit_path = temp_root / f"{scenario.scenario_id}.xml"
             command = [
                 sys.executable,
@@ -89,7 +89,10 @@ def main() -> int:
             )
             if not passed:
                 failed_scenarios.append(scenario.scenario_id)
-            print(f"{scenario.scenario_id}: {result.passed}/{result.case_count} fixed cases passed")
+            print(
+                f"{scenario.scenario_id}: "
+                f"{result.passed}/{result.case_count} product cases passed"
+            )
 
     if failed_scenarios:
         print(

@@ -42,9 +42,11 @@ from accesspilot.conversation import (
     ConversationInputError,
     DeterministicStructuredReplyModel,
     _redact_sensitive_content,
+    apply_cursor_transition,
     contains_protected_internal_content,
     handle_chat_message,
     is_suspicious_protected_prefix,
+    normalized_outcome,
     prepare_chat_message,
     split_safe_model_output_prefix,
 )
@@ -784,12 +786,21 @@ def create_app(
                 "resolution_unavailable",
             }:
                 message = prepared.assistant_message
+                outcome = normalized_outcome(prepared)
                 event = persist_terminal(
                     "error.recoverable",
                     {
                         "turn_id": turn_id,
                         "code": "BUSINESS_VALIDATION_FAILED",
                         "message": message,
+                        "intent": outcome["intent"],
+                        "business_status": outcome["business_status"],
+                        "draft_revision": outcome["draft_revision"],
+                        "draft": outcome["draft"],
+                        "assistant_message": message,
+                        "error_code": outcome.get(
+                            "error_code", "BUSINESS_VALIDATION_FAILED"
+                        ),
                     },
                 )
                 if event is not None:
@@ -879,16 +890,24 @@ def create_app(
                 )
                 seq += 1
             content = "".join(chunks) or prepared.assistant_message
+            outcome = normalized_outcome(prepared)
+            outcome["assistant_message"] = content
             event = persist_terminal(
                 "message.completed",
                 {
                     "turn_id": turn_id,
                     "message_id": str(uuid4()),
                     "content": content,
+                    **outcome,
                 },
             )
             if event is None:
                 return
+            apply_cursor_transition(
+                workspace_service,
+                workspace_token=workspace.token,
+                turn=prepared,
+            )
             payload = dict(event.payload)
             payload["persisted_event_id"] = event.id
             yield encode_persisted_frame(
@@ -1028,6 +1047,9 @@ def create_app(
             # Keep facts in one Demo Workspace when switching actors.
             updated = workspace_service.enter_demo(workspace.token, body.employee_id)
         else:
+            # A replacement Demo Workspace must not leave a product Cursor that
+            # can be replayed after the product backup is restored.
+            workspace_service.clear_cursor(workspace.token)
             _set_product_backup_cookie(response, workspace.token)
             replacement = workspace_service.create()
             updated = workspace_service.enter_demo(replacement.token, body.employee_id)
@@ -1236,6 +1258,7 @@ def create_app(
                     detail="申请未通过目录校验",
                 ) from error
 
+        workspace_service.clear_cursor(workspace.token)
         return {
             "request_id": str(request.id),
             "request_status": request.request_status,

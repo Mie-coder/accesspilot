@@ -9,6 +9,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -17,9 +18,10 @@ from accesspilot.agent.deepseek import SYSTEM_PROMPT
 from accesspilot.config import Settings
 from accesspilot.db.models import WorkspaceEventRecord
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
-from accesspilot.domain.models import ParsedReply
+from accesspilot.domain.models import ParsedReply, RequestDraft
 from accesspilot.main import create_app
 from accesspilot.streaming import DeterministicAnswerStreamModel
+from accesspilot.workspaces import WorkspaceService
 
 
 class CompleteStructuredReplyModel:
@@ -251,6 +253,124 @@ def test_current_turn_sse_model_error_has_single_recoverable_terminal(
     assert [frame["event"] for frame in terminals] == ["error.recoverable"]
     assert "upstream failure" not in response.text
     assert "message.delta" not in response.text
+
+
+@pytest.mark.parametrize(
+    "answer_stream_model",
+    [BrokenAnswerStream, CancelAfterFirstDeltaAnswerStream],
+)
+def test_sse_non_request_switch_clears_cursor_before_error_terminal(
+    database_session_factory: sessionmaker[Session],
+    answer_stream_model: type[object],
+) -> None:
+    client = TestClient(_stream_app(database_session_factory, answer_stream_model()))
+    _start_workspace(client)
+    token = client.cookies.get("accesspilot_workspace")
+    assert token is not None
+    service = WorkspaceService(SqlAlchemyWorkspaceStore(database_session_factory))
+    service.save_draft(
+        token,
+        RequestDraft(
+            employee_id="EMP-001",
+        ),
+    )
+    service.activate_cursor(
+        token,
+        expected_revision=1,
+        expected_field="duration_days",
+        last_question_kind="duration_days",
+    )
+
+    response = client.post(
+        "/api/chat/messages/stream",
+        json={"content": "政策有哪些"},
+    )
+
+    assert response.status_code == 200
+    frames = _parse_sse_frames(response.text)
+    assert any(
+        frame["event"] in {"error.recoverable", "turn.interrupted"}
+        for frame in frames
+    )
+    after_switch = service.get(token)
+    assert after_switch.active_cursor() is None
+    before_numeric = after_switch.draft
+    before_revision = after_switch.draft_revision
+
+    follow_up = client.post("/api/chat/messages", json={"content": "111"})
+    assert follow_up.status_code == 200
+    follow_payload = follow_up.json()
+    assert follow_payload["intent"] == "unknown"
+    assert follow_payload["business_status"] == "needs_clarification"
+    assert follow_payload["draft"] == (
+        before_numeric.model_dump(mode="json") if before_numeric is not None else None
+    )
+    assert follow_payload["draft_revision"] == before_revision
+
+
+def test_json_and_sse_numeric_outcomes_match_persisted_terminal_payload(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    json_client = TestClient(
+        _stream_app(database_session_factory, DeterministicAnswerStreamModel())
+    )
+    sse_client = TestClient(
+        _stream_app(database_session_factory, DeterministicAnswerStreamModel())
+    )
+    _start_workspace(json_client)
+    _start_workspace(sse_client)
+    json_token = json_client.cookies.get("accesspilot_workspace")
+    sse_token = sse_client.cookies.get("accesspilot_workspace")
+    assert json_token is not None and sse_token is not None
+
+    for token in (json_token, sse_token):
+        service = WorkspaceService(SqlAlchemyWorkspaceStore(database_session_factory))
+        service.save_draft(
+            token,
+            RequestDraft(
+                employee_id="EMP-001",
+                entitlement_id="insighthub.dashboard_view",
+            ),
+        )
+        service.activate_cursor(
+            token,
+            expected_revision=1,
+            expected_field="duration_days",
+            last_question_kind="duration_days",
+        )
+
+    json_response = json_client.post("/api/chat/messages", json={"content": "111"})
+    assert json_response.status_code == 200
+    json_payload = json_response.json()
+
+    sse_response = sse_client.post(
+        "/api/chat/messages/stream",
+        json={"content": "111"},
+    )
+    assert sse_response.status_code == 200
+    frames = _parse_sse_frames(sse_response.text)
+    completed = next(
+        frame for frame in frames if frame["event"] == "message.completed"
+    )
+    persisted_event_id = completed["data"]["payload"]["persisted_event_id"]
+    with database_session_factory() as session:
+        persisted = session.scalar(
+            select(WorkspaceEventRecord).where(
+                WorkspaceEventRecord.id == persisted_event_id,
+            )
+        )
+    assert persisted is not None
+    sse_payload = persisted.payload
+
+    for key in (
+        "intent",
+        "business_status",
+        "draft_revision",
+        "draft",
+        "assistant_message",
+    ):
+        assert sse_payload[key] == json_payload[key]
+    assert sse_payload.get("error_code") == json_payload.get("error_code")
 
 
 def test_current_turn_cancellation_persists_interrupted_without_completed(

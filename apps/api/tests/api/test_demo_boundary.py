@@ -10,6 +10,7 @@ from accesspilot.db.seed import seed_catalog
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore, hash_workspace_token
 from accesspilot.events import append_workspace_event, consume_model_call, list_workspace_events
 from accesspilot.main import create_app
+from accesspilot.workspaces import WorkspaceService
 
 
 def build_client(
@@ -105,6 +106,36 @@ def test_demo_session_requires_explicit_entry_and_exit_restores_product_identity
     assert exited.json()["demo_session_active"] is False
     assert "demo_session_active" not in after.json()
     assert after.json()["employee_id"] == "EMP-001"
+
+
+def test_product_cursor_is_cleared_when_demo_replacement_is_created_and_exited(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    client = build_client(database_session_factory)
+    product_token = create_workspace(client)
+    product_service = WorkspaceService(
+        SqlAlchemyWorkspaceStore(database_session_factory),
+        product_actor_id="EMP-001",
+    )
+    product_service.activate_cursor(
+        product_token,
+        expected_revision=0,
+        expected_field="duration_days",
+        last_question_kind="duration_days",
+    )
+    assert product_service.get(product_token).active_cursor() is not None
+
+    entered = client.post(
+        "/api/demo/session",
+        json={"employee_id": "EMP-002"},
+    )
+    assert entered.status_code == 200
+    assert client.cookies.get("accesspilot_workspace") != product_token
+
+    exited = client.post("/api/demo/session/exit")
+    assert exited.status_code == 200
+    assert client.cookies.get("accesspilot_workspace") == product_token
+    assert product_service.get(product_token).active_cursor() is None
 
 
 def test_demo_controls_are_not_available_when_feature_is_disabled(

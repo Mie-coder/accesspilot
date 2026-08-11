@@ -131,6 +131,39 @@ class WorkspaceRecord(Base):
         DateTime(timezone=True),
         default=utc_now,
     )
+    # 对话草稿的单调 revision；T18 的纯数字续答通过它做 CAS 绑定。
+    draft_revision: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
+    )
+    # ConversationCursor 与 Workspace 同行保存，避免产生跨 Workspace 的
+    # 可猜测游标；T19 接入登录后再填充 auth_session_id。
+    cursor_actor_id: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True,
+    )
+    cursor_auth_session_id: Mapped[str | None] = mapped_column(
+        String(120),
+        nullable=True,
+    )
+    cursor_expected_field: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+    cursor_last_question_kind: Mapped[str | None] = mapped_column(
+        String(80),
+        nullable=True,
+    )
+    cursor_issued_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    cursor_consumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
 
 class EmployeeRecord(Base):

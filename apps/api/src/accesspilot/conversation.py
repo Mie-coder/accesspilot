@@ -22,6 +22,7 @@ from accesspilot.agent.structured_reply import (
     StructuredReplyModel,
     parse_reply_with_retry,
 )
+from accesspilot.db.models import EntitlementRecord
 from accesspilot.domain.models import ParsedReply, RequestDraft
 from accesspilot.events import (
     ModelQuota,
@@ -37,7 +38,11 @@ from accesspilot.tools.executor import (
     tool_call_for_intent,
 )
 from accesspilot.tools.policies import PolicyService
-from accesspilot.workspaces import WorkspaceService
+from accesspilot.workspaces import (
+    CursorConflictError,
+    DraftRevisionConflictError,
+    WorkspaceService,
+)
 
 
 class ConversationInputError(ValueError):
@@ -69,6 +74,8 @@ class ConversationTurn(BaseModel):
     intent: ConversationIntent = "request_access"
     security_flagged: bool = False
     tool_results: list[ToolResult] = Field(default_factory=list)
+    draft_revision: int = 0
+    error_code: str | None = None
 
 
 def _explicit_confirmation_from_text(content: str) -> bool | None:
@@ -361,6 +368,8 @@ def _tool_answer(route: IntentRoute, result: ToolResult | None) -> str:
         return f"最近申请状态为 {status.request_status}，审批为 {approval}，权限{granted}。"
     if route.intent == "security_probe":
         return SECURITY_MESSAGE
+    if route.intent == "unknown":
+        return "我需要更多上下文才能理解这条数字消息，请说明它是期限、权限编号还是其他内容。"
     return "我可以帮你查询可申请权限、当前有效授权、申请状态，或发起权限申请。"
 
 
@@ -380,6 +389,357 @@ def _append_security_notice(
     )
 
 
+_NUMERIC_INPUT_RE = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)")
+_VALID_DURATION_RE = re.compile(r"[1-9][0-9]{0,3}")
+_CURSOR_BREAKING_INTENTS = frozenset(
+    {
+        "help",
+        "policy_question",
+        "discover_eligible_access",
+        "list_active_access",
+        "request_status",
+    }
+)
+
+
+def _is_numeric_input(content: str) -> bool:
+    """识别 T18 需要服务端上下文解释的数字型短输入。"""
+
+    return _NUMERIC_INPUT_RE.fullmatch(content) is not None
+
+
+def _numeric_duration(content: str) -> int | None:
+    """仅接受规范的无前导零、最多四位正整数期限候选。"""
+
+    if _VALID_DURATION_RE.fullmatch(content) is None:
+        return None
+    return int(content)
+
+
+def _apply_cursor_transition(
+    workspace_service: WorkspaceService,
+    *,
+    workspace_token: str,
+    turn: ConversationTurn,
+) -> None:
+    """在成功终态后激活下一追问；流中断时由调用方不执行此函数。"""
+
+    if turn.intent in _CURSOR_BREAKING_INTENTS:
+        # 明确切出申请收集的问题不能让旧 Cursor 继续解释下一轮数字。
+        workspace_service.clear_cursor(workspace_token)
+        return
+    if turn.intent != "request_access":
+        return
+    if turn.business_status == "collecting" and turn.missing_fields:
+        expected_field = turn.missing_fields[0]
+        workspace_service.activate_cursor(
+            workspace_token,
+            expected_revision=turn.draft_revision,
+            expected_field=expected_field,
+            last_question_kind=expected_field,
+        )
+    elif turn.business_status == "awaiting_confirmation":
+        workspace_service.activate_cursor(
+            workspace_token,
+            expected_revision=turn.draft_revision,
+            expected_field="confirmation",
+            last_question_kind="confirmation",
+        )
+    elif turn.business_status not in {"recoverable_error", "validation_failed"}:
+        workspace_service.clear_cursor(workspace_token)
+
+
+def apply_cursor_transition(
+    workspace_service: WorkspaceService,
+    *,
+    workspace_token: str,
+    turn: ConversationTurn,
+) -> None:
+    """公开给 SSE 终态收尾使用的 Cursor 状态转换。"""
+
+    _apply_cursor_transition(
+        workspace_service,
+        workspace_token=workspace_token,
+        turn=turn,
+    )
+
+
+def normalized_outcome(turn: ConversationTurn) -> dict[str, object]:
+    """返回 JSON 与 SSE terminal 共用的最小 Outcome 合同。"""
+
+    outcome: dict[str, object] = {
+        "intent": turn.intent,
+        "business_status": turn.business_status,
+        "draft_revision": turn.draft_revision,
+        "draft": turn.draft.model_dump(mode="json"),
+        "assistant_message": turn.assistant_message,
+    }
+    if turn.error_code is not None:
+        outcome["error_code"] = turn.error_code
+    return outcome
+
+
+def _append_outcome_events(
+    session_factory: sessionmaker[Session],
+    *,
+    workspace_token: str,
+    turn_id: str | None,
+    assistant_message: str,
+    business_status: str,
+) -> None:
+    """为确定性数字续答写入与旧 JSON 入口一致的安全事件。"""
+
+    _append_event(
+        session_factory,
+        workspace_token=workspace_token,
+        event_type="business.status",
+        payload={
+            "status": business_status,
+            **({"turn_id": turn_id} if turn_id is not None else {}),
+        },
+    )
+    _append_event(
+        session_factory,
+        workspace_token=workspace_token,
+        event_type="message.assistant",
+        payload={
+            "content": assistant_message,
+            **({"turn_id": turn_id} if turn_id is not None else {}),
+        },
+    )
+
+
+def _numeric_follow_up(
+    session_factory: sessionmaker[Session],
+    *,
+    workspace_service: WorkspaceService,
+    workspace_token: str,
+    content: str,
+) -> ConversationTurn:
+    """不调用模型地处理纯数字输入，并按活动 Cursor 选择语义。"""
+
+    workspace = workspace_service.get(workspace_token)
+    cursor = workspace.active_cursor()
+    visible_draft = workspace.draft
+    if (
+        visible_draft is not None
+        and visible_draft.employee_id is not None
+        and visible_draft.employee_id != workspace.actor_id
+    ):
+        visible_draft = None
+    draft = visible_draft or RequestDraft(employee_id=workspace.actor_id)
+    with session_factory() as session:
+        quota = get_model_quota(session, workspace_token=workspace_token)
+
+    turn_id = _CURRENT_TURN_ID.get()
+    if turn_id is not None:
+        _append_event(
+            session_factory,
+            workspace_token=workspace_token,
+            event_type="intent.detected",
+            payload={
+                "turn_id": turn_id,
+                "intent": "request_access" if cursor is not None else "unknown",
+                "security_flagged": False,
+            },
+        )
+    _append_event(
+        session_factory,
+        workspace_token=workspace_token,
+        event_type="message.user",
+        payload={"content": content, **({"turn_id": turn_id} if turn_id else {})},
+    )
+
+    if cursor is None:
+        assistant_message = "我需要更多上下文才能理解“111”：它是期限、权限编号，还是其他内容？"
+        business_status = "needs_clarification"
+        turn = ConversationTurn(
+            assistant_message=assistant_message,
+            draft=draft,
+            missing_fields=draft.missing_fields(),
+            phase=(
+                ConversationPhase.COLLECTING
+                if draft.missing_fields()
+                else ConversationPhase.AWAITING_CONFIRMATION
+            ),
+            business_status=business_status,
+            quota=quota,
+            intent="unknown",
+            draft_revision=workspace.draft_revision,
+            error_code="NUMERIC_CONTEXT_REQUIRED",
+        )
+        _append_outcome_events(
+            session_factory,
+            workspace_token=workspace_token,
+            turn_id=turn_id,
+            assistant_message=assistant_message,
+            business_status=business_status,
+        )
+        return turn
+
+    expected_field = cursor.expected_field
+    error_code: str | None = None
+    candidate = _numeric_duration(content) if expected_field == "duration_days" else None
+    updated_workspace = workspace
+
+    if expected_field != "duration_days":
+        questions = {
+            "entitlement_id": "请提供权限名称或权限编号，例如 insighthub.customer_export。",
+            "justification": "请说明申请这项权限的业务理由。",
+            "confirmation": "请明确回复“确认提交”或继续修改申请信息。",
+            "none": "请说明你要办理的权限业务。",
+        }
+        assistant_message = questions[expected_field]
+        business_status = (
+            "awaiting_confirmation" if expected_field == "confirmation" else "collecting"
+        )
+        error_code = {
+            "entitlement_id": "ENTITLEMENT_REQUIRED",
+            "justification": "JUSTIFICATION_REQUIRED",
+            "confirmation": "CONFIRMATION_REQUIRED",
+            "none": "NUMERIC_CONTEXT_REQUIRED",
+        }[expected_field]
+    elif candidate is None:
+        assistant_message = "申请期限必须是 1–9999 天的正整数，请重新输入期限。"
+        business_status = "collecting"
+        error_code = "INVALID_DURATION_DAYS"
+    else:
+        maximum: int | None = None
+        if draft.entitlement_id is not None:
+            with session_factory() as session:
+                entitlement = session.get(EntitlementRecord, draft.entitlement_id)
+            maximum = entitlement.max_duration_days if entitlement is not None else None
+        if maximum is not None and candidate > maximum:
+            assistant_message = (
+                f"该权限最长只能申请 {maximum} 天，请重新输入不超过上限的期限。"
+            )
+            business_status = "collecting"
+            error_code = "DURATION_EXCEEDS_MAXIMUM"
+        else:
+            proposed = draft.model_copy(
+                update={"duration_days": candidate, "confirmed": False}
+            )
+            try:
+                updated_workspace = workspace_service.consume_cursor_cas(
+                    workspace_token,
+                    expected_revision=cursor.draft_revision,
+                    expected_field="duration_days",
+                    draft=proposed,
+                )
+            except CursorConflictError:
+                assistant_message = "这条期限上下文已经变化，请重新说明申请内容。"
+                business_status = "needs_clarification"
+                error_code = "CURSOR_STALE"
+                turn = ConversationTurn(
+                    assistant_message=assistant_message,
+                    draft=draft,
+                    missing_fields=draft.missing_fields(),
+                    phase=ConversationPhase.COLLECTING,
+                    business_status=business_status,
+                    quota=quota,
+                    intent="unknown",
+                    draft_revision=workspace.draft_revision,
+                    error_code=error_code,
+                )
+                _append_outcome_events(
+                    session_factory,
+                    workspace_token=workspace_token,
+                    turn_id=turn_id,
+                    assistant_message=assistant_message,
+                    business_status=business_status,
+                )
+                return turn
+
+            assert updated_workspace.draft is not None
+            draft = updated_workspace.draft
+            draft_revision = updated_workspace.draft_revision
+            draft_event_payload: dict[str, object] = {
+                "draft": draft.model_dump(mode="json"),
+                "missing_fields": draft.missing_fields(),
+                "can_enter_approval": draft.can_enter_approval(),
+                "draft_revision": draft_revision,
+            }
+            validate_event_payload("draft.updated", draft_event_payload)
+            _append_event(
+                session_factory,
+                workspace_token=workspace_token,
+                event_type="draft.updated",
+                payload=draft_event_payload,
+            )
+            missing_fields = draft.missing_fields()
+            if missing_fields:
+                business_status = "collecting"
+                assistant_message = _missing_field_question(missing_fields[0])
+            else:
+                with session_factory() as session:
+                    validation = validate_access_request(session, draft)
+                if validation.status != "success":
+                    business_status = "validation_failed"
+                    assistant_message = "申请未通过目录校验，请检查员工、权限或期限。"
+                    error_code = "BUSINESS_VALIDATION_FAILED"
+                elif draft.confirmed:
+                    business_status = "ready_to_submit"
+                    assistant_message = "申请信息已明确确认，可以提交正式申请。"
+                else:
+                    business_status = "awaiting_confirmation"
+                    assistant_message = (
+                        "申请信息已完整。请明确回复“确认提交”后再创建正式申请。"
+                    )
+            turn = ConversationTurn(
+                assistant_message=assistant_message,
+                draft=draft,
+                missing_fields=draft.missing_fields(),
+                phase=(
+                    ConversationPhase.COLLECTING
+                    if business_status == "collecting"
+                    else ConversationPhase.AWAITING_CONFIRMATION
+                ),
+                business_status=business_status,
+                quota=quota,
+                intent="request_access",
+                draft_revision=draft_revision,
+                error_code=error_code,
+            )
+            _append_outcome_events(
+                session_factory,
+                workspace_token=workspace_token,
+                turn_id=turn_id,
+                assistant_message=assistant_message,
+                business_status=business_status,
+            )
+            if _PERSIST_TERMINAL.get():
+                _apply_cursor_transition(
+                    workspace_service,
+                    workspace_token=workspace_token,
+                    turn=turn,
+                )
+            return turn
+
+    turn = ConversationTurn(
+        assistant_message=assistant_message,
+        draft=draft,
+        missing_fields=draft.missing_fields(),
+        phase=(
+            ConversationPhase.AWAITING_CONFIRMATION
+            if business_status == "awaiting_confirmation"
+            else ConversationPhase.COLLECTING
+        ),
+        business_status=business_status,
+        quota=quota,
+        intent="request_access",
+        draft_revision=updated_workspace.draft_revision,
+        error_code=error_code,
+    )
+    _append_outcome_events(
+        session_factory,
+        workspace_token=workspace_token,
+        turn_id=turn_id,
+        assistant_message=assistant_message,
+        business_status=business_status,
+    )
+    return turn
+
+
 def _process_chat_message(
     session_factory: sessionmaker[Session],
     *,
@@ -397,6 +757,7 @@ def _process_chat_message(
         raise ConversationInputError("消息不能为空")
 
     workspace = workspace_service.get(workspace_token)
+    entry_draft_revision = workspace.draft_revision
     active_policy_service = policy_service or PolicyService(
         embedding_model=DeterministicEmbeddingModel()
     )
@@ -432,6 +793,19 @@ def _process_chat_message(
         route = IntentRoute(
             intent="request_access",
             security_probe=route.security_probe,
+        )
+    if route.intent in _CURSOR_BREAKING_INTENTS:
+        # 显式换题一经可靠路由就立即失效旧 Cursor；流式回答即使
+        # 随后中断/报错也不能让旧期限解释下一轮数字。
+        workspace_service.clear_cursor(workspace_token)
+    # 纯数字输入必须在模型配额和结构化解析之前闭合；活动 Cursor 才能
+    # 将其提升为申请续答，否则固定返回 unknown/needs_clarification。
+    if _is_numeric_input(normalized_content):
+        return _numeric_follow_up(
+            session_factory,
+            workspace_service=workspace_service,
+            workspace_token=workspace_token,
+            content=normalized_content,
         )
     if turn_id is not None:
         _append_event(
@@ -486,11 +860,14 @@ def _process_chat_message(
                     "summary": assistant_message,
                 },
             )
+        non_request_status = (
+            "needs_clarification" if route.intent == "unknown" else "answered"
+        )
         _append_event(
             session_factory,
             workspace_token=workspace_token,
             event_type="business.status",
-            payload={"status": "answered"},
+            payload={"status": non_request_status},
         )
         _append_event(
             session_factory,
@@ -503,17 +880,28 @@ def _process_chat_message(
             if current_draft.missing_fields()
             else ConversationPhase.AWAITING_CONFIRMATION
         )
-        return ConversationTurn(
+        turn = ConversationTurn(
             assistant_message=assistant_message,
             draft=current_draft,
             missing_fields=current_draft.missing_fields(),
             phase=phase,
-            business_status="answered",
+            business_status=non_request_status,
             quota=quota,
             intent=route.intent,
             security_flagged=route.security_probe,
             tool_results=[result] if result is not None else [],
+            draft_revision=workspace.draft_revision,
+            error_code=(
+                "NUMERIC_CONTEXT_REQUIRED" if route.intent == "unknown" else None
+            ),
         )
+        if _PERSIST_TERMINAL.get():
+            _apply_cursor_transition(
+                workspace_service,
+                workspace_token=workspace_token,
+                turn=turn,
+            )
+        return turn
 
     if (
         workspace.draft is not None
@@ -643,6 +1031,7 @@ def _process_chat_message(
                     intent=route.intent,
                     security_flagged=route.security_probe,
                     tool_results=[entitlement_resolution_result],
+                    draft_revision=workspace.draft_revision,
                 )
 
             assert resolution is not None
@@ -678,18 +1067,78 @@ def _process_chat_message(
             quota=quota,
             intent=route.intent,
             security_flagged=route.security_probe,
+            draft_revision=workspace.draft_revision,
+            error_code="MODEL_REPLY_UNAVAILABLE",
         )
 
     draft = _merge_reply(current_draft, parsed)
     missing_fields = draft.missing_fields()
+    draft_changed = workspace.draft is None or workspace.draft != draft
+    if draft_changed:
+        try:
+            updated_workspace = workspace_service.save_draft_cas(
+                workspace_token,
+                expected_revision=entry_draft_revision,
+                draft=draft,
+            )
+        except DraftRevisionConflictError:
+            # The model parsed an older snapshot while another request advanced
+            # the draft. Keep the newer fact and close this turn safely.
+            latest_workspace = workspace_service.get(workspace_token)
+            latest_draft = latest_workspace.draft
+            if (
+                latest_draft is not None
+                and latest_draft.employee_id is not None
+                and latest_draft.employee_id != latest_workspace.actor_id
+            ):
+                latest_draft = None
+            safe_draft = latest_draft or RequestDraft(
+                employee_id=latest_workspace.actor_id
+            )
+            safe_missing_fields = safe_draft.missing_fields()
+            conflict_message = (
+                "申请草稿刚刚被另一轮更新，请基于最新草稿继续。"
+            )
+            _append_event(
+                session_factory,
+                workspace_token=workspace_token,
+                event_type="business.status",
+                payload={"status": "recoverable_error"},
+            )
+            _append_event(
+                session_factory,
+                workspace_token=workspace_token,
+                event_type="message.assistant",
+                payload={"content": conflict_message},
+            )
+            return ConversationTurn(
+                assistant_message=conflict_message,
+                draft=safe_draft,
+                missing_fields=safe_missing_fields,
+                phase=ConversationPhase.RECOVERABLE_ERROR,
+                business_status="recoverable_error",
+                quota=quota,
+                intent=route.intent,
+                security_flagged=route.security_probe,
+                tool_results=(
+                    [entitlement_resolution_result]
+                    if entitlement_resolution_result is not None
+                    else []
+                ),
+                draft_revision=latest_workspace.draft_revision,
+                error_code="DRAFT_REVISION_CONFLICT",
+            )
+    else:
+        updated_workspace = workspace
+    draft_revision = updated_workspace.draft_revision
     draft_event_payload: dict[str, object] = {
         "draft": draft.model_dump(mode="json"),
         "missing_fields": missing_fields,
         "can_enter_approval": draft.can_enter_approval(),
+        "draft_revision": draft_revision,
     }
     # 先通过前端事件安全边界，再持久化同一份草稿，避免失败后留下敏感残留。
     validate_event_payload("draft.updated", draft_event_payload)
-    workspace_service.save_draft(workspace_token, draft)
     _append_event(
         session_factory,
         workspace_token=workspace_token,
@@ -747,7 +1196,7 @@ def _process_chat_message(
         event_type="message.assistant",
         payload={"content": assistant_message},
     )
-    return ConversationTurn(
+    turn = ConversationTurn(
         assistant_message=assistant_message,
         draft=draft,
         missing_fields=missing_fields,
@@ -761,7 +1210,15 @@ def _process_chat_message(
             if entitlement_resolution_result is not None
             else []
         ),
+        draft_revision=draft_revision,
     )
+    if _PERSIST_TERMINAL.get():
+        _apply_cursor_transition(
+            workspace_service,
+            workspace_token=workspace_token,
+            turn=turn,
+        )
+    return turn
 
 
 def handle_chat_message(

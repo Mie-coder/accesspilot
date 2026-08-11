@@ -11,4 +11,13 @@
 - `learning/`：课程、复盘、学习记录和教学资源。
 - `superpowers/`：早期教学阶段形成的历史实施计划，保留用于追溯，不作为当前产品入口。
 
-当前产品入口以根目录 `README.md` 为准；当前开发范围以最新 `specs/` 和 `tickets/` 文档为准。
+根目录 `README.md` 同时记录已实现、已验证的 v1.1 历史基线和当前本地完成的 v1.2 T18；未完成的 v1.2 目标不得误写成当前能力。
+
+## AccessPilot v1.2 当前入口与进度
+
+- 产品定义：`product/accesspilot-product-function-book-v1.2.md`
+- Canonical Spec：`specs/accesspilot-productized-agent-v1.2.md`
+- 精简前 DeepSeek 历史评审：`reviews/accesspilot-v1.2-spec-deepseek-review-2026-08-11.md`
+- T18–T25 精简 Ticket：`tickets/accesspilot-productized-agent-v1.2.md`
+
+用户已于 2026-08-11 确认按 T18 → T25 串行实施；T18 已完成并通过独立验收，T19–T25 待开始。当前仅有本地改动，不推送、合并或部署；实施后的真实能力仍以根目录 `README.md`、对应测试和 evidence 为准。

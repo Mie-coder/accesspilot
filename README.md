@@ -6,6 +6,7 @@ AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent�
 
 - **稳定基线：MVP v1.0** — T01–T08 已完成本地实现和验收；没有推送、部署或接入真实企业系统。
 - **本地完成版本：v1.1** — T09–T17 已完成本地实现与验证；没有推送、合并、部署或接入真实企业系统。
+- **当前本地版本：v1.2 精简版 T18 已完成** — ConversationCursor 为期限追问保存 `111` 的上下文，纯数字续答按 `duration_days` 目录上限解析，并以 draft revision/CAS 保护持久化；T18 固定评测 11/11、T17+T18 产品总计 41/41。T19–T25 尚未开始；没有推送、合并或部署，也不宣称登录/AuthSession 已完成。
 - **当前能力：** 固定服务端产品身份并隔离受保护的 Demo 控制面，支持按身份发现权限、多意图路由、只读工具白名单、确定性权限名称解析、8 条基本政策主题问答、基于本轮证据的 `grounded`/`insufficient_evidence`/`retrieval_unavailable` 三态政策回答、自审批禁止规则，以及当前轮增量 SSE、Workspace 长连接事件、取消、断线重连和刷新恢复。产品工作台还提供类型化业务卡片：权限按 `eligible`、`owned`、`pending`、`expiring_soon`、`expired` 五态展示；权限名称解析按 `matched`、`ambiguous`、`no_match` 三态展示候选和重新校验结果；政策按三态展示证据、提示和下一步；申请页按事实展示草稿、提交、风险审查、两级审批、开通与恢复时间线，断线时在业务页面显示可恢复的重连状态。
 - **后续演进：** provider token 延迟、政策召回率和生产 SLA 尚未测量；它们不属于本地 deterministic_offline 单样本结论。
 
@@ -40,6 +41,7 @@ AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent�
 - T15：政策问答与提示词攻击防护、8 条基本政策主题、三态证据回答、自审批规则（`POL-006`）和复合攻击安全回归已完成并本地验证；模型输出、草稿、事件和错误正文均通过敏感信息边界检查。
 - T16：权限、政策与申请状态业务卡片已完成；权限五态、名称解析三态、政策证据三态、申请生命周期时间线、加载/空/错误/安全拒绝和断线重连状态均已接入产品导航并本地验证。
 - T17：10 个固定场景、30 个案例全部通过；后端全量 339 passed（1 warning）、前端 14 files/48 passed、Ruff、MyPy（41 sources）、Alembic（无漂移/head 0006）、TypeScript app+node、ESLint 和正式构建均通过。脱敏单样本观测来自本机 direct-ASGI `deterministic_offline`：首事件 7.666417 ms、首个非空 `message.delta` 35.480167 ms、完成 39.017833 ms、计费模型调用 1 次；Workspace 重连回放 2 条、重复 0 条；复合攻击 4/4 阻断。上述延迟不是 provider token、p50/p95 或生产 SLA，不代表真实模型质量。
+- T18：ConversationCursor、纯数字 `111` 期限上下文、失效/消费与 draft revision/CAS 已完成并独立验收；固定 T18 评测 11/11，T17+T18 产品固定评测总计 41/41。T19–T25 尚未开始。
 
 Demo 控制台只能切换独立演示 Workspace 中的预置虚构员工，不是真实 SSO 或生产级授权边界；普通产品身份始终由服务端配置，真实系统仍必须由可信登录态确定操作者身份。
 
@@ -122,7 +124,7 @@ pnpm --filter @accesspilot/web exec vite --host 127.0.0.1 --port 5173
 
 ## 固定评测与统一检查
 
-T08 的 12 条固定场景覆盖黄金路径、缺项、未确认、政策失败、审批乱序、驳回、IAM 超时恢复、重复幂等调用、SSE 重连、配额、Workspace 隔离和模型结构错误；T17 另有 10 个产品化场景、30 个案例：
+T08 的 12 条固定场景覆盖黄金路径、缺项、未确认、政策失败、审批乱序、驳回、IAM 超时恢复、重复幂等调用、SSE 重连、配额、Workspace 隔离和模型结构错误；T17 另有 10 个产品化场景、30 个案例；T18 另有 11 个固定案例，T17+T18 产品总计 41/41：
 
 ```bash
 ./scripts/run-evals.sh
@@ -169,10 +171,14 @@ docker compose ps
 - 当前前端主包约 524 KB，T17 正式构建报告 561.02 KB chunk warning（P2）；不影响本地功能，但不应视为最终性能优化结果。
 - T17 尚未测量 provider token latency、policy recall@k 或 production SLA；本地 deterministic_offline 单样本不能外推这些生产指标。
 - 当前未配置备份、集中日志、监控告警、任务队列、高可用或线上部署。
+- P2 延期边界：legacy JSON 路径以及 `set_actor`/`reset`/`exit_demo`/submit 等旧控制面仍是整行读写，极端并发下可能有最后写入者覆盖；SSE 当前轮锁已覆盖主路径。
+- P2 延期边界：当前确定性适配器的流内容与规范化 `assistant_message` 一致；未来接入真实 Answer Provider 时仍需明确 canonical message 定义。
+- P2 UX 限制：没有活动 Cursor 的数字澄清文案暂固定引用 `111`，不影响零副作用语义，但尚未做通用化文案。
 
 ## 架构文档
 
-- [AccessPilot v1.1 产品功能书](docs/product/accesspilot-product-function-book-v1.1.md)
+- [AccessPilot v1.1 产品功能书（历史基线）](docs/product/accesspilot-product-function-book-v1.1.md)
+- [AccessPilot v1.2 精简产品说明书（当前仅 T18 已完成）](docs/product/accesspilot-product-function-book-v1.2.md)
 - [访问申请与权限开通流程](docs/architecture/access-flow.md)
 - [数据库 ER 图](docs/architecture/data-model-er.md)
 - [项目实现计划](docs/plans/accesspilot-mvp.md)

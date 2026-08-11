@@ -1,6 +1,10 @@
 """权限申请领域数据模型。"""
 
-from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, field_validator
+from datetime import UTC, datetime
+from typing import Literal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
 from pydantic_core import PydanticCustomError
 
 
@@ -71,3 +75,46 @@ class ParsedReply(BaseModel):
     duration_days: StrictInt | None = None
     justification: str | None = None
     confirmed: StrictBool | None = None
+
+
+CursorExpectedField = Literal[
+    "entitlement_id",
+    "duration_days",
+    "justification",
+    "confirmation",
+    "none",
+]
+
+
+class ConversationCursor(BaseModel):
+    """服务端保存的、绑定当前草稿 revision 的待补字段合同。
+
+    T18 仍使用 Workspace + actor 作用域，``auth_session_id`` 为 T19
+    预留。``consumed_at`` 只用于审计；只要它不为空，游标就不再可消费。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID | str
+    actor_id: str
+    auth_session_id: str | None = None
+    draft_revision: int = Field(ge=0)
+    expected_field: CursorExpectedField
+    last_question_kind: str = Field(min_length=1, max_length=80)
+    issued_at: datetime
+    consumed_at: datetime | None = None
+
+    @property
+    def is_active(self) -> bool:
+        """被消费或显式失效的 Cursor 不能再次解释用户输入。"""
+
+        return self.consumed_at is None
+
+    def consume(self, *, at: datetime | None = None) -> "ConversationCursor":
+        """返回带消费时间的新快照，不就地修改持久化对象。"""
+
+        return self.model_copy(
+            update={
+                "consumed_at": at or datetime.now(UTC),
+            }
+        )

@@ -86,6 +86,7 @@ class DraftUpdatedPayload(BaseModel):
     draft: dict[str, Any]
     missing_fields: list[str]
     can_enter_approval: bool
+    draft_revision: int = 0
     turn_id: str | None = Field(default=None, min_length=1, max_length=120)
 
 
@@ -102,6 +103,12 @@ class RecoverableErrorPayload(BaseModel):
 
     code: str = Field(min_length=1, max_length=100)
     message: str = Field(min_length=1, max_length=1_000)
+    intent: str | None = Field(default=None, min_length=1, max_length=80)
+    business_status: str | None = Field(default=None, min_length=1, max_length=80)
+    draft_revision: int | None = Field(default=None, ge=0)
+    draft: dict[str, Any] | None = None
+    assistant_message: str | None = Field(default=None, min_length=1, max_length=10_000)
+    error_code: str | None = Field(default=None, min_length=1, max_length=120)
     turn_id: str | None = Field(default=None, min_length=1, max_length=120)
 
 
@@ -121,6 +128,12 @@ class MessageCompletedPayload(BaseModel):
     turn_id: str = Field(min_length=1, max_length=120)
     message_id: str = Field(min_length=1, max_length=120)
     content: str = Field(min_length=1, max_length=10_000)
+    intent: str | None = Field(default=None, min_length=1, max_length=80)
+    business_status: str | None = Field(default=None, min_length=1, max_length=80)
+    draft_revision: int | None = Field(default=None, ge=0)
+    draft: dict[str, Any] | None = None
+    assistant_message: str | None = Field(default=None, min_length=1, max_length=10_000)
+    error_code: str | None = Field(default=None, min_length=1, max_length=120)
 
 
 class TurnInterruptedPayload(BaseModel):
