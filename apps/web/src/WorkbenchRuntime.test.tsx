@@ -14,11 +14,6 @@ const snapshot: WorkspaceSnapshot = {
     roles: [],
   },
   draft: null,
-  demoSession: {
-    demo_mode_enabled: false,
-    demo_session_active: false,
-    fault_mode: null,
-  },
   events: [{
     id: 8,
     type: 'error.recoverable',
@@ -75,6 +70,8 @@ function Probe() {
     <>
       <output data-testid="workbench-error">{workbench.error}</output>
       <output data-testid="connection-state">{workbench.connectionState}</output>
+      <output data-testid="draft-employee">{workbench.draft?.employee_id}</output>
+      <output data-testid="missing-count">{workbench.missingFields.length}</output>
     </>
   )
 }
@@ -154,6 +151,28 @@ describe('WorkbenchRuntime hydration', () => {
     })
     expect(screen.getByTestId('workbench-error')).toBeEmptyDOMElement()
     view.unmount()
+  })
+
+  it('hydrates a login-bound employee in the initial draft without asking chat to identify them', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', {
+      headers: { 'Content-Type': 'text/event-stream' },
+    })))
+    render(
+      <WorkbenchRuntime
+        snapshot={{
+          ...snapshot,
+          identity: { ...snapshot.identity, employee_id: 'EMP-002' },
+          draft: null,
+        }}
+      >
+        <Probe />
+      </WorkbenchRuntime>,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByTestId('draft-employee')).toHaveTextContent('EMP-002')
+      expect(screen.getByTestId('missing-count')).toHaveTextContent('3')
+    })
   })
 
 })

@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from accesspilot.db.seed import seed_catalog
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
 from accesspilot.main import create_app
+from support.auth import login_as
 
 
 def build_client(
@@ -13,19 +14,20 @@ def build_client(
 ) -> TestClient:
     with database_session_factory() as session:
         seed_catalog(session)
-    return TestClient(
+    client = TestClient(
         create_app(
             store=SqlAlchemyWorkspaceStore(database_session_factory),
             session_factory=database_session_factory,
         )
     )
+    login_as(client)
+    return client
 
 
 def save_complete_draft(client: TestClient, *, confirmed: bool) -> None:
     response = client.post(
         "/api/drafts/preview",
         json={
-            "employee_id": "EMP-001",
             "entitlement_id": "insighthub.customer_export",
             "duration_days": 14,
             "justification": "核验项目运营数据",
@@ -39,7 +41,6 @@ def test_submit_rejects_complete_but_unconfirmed_draft(
     database_session_factory: sessionmaker[Session],
 ) -> None:
     client = build_client(database_session_factory)
-    client.post("/api/workspaces")
     save_complete_draft(client, confirmed=False)
 
     response = client.post("/api/requests")
@@ -52,7 +53,6 @@ def test_submit_returns_frozen_request(
     database_session_factory: sessionmaker[Session],
 ) -> None:
     client = build_client(database_session_factory)
-    client.post("/api/workspaces")
     save_complete_draft(client, confirmed=True)
 
     response = client.post("/api/requests")
@@ -67,7 +67,6 @@ def test_submitted_request_is_recoverable_from_safe_event_replay(
     database_session_factory: sessionmaker[Session],
 ) -> None:
     client = build_client(database_session_factory)
-    client.post("/api/workspaces")
     save_complete_draft(client, confirmed=True)
 
     submitted = client.post("/api/requests")

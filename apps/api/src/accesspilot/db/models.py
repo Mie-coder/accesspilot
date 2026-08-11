@@ -64,6 +64,10 @@ class WorkspaceRecord(Base):
             ),
             name="demo_session_actor_consistent",
         ),
+        CheckConstraint(
+            "cursor_expected_field IS NULL OR cursor_auth_session_id IS NOT NULL",
+            name="cursor_auth_session_required",
+        ),
     )
     # Mapped[UUID] 是 Python 侧类型；Uuid 是数据库列类型。
     # default=uuid4 传入的是函数，SQLAlchemy 会在每条新记录创建时调用它。
@@ -139,7 +143,7 @@ class WorkspaceRecord(Base):
         nullable=False,
     )
     # ConversationCursor 与 Workspace 同行保存，避免产生跨 Workspace 的
-    # 可猜测游标；T19 接入登录后再填充 auth_session_id。
+    # 可猜测游标；活动 Cursor 必须带当前 AuthSession。
     cursor_actor_id: Mapped[str | None] = mapped_column(
         String(30),
         nullable=True,
@@ -163,6 +167,42 @@ class WorkspaceRecord(Base):
     cursor_consumed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
+    )
+
+
+class AuthSessionRecord(Base):
+    """Server-owned Mock Login session.
+
+    The browser only receives the random bearer/CSRF values.  Database rows
+    contain SHA-256 hashes, so a database read never yields a reusable token.
+    """
+
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    token_hash: Mapped[str] = mapped_column(
+        String(64), unique=True, index=True, nullable=False
+    )
+    employee_id: Mapped[str] = mapped_column(
+        ForeignKey("employees.employee_id", ondelete="RESTRICT"),
+        index=True,
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        unique=True,
+        index=True,
+        nullable=False,
+    )
+    csrf_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
     )
 
 

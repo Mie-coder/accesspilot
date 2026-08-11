@@ -12,6 +12,7 @@ from accesspilot.db.seed import seed_catalog
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
 from accesspilot.domain.models import ParsedReply
 from accesspilot.main import create_app
+from support.auth import login_as
 
 
 class FailIfCalledStructuredReplyModel:
@@ -44,11 +45,10 @@ def test_budget_exhaustion_keeps_read_only_facts_and_confirmed_submit_available(
             structured_reply_model=model,
         )
     )
-    assert client.post("/api/workspaces").status_code == 201
+    login_as(client)
     preview = client.post(
         "/api/drafts/preview",
         json={
-            "employee_id": "EMP-001",
             "entitlement_id": "insighthub.customer_export",
             "duration_days": 14,
             "justification": "核验虚构季度客户分析数据",
@@ -58,7 +58,7 @@ def test_budget_exhaustion_keeps_read_only_facts_and_confirmed_submit_available(
     assert preview.status_code == 200
     original_draft = preview.json()["draft"]
 
-    token = client.cookies.get("accesspilot_workspace")
+    token = client.cookies.get("accesspilot_session")
     assert token is not None
     with database_session_factory() as session:
         workspace = session.scalar(

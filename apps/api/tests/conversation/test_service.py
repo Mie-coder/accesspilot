@@ -1,4 +1,5 @@
 from hashlib import sha256
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -7,7 +8,12 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from accesspilot.agent.state import ConversationPhase
 from accesspilot.agent.structured_reply import MalformedStructuredOutputError
-from accesspilot.conversation import ConversationInputError, handle_chat_message
+from accesspilot.conversation import (
+    ConversationInputError,
+)
+from accesspilot.conversation import (
+    handle_chat_message as _handle_chat_message,
+)
 from accesspilot.db.models import WorkspaceRecord
 from accesspilot.db.seed import seed_catalog
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
@@ -17,6 +23,15 @@ from accesspilot.events import (
     list_workspace_events,
 )
 from accesspilot.workspaces import WorkspaceService
+
+AUTH_SESSION_ID = "conversation-test-auth-session"
+
+
+def handle_chat_message(*args: Any, **kwargs: Any):
+    """Bind direct service tests to one explicit synthetic AuthSession."""
+
+    kwargs.setdefault("auth_session_id", AUTH_SESSION_ID)
+    return _handle_chat_message(*args, **kwargs)
 
 
 class StaticStructuredReplyModel:

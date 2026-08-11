@@ -42,7 +42,6 @@ function renderContainer(selectEntitlement: WorkbenchContextValue['selectEntitle
     identity: { employee_id: 'EMP-001', name: '林晓', department: 'product', roles: [] },
     draft: null,
     missingFields: ['entitlement_id', 'duration_days', 'justification'],
-    demoSession: { demo_mode_enabled: false, demo_session_active: false, fault_mode: null },
     events: [] as WorkspaceEvent[],
     businessStatus: 'collecting',
     error: null,

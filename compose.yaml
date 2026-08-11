@@ -42,8 +42,11 @@ services:
     environment:
       # 显式连接串允许对任意数据库密码做 URL 编码，避免 @/: 被误解析。
       ACCESSPILOT_DATABASE_URL: ${ACCESSPILOT_COMPOSE_DATABASE_URL:?Set an URL-encoded ACCESSPILOT_COMPOSE_DATABASE_URL in .env}
-      # 本地 Compose 由 HTTP Nginx 提供服务；生产 TLS 反代时覆盖为 true。
-      ACCESSPILOT_WORKSPACE_COOKIE_SECURE: ${ACCESSPILOT_WORKSPACE_COOKIE_SECURE:-false}
+      # 浏览器访问 Compose 入口时 Origin 必须精确匹配，不能混用 localhost。
+      ACCESSPILOT_WEB_ORIGIN: ${ACCESSPILOT_COMPOSE_WEB_ORIGIN:-http://127.0.0.1:${ACCESSPILOT_WEB_PORT:-8080}}
+      # 本地 Compose 由 HTTP Nginx 提供服务；生产 TLS 反代时通过
+      # ACCESSPILOT_COMPOSE_WEB_ORIGIN 覆盖为真实 HTTPS Origin。
+      ACCESSPILOT_AUTH_COOKIE_SECURE: ${ACCESSPILOT_AUTH_COOKIE_SECURE:-false}
     depends_on:
       db:
         condition: service_healthy

@@ -41,6 +41,8 @@ class Workspace:
     draft: RequestDraft | None = None
     draft_revision: int = 0
     cursor: ConversationCursor | None = None
+    # Bound by the authenticated request context.  It is not a client input.
+    auth_session_id: str | None = None
     fault_mode: str | None = None
 
     def active_cursor(self) -> ConversationCursor | None:
@@ -50,6 +52,8 @@ class Workspace:
         if cursor is None or not cursor.is_active:
             return None
         if cursor.actor_id != self.actor_id:
+            return None
+        if self.auth_session_id is not None and cursor.auth_session_id != self.auth_session_id:
             return None
         if cursor.draft_revision != self.draft_revision:
             return None
@@ -95,6 +99,7 @@ class WorkspaceStore(Protocol):
         *,
         expected_revision: int,
         draft: RequestDraft,
+        auth_session_id: str | None = None,
     ) -> bool: ...
     def consume_cursor_cas(
         self,
@@ -103,6 +108,7 @@ class WorkspaceStore(Protocol):
         expected_revision: int,
         expected_field: str,
         draft: RequestDraft,
+        auth_session_id: str,
     ) -> bool: ...
 
     def activate_cursor_cas(
@@ -111,6 +117,7 @@ class WorkspaceStore(Protocol):
         *,
         expected_revision: int,
         cursor: ConversationCursor,
+        auth_session_id: str,
     ) -> bool: ...
 
     def clear_cursor_cas(
@@ -118,6 +125,7 @@ class WorkspaceStore(Protocol):
         token: str,
         *,
         expected_revision: int,
+        auth_session_id: str,
     ) -> bool: ...
 
 class InMemoryWorkspaceStore:
@@ -137,9 +145,15 @@ class InMemoryWorkspaceStore:
         *,
         expected_revision: int,
         draft: RequestDraft,
+        auth_session_id: str | None = None,
     ) -> bool:
         workspace = self._workspaces.get(token)
         if workspace is None or workspace.draft_revision != expected_revision:
+            return False
+        if workspace.cursor is not None and (
+            auth_session_id is None
+            or workspace.cursor.auth_session_id != auth_session_id
+        ):
             return False
         workspace.draft = draft
         workspace.draft_revision += 1
@@ -153,6 +167,7 @@ class InMemoryWorkspaceStore:
         expected_revision: int,
         expected_field: str,
         draft: RequestDraft,
+        auth_session_id: str,
     ) -> bool:
         workspace = self._workspaces.get(token)
         if workspace is None:
@@ -162,6 +177,7 @@ class InMemoryWorkspaceStore:
             workspace.draft_revision != expected_revision
             or cursor is None
             or cursor.expected_field != expected_field
+            or cursor.auth_session_id != auth_session_id
         ):
             return False
         workspace.draft = draft
@@ -175,12 +191,14 @@ class InMemoryWorkspaceStore:
         *,
         expected_revision: int,
         cursor: ConversationCursor,
+        auth_session_id: str,
     ) -> bool:
         workspace = self._workspaces.get(token)
         if (
             workspace is None
             or workspace.draft_revision != expected_revision
             or cursor.actor_id != workspace.actor_id
+            or cursor.auth_session_id != auth_session_id
         ):
             return False
         workspace.cursor = cursor
@@ -191,6 +209,7 @@ class InMemoryWorkspaceStore:
         token: str,
         *,
         expected_revision: int,
+        auth_session_id: str,
     ) -> bool:
         workspace = self._workspaces.get(token)
         if workspace is None or workspace.draft_revision != expected_revision:
@@ -214,6 +233,13 @@ class WorkspaceService:
     def _normalize(self, workspace: Workspace) -> Workspace:
         """清理旧的或已失效的 Demo 覆盖，避免业务层读取过期身份。"""
 
+        # Authenticated v1.2 workspaces are already bound to the Principal
+        # selected by AuthSession.  Never rewrite EMP-002/003/004 back to the
+        # legacy product actor while loading one of those sessions.
+        if workspace.auth_session_id is not None:
+            if workspace.cursor is not None and workspace.active_cursor() is None:
+                workspace.clear_cursor()
+            return workspace
         if not self._demo_mode_enabled:
             workspace.actor_id = self._product_actor_id
             workspace.demo_actor_id = None
@@ -246,10 +272,11 @@ class WorkspaceService:
         self._store.save(workspace)
         return workspace
 
-    def get(self, token: str) -> Workspace:
+    def get(self, token: str, *, auth_session_id: str | None = None) -> Workspace:
         workspace = self._store.get(token)
         if workspace is None:
             raise UnknownWorkspaceError(token)
+        workspace.auth_session_id = auth_session_id
         before = (
             workspace.actor_id,
             workspace.demo_actor_id,
@@ -269,17 +296,42 @@ class WorkspaceService:
             self._store.save(normalized)
         return normalized
 
-    def save_draft(self, token: str, draft: RequestDraft) -> Workspace:
-        workspace = self.get(token)
+    def _get_for_session(
+        self, token: str, auth_session_id: str | None
+    ) -> Workspace:
+        """Preserve the legacy ``get(token)`` seam used by domain tests."""
+
+        if auth_session_id is None:
+            return self.get(token)
+        return self.get(token, auth_session_id=auth_session_id)
+
+    def save_draft(
+        self,
+        token: str,
+        draft: RequestDraft,
+        *,
+        auth_session_id: str | None = None,
+    ) -> Workspace:
+        """Persist a draft while retaining the caller's AuthSession binding.
+
+        The optional value keeps domain-only legacy fixtures usable, but every
+        authenticated production route passes ``Workspace.auth_session_id``.
+        That prevents ``_normalize`` from applying the old product actor to a
+        private EMP-002/003/004 workspace and lets CAS enforce its cursor
+        session binding.
+        """
+
+        workspace = self._get_for_session(token, auth_session_id)
         if workspace.draft == draft:
             return workspace
         if not self._store.update_draft_cas(
             token,
             expected_revision=workspace.draft_revision,
             draft=draft,
+            auth_session_id=auth_session_id,
         ):
             raise DraftRevisionConflictError("草稿 revision 已发生变化")
-        return self.get(token)
+        return self._get_for_session(token, auth_session_id)
 
     def save_draft_cas(
         self,
@@ -287,6 +339,7 @@ class WorkspaceService:
         *,
         expected_revision: int,
         draft: RequestDraft,
+        auth_session_id: str,
     ) -> Workspace:
         """按调用方持有的 revision 原子接受一次草稿更新。"""
 
@@ -294,9 +347,10 @@ class WorkspaceService:
             token,
             expected_revision=expected_revision,
             draft=draft,
+            auth_session_id=auth_session_id,
         ):
             raise DraftRevisionConflictError("草稿 revision 已发生变化")
-        return self.get(token)
+        return self._get_for_session(token, auth_session_id)
 
     def consume_cursor_cas(
         self,
@@ -305,6 +359,7 @@ class WorkspaceService:
         expected_revision: int,
         expected_field: str,
         draft: RequestDraft,
+        auth_session_id: str,
     ) -> Workspace:
         """同时消费 Cursor、写入草稿并递增 revision。"""
 
@@ -313,9 +368,10 @@ class WorkspaceService:
             expected_revision=expected_revision,
             expected_field=expected_field,
             draft=draft,
+            auth_session_id=auth_session_id,
         ):
             raise CursorConflictError("当前 Cursor 已失效或已被消费")
-        return self.get(token)
+        return self._get_for_session(token, auth_session_id)
 
     def activate_cursor(
         self,
@@ -324,7 +380,7 @@ class WorkspaceService:
         expected_revision: int,
         expected_field: str,
         last_question_kind: str,
-        auth_session_id: str | None = None,
+        auth_session_id: str,
     ) -> Workspace:
         """在追问事件成功持久化后激活绑定当前 revision 的 Cursor。"""
 
@@ -336,16 +392,17 @@ class WorkspaceService:
             "none",
         }:
             raise ValueError("不支持的 Cursor expected_field")
-        workspace = self.get(token)
+        workspace = self._get_for_session(token, auth_session_id)
         if workspace.draft_revision != expected_revision:
             raise DraftRevisionConflictError("追问绑定的草稿 revision 已变化")
         if expected_field == "none":
             if not self._store.clear_cursor_cas(
                 token,
                 expected_revision=expected_revision,
+                auth_session_id=auth_session_id,
             ):
                 raise DraftRevisionConflictError("追问绑定的草稿 revision 已变化")
-            return self.get(token)
+            return self._get_for_session(token, auth_session_id)
         cursor = ConversationCursor(
             workspace_id=workspace.workspace_id or token,
             actor_id=workspace.actor_id,
@@ -359,21 +416,25 @@ class WorkspaceService:
             token,
             expected_revision=expected_revision,
             cursor=cursor,
+            auth_session_id=auth_session_id,
         ):
             raise DraftRevisionConflictError("追问绑定的草稿 revision 已变化")
-        return self.get(token)
+        return self._get_for_session(token, auth_session_id)
 
-    def clear_cursor(self, token: str) -> Workspace:
+    def clear_cursor(
+        self, token: str, *, auth_session_id: str
+    ) -> Workspace:
         """显式帮助、重置或提交后使当前 Cursor 失效。"""
 
-        workspace = self.get(token)
+        workspace = self._get_for_session(token, auth_session_id)
         if workspace.cursor is not None:
             if not self._store.clear_cursor_cas(
                 token,
                 expected_revision=workspace.draft_revision,
+                auth_session_id=auth_session_id,
             ):
                 raise DraftRevisionConflictError("清除 Cursor 时草稿 revision 已变化")
-            return self.get(token)
+            return self._get_for_session(token, auth_session_id)
         return workspace
 
     def set_actor(self, token: str, actor_id: str) -> Workspace:

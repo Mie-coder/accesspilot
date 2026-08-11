@@ -17,11 +17,13 @@ from sqlalchemy.orm import Session, sessionmaker
 from accesspilot.agent.deepseek import SYSTEM_PROMPT
 from accesspilot.config import Settings
 from accesspilot.db.models import WorkspaceEventRecord
+from accesspilot.db.seed import seed_catalog
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
 from accesspilot.domain.models import ParsedReply, RequestDraft
 from accesspilot.main import create_app
 from accesspilot.streaming import DeterministicAnswerStreamModel
 from accesspilot.workspaces import WorkspaceService
+from support.auth import login_as
 
 
 class CompleteStructuredReplyModel:
@@ -162,6 +164,8 @@ def _stream_app(
     answer_stream_model: object,
     structured_reply_model: object | None = None,
 ):
+    with database_session_factory() as session:
+        seed_catalog(session)
     return create_app(
         store=SqlAlchemyWorkspaceStore(database_session_factory),
         settings=Settings(demo_mode_enabled=True),
@@ -173,8 +177,11 @@ def _stream_app(
     )
 
 
-def _start_workspace(client: TestClient) -> None:
-    assert client.post("/api/workspaces").status_code == 201
+def _start_workspace(
+    client: TestClient,
+    session_factory: sessionmaker[Session] | None = None,
+):
+    return login_as(client, session_factory=session_factory)
 
 
 def test_current_turn_sse_emits_ordered_real_deltas_and_persists_before_completed(
@@ -264,9 +271,9 @@ def test_sse_non_request_switch_clears_cursor_before_error_terminal(
     answer_stream_model: type[object],
 ) -> None:
     client = TestClient(_stream_app(database_session_factory, answer_stream_model()))
-    _start_workspace(client)
-    token = client.cookies.get("accesspilot_workspace")
-    assert token is not None
+    login = _start_workspace(client, database_session_factory)
+    token = login.session_token
+    assert login.session_id is not None
     service = WorkspaceService(SqlAlchemyWorkspaceStore(database_session_factory))
     service.save_draft(
         token,
@@ -279,6 +286,7 @@ def test_sse_non_request_switch_clears_cursor_before_error_terminal(
         expected_revision=1,
         expected_field="duration_days",
         last_question_kind="duration_days",
+        auth_session_id=login.session_id,
     )
 
     response = client.post(
@@ -317,13 +325,13 @@ def test_json_and_sse_numeric_outcomes_match_persisted_terminal_payload(
     sse_client = TestClient(
         _stream_app(database_session_factory, DeterministicAnswerStreamModel())
     )
-    _start_workspace(json_client)
-    _start_workspace(sse_client)
-    json_token = json_client.cookies.get("accesspilot_workspace")
-    sse_token = sse_client.cookies.get("accesspilot_workspace")
-    assert json_token is not None and sse_token is not None
+    json_login = _start_workspace(json_client, database_session_factory)
+    sse_login = _start_workspace(sse_client, database_session_factory)
+    json_token = json_login.session_token
+    sse_token = sse_login.session_token
+    assert json_login.session_id is not None and sse_login.session_id is not None
 
-    for token in (json_token, sse_token):
+    for token, login in ((json_token, json_login), (sse_token, sse_login)):
         service = WorkspaceService(SqlAlchemyWorkspaceStore(database_session_factory))
         service.save_draft(
             token,
@@ -337,6 +345,7 @@ def test_json_and_sse_numeric_outcomes_match_persisted_terminal_payload(
             expected_revision=1,
             expected_field="duration_days",
             last_question_kind="duration_days",
+            auth_session_id=login.session_id,
         )
 
     json_response = json_client.post("/api/chat/messages", json={"content": "111"})

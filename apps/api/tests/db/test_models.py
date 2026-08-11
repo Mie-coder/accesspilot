@@ -20,6 +20,7 @@ def test_metadata_contains_day4_tables() -> None:
     assert set(load_tables()) == {
         "access_grants",
         "access_requests",
+        "auth_sessions",
         "approval_cases",
         "approval_steps",
         "audit_events",
@@ -45,6 +46,43 @@ def test_workspace_table_stores_isolated_demo_state() -> None:
     assert workspace.c.actor_id.nullable is False
     assert workspace.c.draft.nullable is True
     assert workspace.c.fault_mode.nullable is True
+
+
+def test_auth_session_stores_only_hashes_and_binds_employee_workspace() -> None:
+    """T19 sessions bind a directory employee/workspace without raw secrets."""
+
+    session = load_tables()["auth_sessions"]
+    assert {
+        "id",
+        "token_hash",
+        "employee_id",
+        "workspace_id",
+        "csrf_hash",
+        "expires_at",
+        "revoked_at",
+        "created_at",
+    } == set(session.c.keys())
+    assert session.c.token_hash.unique is True
+    assert session.c.csrf_hash.nullable is False
+    assert session.c.employee_id.nullable is False
+    assert session.c.workspace_id.nullable is False
+    assert session.c.workspace_id.unique is True
+    assert {key.target_fullname for key in session.c.employee_id.foreign_keys} == {
+        "employees.employee_id"
+    }
+    assert {key.target_fullname for key in session.c.workspace_id.foreign_keys} == {
+        "workspaces.id"
+    }
+
+
+def test_active_cursor_requires_an_auth_session() -> None:
+    workspace = load_tables()["workspaces"]
+    assert any(
+        isinstance(constraint, CheckConstraint)
+        and str(constraint.sqltext)
+        == "cursor_expected_field IS NULL OR cursor_auth_session_id IS NOT NULL"
+        for constraint in workspace.constraints
+    )
 
 
 def test_employee_manager_points_back_to_employee_table() -> None:

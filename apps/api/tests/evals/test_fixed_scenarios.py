@@ -1,4 +1,4 @@
-"""T08 的 12 条固定 API 评测；全部使用虚构数据和确定性适配器。"""
+"""T19 当前仍保持原语义的八条 T08 API 评测。"""
 import re
 from collections.abc import Iterator
 from uuid import UUID
@@ -11,7 +11,13 @@ from sqlalchemy.orm import Session, sessionmaker
 from accesspilot.agent.embeddings import DeterministicEmbeddingModel
 from accesspilot.agent.structured_reply import MalformedStructuredOutputError
 from accesspilot.config import Settings
-from accesspilot.db.models import AccessGrantRecord, PolicyChunkRecord, WorkspaceRecord
+from accesspilot.db.models import (
+    AccessGrantRecord,
+    ApprovalCaseRecord,
+    ApprovalStepRecord,
+    PolicyChunkRecord,
+    WorkspaceRecord,
+)
 from accesspilot.db.seed import seed_catalog
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore, hash_workspace_token
 from accesspilot.domain.models import ParsedReply
@@ -19,6 +25,7 @@ from accesspilot.main import create_app
 from accesspilot.provisioning import IamOutcome, SimulatedIamProvisioner
 from accesspilot.rag.policies import index_policy_embeddings
 from accesspilot.risk.review import DeterministicRiskReviewModel
+from support.auth import login_as
 
 
 class FailingEmbeddingModel:
@@ -65,6 +72,35 @@ class CountingIamProvisioner(SimulatedIamProvisioner):
         )
 
 
+class SequencedIamProvisioner:
+    """Return fixed provision/query outcomes and record external boundary calls."""
+
+    def __init__(
+        self,
+        *,
+        provision_outcomes: list[IamOutcome],
+        query_outcomes: list[IamOutcome],
+    ) -> None:
+        self.provision_outcomes = provision_outcomes
+        self.query_outcomes = query_outcomes
+        self.provision_calls: list[str] = []
+        self.query_calls: list[str] = []
+
+    def provision(
+        self,
+        *,
+        request_id: UUID,
+        idempotency_key: str,
+        fault_mode: str | None,
+    ) -> IamOutcome:
+        self.provision_calls.append(idempotency_key)
+        return self.provision_outcomes.pop(0)
+
+    def query_status(self, *, idempotency_key: str) -> IamOutcome:
+        self.query_calls.append(idempotency_key)
+        return self.query_outcomes.pop(0)
+
+
 @pytest.fixture
 def eval_iam() -> CountingIamProvisioner:
     return CountingIamProvisioner()
@@ -89,6 +125,7 @@ def eval_client(
             iam_provisioner=eval_iam,
         )
     )
+    login_as(client)
     yield client
     with database_session_factory() as session:
         for chunk in session.scalars(select(PolicyChunkRecord)).all():
@@ -97,18 +134,13 @@ def eval_client(
 
 
 def create_workspace(client: TestClient) -> None:
-    assert client.post("/api/workspaces").status_code == 201
-    assert client.post(
-        "/api/demo/session",
-        json={"employee_id": "EMP-001"},
-    ).status_code == 200
+    login_as(client)
 
 
 def save_draft(client: TestClient, *, confirmed: bool) -> None:
     response = client.post(
         "/api/drafts/preview",
         json={
-            "employee_id": "EMP-001",
             "entitlement_id": "insighthub.customer_export",
             "duration_days": 14,
             "justification": "核验虚构季度客户分析数据",
@@ -132,22 +164,29 @@ def start_case(client: TestClient, request_id: str) -> str:
     return response.json()["approval_case_id"]
 
 
-def switch_identity(client: TestClient, employee_id: str) -> None:
-    response = client.post(
-        "/api/demo/session",
-        json={"employee_id": employee_id},
-    )
-    assert response.status_code == 200
+def preset_approved_case(
+    database_session_factory: sessionmaker[Session],
+    request_id: str,
+) -> None:
+    """Prepare an approved DB fact without pretending T20/T22 APIs exist."""
 
-
-def approve_all(client: TestClient, case_id: str) -> None:
-    for actor_id in ("EMP-002", "EMP-003"):
-        switch_identity(client, actor_id)
-        response = client.post(
-            f"/api/approval-cases/{case_id}/decisions",
-            json={"decision": "approve"},
+    with database_session_factory() as session:
+        case = session.scalar(
+            select(ApprovalCaseRecord).where(
+                ApprovalCaseRecord.request_id == UUID(request_id)
+            )
         )
-        assert response.status_code == 200
+        assert case is not None
+        case.approval_status = "approved"
+        steps = session.scalars(
+            select(ApprovalStepRecord).where(
+                ApprovalStepRecord.approval_case_id == case.id
+            )
+        ).all()
+        assert steps
+        for step in steps:
+            step.step_status = "approved"
+        session.commit()
 
 
 def count_grants(
@@ -162,31 +201,11 @@ def count_grants(
         ) or 0
 
 
-def test_eval_01_golden_path_creates_auditable_grant(
-    eval_client: TestClient,
-    database_session_factory: sessionmaker[Session],
-) -> None:
-    request_id = submit_request(eval_client)
-    case_id = start_case(eval_client, request_id)
-    approve_all(eval_client, case_id)
-    provisioned = eval_client.post(
-        f"/api/requests/{request_id}/provision",
-        json={"idempotency_key": f"eval-golden-{request_id}"},
-    )
-    detail = eval_client.get(f"/api/requests/{request_id}")
-
-    assert provisioned.json()["provisioning_status"] == "succeeded"
-    assert detail.json()["approval"]["approval_status"] == "approved"
-    assert detail.json()["provisioning"]["access_granted"] is True
-    assert detail.json()["risk_review"]["citations"]
-    assert count_grants(database_session_factory, request_id) == 1
-
-
 def test_eval_02_missing_fields_remain_a_draft(eval_client: TestClient) -> None:
     create_workspace(eval_client)
     preview = eval_client.post(
         "/api/drafts/preview",
-        json={"employee_id": "EMP-001", "confirmed": False},
+        json={"confirmed": False},
     )
     submitted = eval_client.post("/api/requests")
 
@@ -235,70 +254,56 @@ def test_eval_04_policy_failure_is_recoverable_without_approval(
     assert detail.json()["approval"] is None
 
 
-def test_eval_05_data_owner_cannot_approve_out_of_order(
-    eval_client: TestClient,
-) -> None:
-    request_id = submit_request(eval_client)
-    case_id = start_case(eval_client, request_id)
-
-    switch_identity(eval_client, "EMP-003")
-    response = eval_client.post(
-        f"/api/approval-cases/{case_id}/decisions",
-        json={"decision": "approve"},
-    )
-    detail = eval_client.get(f"/api/requests/{request_id}")
-
-    assert response.status_code == 409
-    assert response.json() == {"detail": "前序审批尚未完成"}
-    assert [step["step_status"] for step in detail.json()["approval"]["steps"]] == [
-        "pending",
-        "waiting",
-    ]
-
-
-def test_eval_06_rejection_is_terminal(eval_client: TestClient) -> None:
-    request_id = submit_request(eval_client)
-    case_id = start_case(eval_client, request_id)
-    switch_identity(eval_client, "EMP-002")
-    rejected = eval_client.post(
-        f"/api/approval-cases/{case_id}/decisions",
-        json={"decision": "reject", "comment": "无需导出"},
-    )
-    switch_identity(eval_client, "EMP-003")
-    owner_attempt = eval_client.post(
-        f"/api/approval-cases/{case_id}/decisions",
-        json={"decision": "approve"},
-    )
-    provision_attempt = eval_client.post(
-        f"/api/requests/{request_id}/provision",
-        json={"idempotency_key": f"eval-rejected-{request_id}"},
-    )
-
-    assert rejected.json()["approval_status"] == "rejected"
-    assert owner_attempt.status_code == 409
-    assert provision_attempt.status_code == 409
-
-
 def test_eval_07_timeout_recovers_by_querying_original_operation(
-    eval_client: TestClient,
     database_session_factory: sessionmaker[Session],
 ) -> None:
-    request_id = submit_request(eval_client)
-    case_id = start_case(eval_client, request_id)
-    approve_all(eval_client, case_id)
-    eval_client.post(
-        "/api/demo/fault-mode",
-        json={"fault_mode": "iam_timeout"},
+    iam = SequencedIamProvisioner(
+        provision_outcomes=[IamOutcome(status="unknown", message="IAM 响应超时，结果未知")],
+        query_outcomes=[IamOutcome(status="succeeded")],
     )
-    unknown = eval_client.post(
-        f"/api/requests/{request_id}/provision",
-        json={"idempotency_key": f"eval-timeout-{request_id}"},
+    embedding_model = DeterministicEmbeddingModel()
+    with database_session_factory() as session:
+        seed_catalog(session)
+        index_policy_embeddings(session, embedding_model)
+    client = TestClient(
+        create_app(
+            store=SqlAlchemyWorkspaceStore(database_session_factory),
+            settings=Settings(demo_mode_enabled=True),
+            session_factory=database_session_factory,
+            embedding_model=embedding_model,
+            risk_review_model=DeterministicRiskReviewModel(),
+            iam_provisioner=iam,
+        )
     )
-    recovered = eval_client.post(f"/api/requests/{request_id}/provision/recover")
+    login_as(client)
+    request_id = submit_request(client)
+    start_case(client, request_id)
+    preset_approved_case(database_session_factory, request_id)
+    key = f"eval-timeout-{request_id}"
 
+    unknown = client.post(
+        f"/api/requests/{request_id}/provision",
+        json={"idempotency_key": key},
+    )
+    replay = client.post(
+        f"/api/requests/{request_id}/provision",
+        json={"idempotency_key": key},
+    )
+    recovered = client.post(f"/api/requests/{request_id}/provision/recover")
+    recovered_again = client.post(f"/api/requests/{request_id}/provision/recover")
+
+    assert unknown.status_code == 200
     assert unknown.json()["provisioning_status"] == "unknown"
     assert unknown.json()["access_granted"] is False
+    assert replay.json()["provisioning_attempt_id"] == unknown.json()[
+        "provisioning_attempt_id"
+    ]
     assert recovered.json()["provisioning_status"] == "succeeded"
+    assert recovered_again.json()["provisioning_attempt_id"] == recovered.json()[
+        "provisioning_attempt_id"
+    ]
+    assert iam.provision_calls == [key]
+    assert iam.query_calls == [key]
     assert count_grants(database_session_factory, request_id) == 1
 
 
@@ -308,8 +313,8 @@ def test_eval_08_duplicate_retry_reuses_one_attempt_and_grant(
     database_session_factory: sessionmaker[Session],
 ) -> None:
     request_id = submit_request(eval_client)
-    case_id = start_case(eval_client, request_id)
-    approve_all(eval_client, case_id)
+    start_case(eval_client, request_id)
+    preset_approved_case(database_session_factory, request_id)
     key = f"eval-idempotent-{request_id}"
 
     first = eval_client.post(
@@ -321,6 +326,8 @@ def test_eval_08_duplicate_retry_reuses_one_attempt_and_grant(
         json={"idempotency_key": key},
     )
 
+    assert first.status_code == 200
+    assert first.json()["provisioning_status"] == "succeeded"
     assert first.json()["provisioning_attempt_id"] == second.json()[
         "provisioning_attempt_id"
     ]
@@ -361,7 +368,7 @@ def test_eval_10_quota_exhaustion_keeps_history_readable(
     database_session_factory: sessionmaker[Session],
 ) -> None:
     create_workspace(eval_client)
-    token = eval_client.cookies.get("accesspilot_workspace")
+    token = eval_client.cookies.get("accesspilot_session")
     assert token is not None
     with database_session_factory() as session:
         workspace = session.scalar(
@@ -384,18 +391,6 @@ def test_eval_10_quota_exhaustion_keeps_history_readable(
     assert "申请 7 天" not in history.text
 
 
-def test_eval_11_workspace_cannot_read_another_request(
-    eval_client: TestClient,
-) -> None:
-    request_id = submit_request(eval_client)
-    other_browser = TestClient(eval_client.app)
-    create_workspace(other_browser)
-
-    response = other_browser.get(f"/api/requests/{request_id}")
-
-    assert response.status_code == 404
-
-
 def test_eval_12_two_malformed_replies_fail_closed(
     database_session_factory: sessionmaker[Session],
 ) -> None:
@@ -411,14 +406,10 @@ def test_eval_12_two_malformed_replies_fail_closed(
     create_workspace(client)
 
     response = client.post("/api/chat/messages", json={"content": "帮我申请权限"})
-    assert client.post("/api/demo/session", json={"employee_id": "EMP-001"}).status_code == 200
-    quota = client.get("/api/demo/model-quota")
     history = client.get("/api/events?follow=false")
 
     assert response.status_code == 200
     assert response.json()["business_status"] == "recoverable_error"
     assert response.json()["draft"]["confirmed"] is False
-    assert quota.json()["used"] == 2
-    assert quota.json()["retry_consumed"] == 1
     assert model.calls == 2
     assert "MODEL_REPLY_UNAVAILABLE" in history.text

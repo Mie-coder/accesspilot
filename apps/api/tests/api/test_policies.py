@@ -16,6 +16,7 @@ from accesspilot.db.seed import seed_catalog
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
 from accesspilot.main import create_app
 from accesspilot.rag.policies import index_policy_embeddings
+from support.auth import login_as
 
 
 class RecordingEmbeddingModel:
@@ -44,7 +45,7 @@ def _client(
             session.commit()
         else:
             assert index_policy_embeddings(session, DeterministicEmbeddingModel()) == 8
-    return TestClient(
+    client = TestClient(
         create_app(
             settings=Settings(demo_mode_enabled=False),
             store=SqlAlchemyWorkspaceStore(factory),
@@ -53,6 +54,8 @@ def _client(
             embedding_model=embedding_model or DeterministicEmbeddingModel(),
         )
     )
+    login_as(client)
+    return client
 
 
 def test_policy_catalog_api_returns_all_eight_records(

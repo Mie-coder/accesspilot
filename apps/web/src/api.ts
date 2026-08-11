@@ -1,13 +1,11 @@
 import type {
   ApprovalInbox,
   ChatTurn,
-  ModelQuota,
   RequestDraft,
   RequestResult,
   RequestDetail,
   WorkspaceEvent,
   WorkspaceIdentity,
-  DemoSession,
   WorkspaceSnapshot,
   AccessOverview,
   DraftPreviewResponse,
@@ -15,6 +13,23 @@ import type {
   PolicyAnswer,
   PolicyCatalogItem,
 } from './types'
+
+export interface AuthSessionPayload {
+  csrf_token: string
+  principal: WorkspaceIdentity
+  expires_at: string
+}
+
+/** Fields accepted by the server-owned draft preview DTO. */
+export type DraftPreviewInput = Omit<RequestDraft, 'employee_id'>
+
+// Kept in module memory only.  The server rotates this value on every
+// GET /api/auth/session; it is never written to localStorage/sessionStorage.
+let csrfToken: string | null = null
+
+export function resetAuthClientState(): void {
+  csrfToken = null
+}
 
 export class ApiError extends Error {
   readonly status: number
@@ -235,16 +250,19 @@ export async function* streamChatMessage(
   content: string,
   signal?: AbortSignal,
 ): AsyncGenerator<TurnSseFrame> {
+  const headers = new Headers({
+    Accept: 'text/event-stream',
+    'Content-Type': 'application/json',
+  })
+  if (csrfToken) headers.set('X-CSRF-Token', csrfToken)
   const response = await fetch('/api/chat/messages/stream', {
     method: 'POST',
     credentials: 'include',
-    headers: {
-      Accept: 'text/event-stream',
-      'Content-Type': 'application/json',
-    },
+    headers,
     body: JSON.stringify({ content }),
     signal,
   })
+  notifyUnauthorized(response)
   if (!response.ok) throw new ApiError(response.status, await errorMessage(response))
 
   let terminalSeen = false
@@ -279,6 +297,7 @@ export async function* subscribeWorkspaceEvents(
     headers: { Accept: 'text/event-stream', 'Last-Event-ID': String(afterId) },
     signal: options.signal,
   })
+  notifyUnauthorized(response)
   if (!response.ok) throw new ApiError(response.status, await errorMessage(response))
   options.onOpen?.()
   for await (const frame of parseSseStream(responseStream(response), options.signal)) {
@@ -301,15 +320,25 @@ async function errorMessage(response: Response): Promise<string> {
   return `请求失败（${response.status}）`
 }
 
+function notifyUnauthorized(response: Response): void {
+  if (response.status === 401 && typeof window !== 'undefined') {
+    window.dispatchEvent(new Event('accesspilot:unauthorized'))
+  }
+}
+
 async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const method = (init.method ?? 'GET').toUpperCase()
+  const requestHeaders = new Headers(init.headers)
+  requestHeaders.set('Accept', 'application/json')
+  if (method !== 'GET' && method !== 'HEAD' && !url.endsWith('/auth/login') && csrfToken) {
+    requestHeaders.set('X-CSRF-Token', csrfToken)
+  }
   const response = await fetch(url, {
     ...init,
     credentials: 'include',
-    headers: {
-      Accept: 'application/json',
-      ...init.headers,
-    },
+    headers: requestHeaders,
   })
+  notifyUnauthorized(response)
   if (!response.ok) {
     throw new ApiError(response.status, await errorMessage(response))
   }
@@ -321,16 +350,27 @@ async function readDraft(): Promise<RequestDraft | null> {
   return response.draft
 }
 
-export async function readDemoSession(): Promise<DemoSession> {
-  try {
-    return await requestJson<DemoSession>('/api/demo/session')
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 404) {
-      return { demo_mode_enabled: false, demo_session_active: false, fault_mode: null }
-    }
-    throw error
-  }
+export async function login(accountId: string): Promise<AuthSessionPayload> {
+  const payload = await requestJson<AuthSessionPayload>('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ account_id: accountId }),
+  })
+  csrfToken = payload.csrf_token
+  return payload
+}
 
+export async function readAuthSession(): Promise<AuthSessionPayload> {
+  const payload = await requestJson<AuthSessionPayload>('/api/auth/session')
+  csrfToken = payload.csrf_token
+  return payload
+}
+
+export async function logout(): Promise<void> {
+  // Only clear client state after the server confirms revocation.  A failed
+  // logout must not create a false anonymous state.
+  await requestJson<{ status: string }>('/api/auth/logout', { method: 'POST' })
+  csrfToken = null
 }
 
 export function parseSseEvents(text: string): WorkspaceEvent[] {
@@ -368,6 +408,7 @@ export async function replayEvents(
     headers: { Accept: 'text/event-stream', 'Last-Event-ID': String(afterId) },
     signal,
   })
+  notifyUnauthorized(response)
   if (!response.ok) {
     throw new ApiError(response.status, await errorMessage(response))
   }
@@ -383,18 +424,14 @@ export async function replayEvents(
 }
 
 export async function bootstrapWorkspace(): Promise<WorkspaceSnapshot> {
-  // 后端原子地复用有效 Workspace 或创建新空间，首次加载无需先触发 401/404。
-  await requestJson<{ status: string }>('/api/workspaces/ensure', { method: 'POST' })
-  const [identity, draft, events, demoSession] = await Promise.all([
-    requestJson<WorkspaceIdentity>('/api/workspaces/identity'),
+  const authSession = await readAuthSession()
+  const [draft, events] = await Promise.all([
     readDraft(),
     replayEvents(),
-    readDemoSession(),
   ])
   return {
-    identity,
+    identity: authSession.principal,
     draft,
-    demoSession,
     events,
     lastEventId: events.at(-1)?.id ?? 0,
   }
@@ -432,7 +469,7 @@ export async function resolveEntitlement(
 
 /** Persist a preview/revalidation result through the deterministic draft endpoint. */
 export async function previewDraft(
-  draft: RequestDraft,
+  draft: DraftPreviewInput,
   signal?: AbortSignal,
 ): Promise<DraftPreviewResponse> {
   return requestJson<DraftPreviewResponse>('/api/drafts/preview', {
@@ -504,16 +541,6 @@ export async function decideApproval(
   })
 }
 
-export async function setFaultMode(
-  faultMode: 'iam_failure' | 'iam_timeout' | null,
-): Promise<void> {
-  await requestJson('/api/demo/fault-mode', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fault_mode: faultMode }),
-  })
-}
-
 export async function provisionRequest(requestId: string): Promise<void> {
   await requestJson(`/api/requests/${encodeURIComponent(requestId)}/provision`, {
     method: 'POST',
@@ -526,27 +553,4 @@ export async function recoverProvisioning(requestId: string): Promise<void> {
   await requestJson(`/api/requests/${encodeURIComponent(requestId)}/provision/recover`, {
     method: 'POST',
   })
-}
-export async function enterDemoSession(
-  employeeId: string,
-): Promise<DemoSession & WorkspaceIdentity> {
-  return requestJson<DemoSession & WorkspaceIdentity>('/api/demo/session', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ employee_id: employeeId }),
-  })
-}
-
-export async function exitDemoSession(): Promise<DemoSession & WorkspaceIdentity> {
-  return requestJson<DemoSession & WorkspaceIdentity>('/api/demo/session/exit', {
-    method: 'POST',
-  })
-}
-
-export async function resetDemoWorkspace(): Promise<void> {
-  await requestJson<{ status: string }>('/api/demo/reset', { method: 'POST' })
-}
-
-export async function readDemoModelQuota(): Promise<ModelQuota> {
-  return requestJson<ModelQuota>('/api/demo/model-quota')
 }

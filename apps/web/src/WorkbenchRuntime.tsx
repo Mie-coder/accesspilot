@@ -34,11 +34,10 @@ import { WorkbenchContext, type WorkbenchContextValue } from './workbench-contex
 
 const requiredFields: Array<keyof Pick<
   RequestDraft,
-  'employee_id' | 'entitlement_id' | 'duration_days' | 'justification'
->> = ['employee_id', 'entitlement_id', 'duration_days', 'justification']
+  'entitlement_id' | 'duration_days' | 'justification'
+>> = ['entitlement_id', 'duration_days', 'justification']
 
-function missingFields(draft: RequestDraft | null): string[] {
-  if (draft === null) return [...requiredFields]
+function missingFields(draft: RequestDraft): string[] {
   return requiredFields.filter((field) => draft[field] === null)
 }
 
@@ -180,6 +179,13 @@ export function WorkbenchRuntime({
   const [retryableInterruption, setRetryableInterruption] = useState(false)
   const [connectionState, setConnectionState] = useState<ConnectionState>('connected')
   const lastEventIdRef = useRef(snapshot.lastEventId)
+  const principalDraft = useMemo<RequestDraft>(() => ({
+    employee_id: identity.employee_id,
+    entitlement_id: draft?.entitlement_id ?? null,
+    duration_days: draft?.duration_days ?? null,
+    justification: draft?.justification ?? null,
+    confirmed: draft?.confirmed ?? false,
+  }), [draft, identity.employee_id])
 
   const onTurn = useCallback((turn: ChatTurn) => {
     setDraft(turn.draft)
@@ -324,8 +330,7 @@ export function WorkbenchRuntime({
   const selectEntitlement = useCallback(async (
     entitlementId: string,
   ): Promise<EntitlementSelectionResult> => {
-    const candidateDraft: RequestDraft = {
-      employee_id: identity.employee_id,
+    const candidateDraft = {
       entitlement_id: entitlementId,
       duration_days: draft?.duration_days ?? null,
       justification: draft?.justification ?? null,
@@ -357,9 +362,8 @@ export function WorkbenchRuntime({
   const context = useMemo<WorkbenchContextValue>(
     () => ({
       identity,
-      draft,
-      missingFields: missingFields(draft),
-      demoSession: snapshot.demoSession,
+      draft: principalDraft,
+      missingFields: missingFields(principalDraft),
       events,
       businessStatus,
       error,
@@ -382,6 +386,7 @@ export function WorkbenchRuntime({
       connectionState,
       selectEntitlement,
       submit,
+      principalDraft,
     ],
   )
 

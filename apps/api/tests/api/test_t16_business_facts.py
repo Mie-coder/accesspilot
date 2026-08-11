@@ -26,6 +26,7 @@ from accesspilot.db.workspace_store import (
     hash_workspace_token,
 )
 from accesspilot.main import create_app
+from support.auth import login_as
 
 
 def build_client(
@@ -48,9 +49,8 @@ def build_client(
 
 
 def create_workspace(client: TestClient) -> str:
-    response = client.post("/api/workspaces")
-    assert response.status_code == 201
-    token = client.cookies.get("accesspilot_workspace")
+    login_as(client)
+    token = client.cookies.get("accesspilot_session")
     assert token is not None
     return token
 
@@ -275,10 +275,10 @@ def test_access_overview_uses_empty_state_when_actor_has_no_eligible_access(
 ) -> None:
     client = build_client(database_session_factory)
     create_workspace(client)
-    entered = client.post("/api/demo/session", json={"employee_id": "EMP-004"})
-    assert entered.status_code == 200
+    admin_client = TestClient(client.app)
+    login_as(admin_client, "EMP-004")
 
-    response = client.get("/api/access-overview")
+    response = admin_client.get("/api/access-overview")
 
     assert response.status_code == 200
     assert response.json() == {"items": []}
@@ -564,7 +564,6 @@ def test_entitlement_resolution_returns_typed_ambiguous_candidates_without_draft
     preview = client.post(
         "/api/drafts/preview",
         json={
-            "employee_id": "EMP-001",
             "entitlement_id": "codeforge.repo_read",
             "duration_days": 14,
             "justification": "原有申请事实",
@@ -605,7 +604,6 @@ def test_selected_entitlement_is_revalidated_and_invalidates_old_confirmation(
     original = client.post(
         "/api/drafts/preview",
         json={
-            "employee_id": "EMP-001",
             "entitlement_id": "insighthub.customer_export",
             "duration_days": 14,
             "justification": "原有申请事实",
@@ -630,7 +628,6 @@ def test_selected_entitlement_is_revalidated_and_invalidates_old_confirmation(
     revalidated = client.post(
         "/api/drafts/preview",
         json={
-            "employee_id": "EMP-001",
             "entitlement_id": selected_code,
             "duration_days": 14,
             "justification": "原有申请事实",

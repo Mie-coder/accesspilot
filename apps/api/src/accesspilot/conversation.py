@@ -421,12 +421,18 @@ def _apply_cursor_transition(
     *,
     workspace_token: str,
     turn: ConversationTurn,
+    auth_session_id: str | None = None,
 ) -> None:
     """在成功终态后激活下一追问；流中断时由调用方不执行此函数。"""
 
+    if auth_session_id is None:
+        raise ConversationInputError("当前对话缺少 AuthSession")
     if turn.intent in _CURSOR_BREAKING_INTENTS:
         # 明确切出申请收集的问题不能让旧 Cursor 继续解释下一轮数字。
-        workspace_service.clear_cursor(workspace_token)
+        workspace_service.clear_cursor(
+            workspace_token,
+            auth_session_id=auth_session_id,
+        )
         return
     if turn.intent != "request_access":
         return
@@ -437,6 +443,7 @@ def _apply_cursor_transition(
             expected_revision=turn.draft_revision,
             expected_field=expected_field,
             last_question_kind=expected_field,
+            auth_session_id=auth_session_id,
         )
     elif turn.business_status == "awaiting_confirmation":
         workspace_service.activate_cursor(
@@ -444,9 +451,13 @@ def _apply_cursor_transition(
             expected_revision=turn.draft_revision,
             expected_field="confirmation",
             last_question_kind="confirmation",
+            auth_session_id=auth_session_id,
         )
     elif turn.business_status not in {"recoverable_error", "validation_failed"}:
-        workspace_service.clear_cursor(workspace_token)
+        workspace_service.clear_cursor(
+            workspace_token,
+            auth_session_id=auth_session_id,
+        )
 
 
 def apply_cursor_transition(
@@ -454,6 +465,7 @@ def apply_cursor_transition(
     *,
     workspace_token: str,
     turn: ConversationTurn,
+    auth_session_id: str | None = None,
 ) -> None:
     """公开给 SSE 终态收尾使用的 Cursor 状态转换。"""
 
@@ -461,6 +473,7 @@ def apply_cursor_transition(
         workspace_service,
         workspace_token=workspace_token,
         turn=turn,
+        auth_session_id=auth_session_id,
     )
 
 
@@ -515,10 +528,16 @@ def _numeric_follow_up(
     workspace_service: WorkspaceService,
     workspace_token: str,
     content: str,
+    auth_session_id: str | None = None,
 ) -> ConversationTurn:
     """不调用模型地处理纯数字输入，并按活动 Cursor 选择语义。"""
 
-    workspace = workspace_service.get(workspace_token)
+    if auth_session_id is None:
+        raise ConversationInputError("当前对话缺少 AuthSession")
+    workspace = workspace_service.get(
+        workspace_token,
+        auth_session_id=auth_session_id,
+    )
     cursor = workspace.active_cursor()
     visible_draft = workspace.draft
     if (
@@ -625,6 +644,7 @@ def _numeric_follow_up(
                     expected_revision=cursor.draft_revision,
                     expected_field="duration_days",
                     draft=proposed,
+                    auth_session_id=auth_session_id,
                 )
             except CursorConflictError:
                 assistant_message = "这条期限上下文已经变化，请重新说明申请内容。"
@@ -712,6 +732,7 @@ def _numeric_follow_up(
                     workspace_service,
                     workspace_token=workspace_token,
                     turn=turn,
+                    auth_session_id=auth_session_id,
                 )
             return turn
 
@@ -749,14 +770,20 @@ def _process_chat_message(
     model: StructuredReplyModel,
     router: IntentRouter | None = None,
     policy_service: PolicyService | None = None,
+    auth_session_id: str | None = None,
 ) -> ConversationTurn:
     """先路由再执行；只有申请意图消费模型额度并修改草稿。"""
 
+    if auth_session_id is None:
+        raise ConversationInputError("当前对话缺少 AuthSession")
     normalized_content = content.strip()
     if not normalized_content:
         raise ConversationInputError("消息不能为空")
 
-    workspace = workspace_service.get(workspace_token)
+    workspace = workspace_service.get(
+        workspace_token,
+        auth_session_id=auth_session_id,
+    )
     entry_draft_revision = workspace.draft_revision
     active_policy_service = policy_service or PolicyService(
         embedding_model=DeterministicEmbeddingModel()
@@ -797,7 +824,10 @@ def _process_chat_message(
     if route.intent in _CURSOR_BREAKING_INTENTS:
         # 显式换题一经可靠路由就立即失效旧 Cursor；流式回答即使
         # 随后中断/报错也不能让旧期限解释下一轮数字。
-        workspace_service.clear_cursor(workspace_token)
+        workspace_service.clear_cursor(
+            workspace_token,
+            auth_session_id=auth_session_id,
+        )
     # 纯数字输入必须在模型配额和结构化解析之前闭合；活动 Cursor 才能
     # 将其提升为申请续答，否则固定返回 unknown/needs_clarification。
     if _is_numeric_input(normalized_content):
@@ -806,6 +836,7 @@ def _process_chat_message(
             workspace_service=workspace_service,
             workspace_token=workspace_token,
             content=normalized_content,
+            auth_session_id=auth_session_id,
         )
     if turn_id is not None:
         _append_event(
@@ -900,6 +931,7 @@ def _process_chat_message(
                 workspace_service,
                 workspace_token=workspace_token,
                 turn=turn,
+                auth_session_id=auth_session_id,
             )
         return turn
 
@@ -1080,11 +1112,15 @@ def _process_chat_message(
                 workspace_token,
                 expected_revision=entry_draft_revision,
                 draft=draft,
+                auth_session_id=auth_session_id,
             )
         except DraftRevisionConflictError:
             # The model parsed an older snapshot while another request advanced
             # the draft. Keep the newer fact and close this turn safely.
-            latest_workspace = workspace_service.get(workspace_token)
+            latest_workspace = workspace_service.get(
+                workspace_token,
+                auth_session_id=auth_session_id,
+            )
             latest_draft = latest_workspace.draft
             if (
                 latest_draft is not None
@@ -1217,6 +1253,7 @@ def _process_chat_message(
             workspace_service,
             workspace_token=workspace_token,
             turn=turn,
+            auth_session_id=auth_session_id,
         )
     return turn
 
@@ -1230,6 +1267,7 @@ def handle_chat_message(
     model: StructuredReplyModel,
     router: IntentRouter | None = None,
     policy_service: PolicyService | None = None,
+    auth_session_id: str | None = None,
 ) -> ConversationTurn:
     """旧 JSON 入口：保留完整 terminal 事件和原有返回合同。"""
 
@@ -1241,6 +1279,7 @@ def handle_chat_message(
         model=model,
         router=router,
         policy_service=policy_service,
+        auth_session_id=auth_session_id,
     )
 
 
@@ -1254,6 +1293,7 @@ def prepare_chat_message(
     turn_id: str,
     router: IntentRouter | None = None,
     policy_service: PolicyService | None = None,
+    auth_session_id: str | None = None,
 ) -> ConversationTurn:
     """流式入口第一阶段：复用字段/工具校验，但不写 assistant terminal。"""
 
@@ -1269,6 +1309,7 @@ def prepare_chat_message(
             model=model,
             router=router,
             policy_service=policy_service,
+            auth_session_id=auth_session_id,
         )
     finally:
         _TURN_STARTED.reset(started_token)

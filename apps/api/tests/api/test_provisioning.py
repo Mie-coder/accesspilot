@@ -1,5 +1,4 @@
 from datetime import UTC, datetime
-from hashlib import sha256
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
@@ -15,28 +14,41 @@ from accesspilot.db.models import (
     WorkspaceRecord,
 )
 from accesspilot.db.seed import seed_catalog
-from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
+from accesspilot.db.workspace_store import (
+    SqlAlchemyWorkspaceStore,
+    hash_workspace_token,
+)
 from accesspilot.main import create_app
 from accesspilot.provisioning import SimulatedIamProvisioner
 from accesspilot.risk.review import DeterministicRiskReviewModel
+from support.auth import login_as
 
 
 def build_approved_request(
     database_session_factory: sessionmaker[Session],
-    *,
-    fault_mode: str | None = None,
 ) -> tuple[TestClient, UUID]:
-    token = f"provisioning-api-{uuid4()}"
     with database_session_factory() as session:
         seed_catalog(session)
-        workspace = WorkspaceRecord(
-            token_hash=sha256(token.encode()).hexdigest(),
-            fault_mode=fault_mode,
-            demo_actor_id="EMP-001" if fault_mode is not None else None,
-            demo_session_active=fault_mode is not None,
+    client = TestClient(
+        create_app(
+            store=SqlAlchemyWorkspaceStore(database_session_factory),
+            settings=Settings(demo_mode_enabled=True),
+            session_factory=database_session_factory,
+            embedding_model=DeterministicEmbeddingModel(),
+            risk_review_model=DeterministicRiskReviewModel(),
+            iam_provisioner=SimulatedIamProvisioner(),
         )
-        session.add(workspace)
-        session.flush()
+    )
+    login_as(client)
+    token = client.cookies.get("accesspilot_session")
+    assert token is not None
+    with database_session_factory() as session:
+        workspace = session.scalar(
+            select(WorkspaceRecord).where(
+                WorkspaceRecord.token_hash == hash_workspace_token(token)
+            )
+        )
+        assert workspace is not None
         request = AccessRequestRecord(
             workspace_id=workspace.id,
             requester_id="EMP-001",
@@ -57,18 +69,6 @@ def build_approved_request(
         )
         session.commit()
         request_id = request.id
-
-    client = TestClient(
-        create_app(
-            store=SqlAlchemyWorkspaceStore(database_session_factory),
-            settings=Settings(demo_mode_enabled=True),
-            session_factory=database_session_factory,
-            embedding_model=DeterministicEmbeddingModel(),
-            risk_review_model=DeterministicRiskReviewModel(),
-            iam_provisioner=SimulatedIamProvisioner(),
-        )
-    )
-    client.cookies.set("accesspilot_workspace", token)
     return client, request_id
 
 
@@ -108,59 +108,12 @@ def test_api_success_replay_creates_one_grant(
     assert grant_count(database_session_factory, request_id) == 1
 
 
-def test_api_timeout_requires_status_recovery_before_grant(
+def test_legacy_fault_control_is_closed_before_provisioning(
     database_session_factory: sessionmaker[Session],
 ) -> None:
-    client, request_id = build_approved_request(
-        database_session_factory,
-        fault_mode="iam_timeout",
-    )
-    key = f"api-timeout-{uuid4()}"
-
-    unknown = client.post(
-        f"/api/requests/{request_id}/provision",
-        json={"idempotency_key": key},
-    )
-
-    assert unknown.status_code == 200
-    assert unknown.json()["provisioning_status"] == "unknown"
-    assert unknown.json()["access_granted"] is False
-    assert grant_count(database_session_factory, request_id) == 0
-
-    recovered = client.post(f"/api/requests/{request_id}/provision/recover")
-
-    assert recovered.status_code == 200
-    assert recovered.json()["provisioning_status"] == "succeeded"
-    assert recovered.json()["access_granted"] is True
-    assert grant_count(database_session_factory, request_id) == 1
-
-
-def test_api_failure_retries_same_key_after_fault_is_cleared(
-    database_session_factory: sessionmaker[Session],
-) -> None:
-    client, request_id = build_approved_request(
-        database_session_factory,
-        fault_mode="iam_failure",
-    )
-    key = f"api-failure-{uuid4()}"
-
-    failed = client.post(
-        f"/api/requests/{request_id}/provision",
-        json={"idempotency_key": key},
-    )
-    assert failed.json()["provisioning_status"] == "failed"
-    assert failed.json()["access_granted"] is False
-
+    client, _ = build_approved_request(database_session_factory)
     cleared = client.post(
         "/api/demo/fault-mode",
         json={"fault_mode": None},
     )
-    retried = client.post(
-        f"/api/requests/{request_id}/provision",
-        json={"idempotency_key": key},
-    )
-
-    assert cleared.json() == {"fault_mode": None}
-    assert retried.json()["provisioning_status"] == "succeeded"
-    assert retried.json()["attempt_count"] == 2
-    assert grant_count(database_session_factory, request_id) == 1
+    assert cleared.status_code == 404

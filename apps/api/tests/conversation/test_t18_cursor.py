@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from hashlib import sha256
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -13,10 +14,16 @@ import accesspilot.conversation as conversation_module
 from accesspilot.agent.routing import route_message
 from accesspilot.conversation import (
     ConversationTurn,
-    apply_cursor_transition,
-    handle_chat_message,
     normalized_outcome,
-    prepare_chat_message,
+)
+from accesspilot.conversation import (
+    apply_cursor_transition as _apply_cursor_transition,
+)
+from accesspilot.conversation import (
+    handle_chat_message as _handle_chat_message,
+)
+from accesspilot.conversation import (
+    prepare_chat_message as _prepare_chat_message,
 )
 from accesspilot.db.models import WorkspaceRecord
 from accesspilot.db.seed import seed_catalog
@@ -29,6 +36,25 @@ from accesspilot.workspaces import (
     InMemoryWorkspaceStore,
     WorkspaceService,
 )
+
+AUTH_SESSION_ID = "t18-test-auth-session"
+
+
+def handle_chat_message(*args: Any, **kwargs: Any) -> ConversationTurn:
+    """Use one explicit synthetic AuthSession for direct T18 service tests."""
+
+    kwargs.setdefault("auth_session_id", AUTH_SESSION_ID)
+    return _handle_chat_message(*args, **kwargs)
+
+
+def prepare_chat_message(*args: Any, **kwargs: Any) -> ConversationTurn:
+    kwargs.setdefault("auth_session_id", AUTH_SESSION_ID)
+    return _prepare_chat_message(*args, **kwargs)
+
+
+def apply_cursor_transition(*args: Any, **kwargs: Any) -> None:
+    kwargs.setdefault("auth_session_id", AUTH_SESSION_ID)
+    _apply_cursor_transition(*args, **kwargs)
 
 
 class StaticReplyModel:
@@ -61,13 +87,19 @@ class RacingReplyModel:
     ) -> ParsedReply:
         del user_reply, correction
         self.calls += 1
-        self.service.save_draft(
+        concurrent = self.service.get(
             self.token,
-            RequestDraft(
+            auth_session_id=AUTH_SESSION_ID,
+        )
+        self.service.save_draft_cas(
+            self.token,
+            expected_revision=concurrent.draft_revision,
+            draft=RequestDraft(
                 employee_id="EMP-001",
                 entitlement_id="insighthub.customer_export",
                 justification="并发写入的新业务理由",
             ),
+            auth_session_id=AUTH_SESSION_ID,
         )
         return ParsedReply(duration_days=14)
 
@@ -137,6 +169,7 @@ def isolated_numeric_context(
         expected_revision=1,
         expected_field="duration_days",
         last_question_kind="duration_days",
+        auth_session_id=AUTH_SESSION_ID,
     )
     return workspace.token, service, session_factory
 
@@ -335,6 +368,7 @@ def test_numeric_follow_up_respects_non_duration_cursor(
         expected_revision=1,
         expected_field=expected_field,
         last_question_kind=expected_field,
+        auth_session_id=AUTH_SESSION_ID,
     )
 
     turn = handle_chat_message(
@@ -484,6 +518,7 @@ def test_stale_draft_revision_is_rejected_by_cas() -> None:
             workspace.token,
             expected_revision=0,
             draft=RequestDraft(employee_id="EMP-001", duration_days=7),
+            auth_session_id=AUTH_SESSION_ID,
         )
 
 
@@ -563,9 +598,13 @@ def test_cursor_activation_cannot_overwrite_a_concurrent_draft_revision(
     original_get = service.get
     raced = False
 
-    def get_with_concurrent_draft(token: str):
+    def get_with_concurrent_draft(
+        token: str,
+        *,
+        auth_session_id: str | None = None,
+    ):
         nonlocal raced
-        snapshot = deepcopy(original_get(token))
+        snapshot = deepcopy(original_get(token, auth_session_id=auth_session_id))
         if not raced:
             raced = True
             current = store.get(token)
@@ -586,6 +625,7 @@ def test_cursor_activation_cannot_overwrite_a_concurrent_draft_revision(
             expected_revision=0,
             expected_field="duration_days",
             last_question_kind="duration_days",
+            auth_session_id=AUTH_SESSION_ID,
         )
 
     saved = WorkspaceService(store).get(workspace.token)
@@ -606,13 +646,18 @@ def test_cursor_clear_cannot_overwrite_a_concurrent_draft_revision(
         expected_revision=0,
         expected_field="duration_days",
         last_question_kind="duration_days",
+        auth_session_id=AUTH_SESSION_ID,
     )
     original_get = service.get
     raced = False
 
-    def get_with_concurrent_draft(token: str):
+    def get_with_concurrent_draft(
+        token: str,
+        *,
+        auth_session_id: str | None = None,
+    ):
         nonlocal raced
-        snapshot = deepcopy(original_get(token))
+        snapshot = deepcopy(original_get(token, auth_session_id=auth_session_id))
         if not raced:
             raced = True
             current = store.get(token)
@@ -628,7 +673,10 @@ def test_cursor_clear_cannot_overwrite_a_concurrent_draft_revision(
 
     monkeypatch.setattr(service, "get", get_with_concurrent_draft)
     with pytest.raises(DraftRevisionConflictError):
-        service.clear_cursor(workspace.token)
+        service.clear_cursor(
+            workspace.token,
+            auth_session_id=AUTH_SESSION_ID,
+        )
 
     saved = WorkspaceService(store).get(workspace.token)
     assert saved.draft_revision == 1
@@ -644,6 +692,7 @@ def test_cursor_activation_rejects_a_cursor_bound_to_another_actor() -> None:
     stale_cursor = ConversationCursor(
         workspace_id=workspace.workspace_id or workspace.token,
         actor_id="EMP-002",
+        auth_session_id=AUTH_SESSION_ID,
         draft_revision=0,
         expected_field="duration_days",
         last_question_kind="duration_days",
@@ -654,6 +703,7 @@ def test_cursor_activation_rejects_a_cursor_bound_to_another_actor() -> None:
         workspace.token,
         expected_revision=0,
         cursor=stale_cursor,
+        auth_session_id=AUTH_SESSION_ID,
     )
     assert service.get(workspace.token).active_cursor() is None
 

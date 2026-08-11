@@ -1,7 +1,7 @@
-# AccessPilot v1.2「上下文意图与可信多角色闭环」Tickets（T18 已完成，T19–T25 待开始）
+# AccessPilot v1.2「上下文意图与可信多角色闭环」Tickets（T18–T19 已完成）
 
-**状态：** 用户已于 2026-08-11 确认按 T18 → T25 串行实施；T18 已完成并通过独立验收；T19–T25 待开始；不推送、合并或部署
-**更新时间：** 2026-08-11
+**状态：** 用户已确认按 T18 → T25 串行实施；T18、T19 已独立验收，T20–T25 待开始；不推送、合并或部署
+**更新时间：** 2026-08-12
 **继承基线：** v1.1，HEAD `c683d84`，T01–T17 已完成
 **产品说明书：** `docs/product/accesspilot-product-function-book-v1.2.md`
 **Canonical Spec：** `docs/specs/accesspilot-productized-agent-v1.2.md`
@@ -12,7 +12,7 @@
 - 用户确认后默认严格串行执行 T18 → T25，一次只实现一张；
 - 每张实现 Ticket 先写失败测试，再写最小实现；
 - 每张完成后进行独立只读验证，通过后才允许本地提交；
-- 当前停止点在 T18 完成；T19–T25 尚未开始；
+- 当前停止点在 T20 开始前；T18、T19 已独立验收，T20–T25 尚未开始；
 - 本 Ticket 列表不授权推送、合并、部署或修改正式简历；
 - 到期回收、复杂预算/Attempt、Evidence Lab、完整外键 cutover、真实 SSO 和 168 小时门禁不进入任何 Ticket；
 - `product_verified` 只由 T24 判定，`interview_ready` 只由 T25 判定。
@@ -53,14 +53,14 @@
 ### T18 验收记录（2026-08-11）
 
 - 红灯基线：修复前纯 `111` 被错误路由为 `help/answered`；新增失败测试先证明该行为错误。
-- T18 实现与 registry：T18 专用测试与 registry 回归 30 passed；固定 T18 评测 11/11；T17+T18 产品固定评测总计 41/41；API 全量 373 passed；前端 48 passed，lint/build 通过。
+- T18 实现与 registry：T18 专用测试与 registry 回归 30 passed；固定 T18 评测 11/11；T18 验收当时的历史组合分母为 T17 30 + T18 11 = 41/41；API 全量 373 passed；前端 48 passed，lint/build 通过。该 41 不是 T19 current registry 分母。
 - 质量与迁移：Ruff、MyPy 通过；Alembic `0007` upgrade/downgrade/no-drift 通过；独立 verifier 结论 PASS（P0=0、P1=0）。
 - P2 残余/延期边界：legacy JSON 及 `set_actor`/`reset`/`exit_demo`/submit 的极端并发最后写入者风险；未来真实 Answer Provider 的 canonical `assistant_message` 定义；无 Cursor 数字澄清文案暂固定引用 `111`。这些不扩大 T18 范围，后续 Ticket 再处理。
-- T19–T25（登录、Session、Case/ACL、多角色闭环、集成与面试证据）均尚未开始；不推送、合并或部署。
+- T20–T25（Case/ACL、多角色闭环、集成与面试证据）均尚未开始；T19 已完成独立验收；不推送、合并或部署。
 
 ## T19 — 独立 Mock 登录页、AuthSession 与 Principal
 
-**状态：** 待开始
+**状态：** 已完成（2026-08-12 独立验收通过）
 
 **目标：** 用四个虚构账号的独立登录和服务端 Session 取代产品内直接切换 EMP 身份。
 
@@ -77,6 +77,16 @@
 **依赖：** T18。
 
 **主要风险：** 账号选择式 Mock Login 只能证明会话与 ACL，任何访问者仍可选择四个虚构账号，不能包装成真实用户认证。
+
+### T19 验收记录（2026-08-12）
+
+- 已实现 0008 `auth_sessions` 迁移、hash-only token/CSRF、四账号 allowlist、原子私有 Workspace 绑定、Session/Principal/Origin/CSRF 边界及旧 Demo/Workspace 入口关闭。
+- T19 auth/session 与 migration 固定评测 23/23；连同严格 Draft Preview 合同的后端 focused 选择器在真实 test DB 共 38 passed。API 全量 382 passed（1 条既有依赖 warning）；前端 59 passed，lint 和 build 通过。
+- 固定评测新增独立 `T19-01 auth_session_isolation`（23 cases，完整 T19 auth + migration 专测）。v1.1 T17 历史清单冻结为 30/30 @ `c683d84`；T19 current compatible/new registry 将已被产品边界取代的 `T17-01`/`T17-09` 标为 superseded，唯一计数为 active T17 24 + T18 11 + T19 23 = 58，不与历史 30 同比。
+- T08 历史 12 条在 `c683d84` 留档；`eval01/05/06` 不再用 T19 的 404 替代原成功/乱序/驳回语义，而是明确 deferred 至 T20/T22；旧 Workspace 隔离 `eval11` 由 T19 AuthSession 隔离证据 supersede。当前 runner 仅收集 8 条语义仍兼容的案例且不注册 skip；其中 `eval07/08` 通过预置 approved Case 与确定性 IAM 保留 timeout/recover/幂等开通真实证据。完整四角色 E2E 由 T24 恢复。
+- 当前 compatible/new 产品评测为 58/58（active T17 24 + T18 11 + T19 23），不与历史 T17 30/30 做同分母比较；Ruff、MyPy、Compose、Alembic `0008 → 0007 → 0008` 与 no-drift 均通过。
+- 四个真实浏览器上下文分别登录 EMP-001～004，HttpOnly Session 对页面脚本不可见，刷新恢复原账号；退出 EMP-002 后另三个会话不受影响。登录后申请人由 Principal 自动展示，不再要求在对话中自报员工编号。
+- 独立 verifier 结论 PASS（P0=0、P1=0），允许本地提交。已建立的事件长连接不会在 Session 注销后持续重验，作为 P2 纳入 T24 攻击矩阵；T24 前不得声明 `product_verified`。
 
 ## T20 — 共享 Access Case 与资源级 ACL
 
@@ -200,4 +210,4 @@
 
 ## 2. 当前停止点
 
-用户已于 2026-08-11 确认 AccessPilot v1.2 精简版 T18–T25 按顺序串行实施；T18 已完成并通过独立验收，T19–T25 待开始。后续每张 Ticket 仍须测试先行、独立验收并本地提交；不推送、不合并、不部署。
+用户已确认 AccessPilot v1.2 精简版 T18–T25 按顺序串行实施；T18、T19 已独立验收，当前停止在 T20 开始前，T20–T25 待开始。后续每张 Ticket 仍须测试先行、独立验收并本地提交；不推送、不合并、不部署。

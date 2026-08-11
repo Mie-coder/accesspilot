@@ -89,15 +89,15 @@ CursorExpectedField = Literal[
 class ConversationCursor(BaseModel):
     """服务端保存的、绑定当前草稿 revision 的待补字段合同。
 
-    T18 仍使用 Workspace + actor 作用域，``auth_session_id`` 为 T19
-    预留。``consumed_at`` 只用于审计；只要它不为空，游标就不再可消费。
+    T19 之后活动 Cursor 必须绑定 AuthSession；``consumed_at`` 只用于审计，
+    只要它不为空，游标就不再可消费。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     workspace_id: UUID | str
     actor_id: str
-    auth_session_id: str | None = None
+    auth_session_id: str
     draft_revision: int = Field(ge=0)
     expected_field: CursorExpectedField
     last_question_kind: str = Field(min_length=1, max_length=80)

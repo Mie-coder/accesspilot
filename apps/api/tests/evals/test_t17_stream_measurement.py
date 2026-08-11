@@ -30,6 +30,7 @@ from accesspilot.domain.models import ParsedReply
 from accesspilot.evaluation import SseLatencyRecorder
 from accesspilot.events import append_workspace_event
 from accesspilot.main import create_app
+from support.auth import login_as
 
 
 def _sse_frame(
@@ -279,12 +280,14 @@ class TwoDeltaAnswerStream:
 async def _stream_with_direct_asgi(
     app: Any,
     *,
-    workspace_token: str,
+    session_token: str,
+    csrf_token: str,
     content: str,
     recorder: SseLatencyRecorder,
 ) -> int:
     body = json.dumps({"content": content}, ensure_ascii=False).encode()
     request_sent = False
+    response_finished = asyncio.Event()
     status_code = 0
 
     async def receive() -> dict[str, object]:
@@ -296,10 +299,11 @@ async def _stream_with_direct_asgi(
                 "body": body,
                 "more_body": False,
             }
-        # Keep the request open without reporting a disconnect. Starlette's
-        # streaming response polls this receive callable while yielding frames.
-        await asyncio.sleep(0.001)
-        return {"type": "http.request", "body": b"", "more_body": False}
+        # A second ``http.request`` is not a valid disconnect signal. Keep the
+        # listener pending until the response body has finished, then close the
+        # ASGI exchange with the one legal terminal message.
+        await response_finished.wait()
+        return {"type": "http.disconnect"}
 
     async def send(message: dict[str, object]) -> None:
         nonlocal status_code
@@ -309,6 +313,8 @@ async def _stream_with_direct_asgi(
             chunk = message.get("body", b"")
             if isinstance(chunk, bytes) and chunk:
                 recorder.feed(chunk, observed_ns=time.perf_counter_ns())
+            if message.get("more_body") is False:
+                response_finished.set()
 
     await app(
         {
@@ -324,7 +330,9 @@ async def _stream_with_direct_asgi(
                 (b"host", b"testserver"),
                 (b"content-type", b"application/json"),
                 (b"content-length", str(len(body)).encode()),
-                (b"cookie", f"accesspilot_workspace={workspace_token}".encode()),
+                (b"cookie", f"accesspilot_session={session_token}".encode()),
+                (b"origin", b"http://127.0.0.1:5173"),
+                (b"x-csrf-token", csrf_token.encode()),
             ],
             "client": ("testclient", 12345),
             "server": ("testserver", 80),
@@ -364,23 +372,23 @@ def test_direct_asgi_stream_records_observed_latency_and_model_calls(
         answer_stream_model=TwoDeltaAnswerStream(),
     )
     client = TestClient(app)
-    assert client.post("/api/workspaces").status_code == 201
-    workspace_token = client.cookies.get("accesspilot_workspace")
-    assert workspace_token is not None
-    before_calls = _model_calls(database_session_factory, workspace_token)
+    login = login_as(client)
+    session_token = login.session_token
+    before_calls = _model_calls(database_session_factory, session_token)
 
     start_ns = time.perf_counter_ns()
     recorder = SseLatencyRecorder(start_ns=start_ns)
     status_code = asyncio.run(
         _stream_with_direct_asgi(
             app,
-            workspace_token=workspace_token,
+            session_token=session_token,
+            csrf_token=login.csrf_token,
             content="申请客户数据导出 14 天，用于核验虚构客户数据",
             recorder=recorder,
         )
     )
     result = recorder.finish()
-    after_calls = _model_calls(database_session_factory, workspace_token)
+    after_calls = _model_calls(database_session_factory, session_token)
     model_calls = after_calls - before_calls
 
     record_property("first_event_ms", result.first_event_ms)
@@ -408,15 +416,16 @@ def test_reconnect_observation_has_no_duplicate_persisted_event_ids(
     database_session_factory: sessionmaker[Session],
     record_property: Any,
 ) -> None:
+    with database_session_factory() as session:
+        seed_catalog(session)
     app = create_app(
         store=SqlAlchemyWorkspaceStore(database_session_factory),
         settings=Settings(demo_mode_enabled=True),
         session_factory=database_session_factory,
     )
     client = TestClient(app)
-    assert client.post("/api/workspaces").status_code == 201
-    workspace_token = client.cookies.get("accesspilot_workspace")
-    assert workspace_token is not None
+    login = login_as(client)
+    workspace_token = login.session_token
     with database_session_factory() as session:
         first = append_workspace_event(
             session,

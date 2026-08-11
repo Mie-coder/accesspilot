@@ -6,8 +6,8 @@ AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent�
 
 - **稳定基线：MVP v1.0** — T01–T08 已完成本地实现和验收；没有推送、部署或接入真实企业系统。
 - **本地完成版本：v1.1** — T09–T17 已完成本地实现与验证；没有推送、合并、部署或接入真实企业系统。
-- **当前本地版本：v1.2 精简版 T18 已完成** — ConversationCursor 为期限追问保存 `111` 的上下文，纯数字续答按 `duration_days` 目录上限解析，并以 draft revision/CAS 保护持久化；T18 固定评测 11/11、T17+T18 产品总计 41/41。T19–T25 尚未开始；没有推送、合并或部署，也不宣称登录/AuthSession 已完成。
-- **当前能力：** 固定服务端产品身份并隔离受保护的 Demo 控制面，支持按身份发现权限、多意图路由、只读工具白名单、确定性权限名称解析、8 条基本政策主题问答、基于本轮证据的 `grounded`/`insufficient_evidence`/`retrieval_unavailable` 三态政策回答、自审批禁止规则，以及当前轮增量 SSE、Workspace 长连接事件、取消、断线重连和刷新恢复。产品工作台还提供类型化业务卡片：权限按 `eligible`、`owned`、`pending`、`expiring_soon`、`expired` 五态展示；权限名称解析按 `matched`、`ambiguous`、`no_match` 三态展示候选和重新校验结果；政策按三态展示证据、提示和下一步；申请页按事实展示草稿、提交、风险审查、两级审批、开通与恢复时间线，断线时在业务页面显示可恢复的重连状态。
+- **当前本地版本：v1.2 精简版 T19 已完成并独立验收** — 在 T18 的 ConversationCursor 基础上，四个固定虚构账号通过 Mock Login 获得独立 AuthSession、私有 Workspace、hash-only token/CSRF 和服务端 Principal；T19 固定评测 23/23，后端全量 382 passed，前端 59 passed。当前 compatible/new 固定评测分母为 58（active T17 24 + T18 11 + T19 23）；它与 v1.1 历史 T17 30/30（`c683d84`）不是同分母，不做同比。T20–T25 尚未开始；没有推送、合并或部署。
+- **当前能力：** 产品工作台只接受 `accesspilot_session → AuthSession → EmployeeRecord` 身份链；旧 Workspace/Demo 入口返回 404，旧 Workspace cookie 单独访问返回 401。登录页明确标注“作品集 Mock 登录，非真实身份认证”，不实现密码、注册、OIDC 或真实 SSO。业务写请求要求精确 Origin 与内存 CSRF，Session 刷新轮换 CSRF，退出只吊销 Session、不删除 Workspace。其余能力包括多意图路由、只读工具白名单、确定性权限名称解析、8 条基本政策主题问答、基于本轮证据的 `grounded`/`insufficient_evidence`/`retrieval_unavailable` 三态政策回答、自审批禁止规则，以及当前轮增量 SSE、事件回放、取消、断线重连和刷新恢复。产品工作台还提供类型化业务卡片：权限按 `eligible`、`owned`、`pending`、`expiring_soon`、`expired` 五态展示；权限名称解析按 `matched`、`ambiguous`、`no_match` 三态展示候选和重新校验结果；政策按三态展示证据、提示和下一步；申请页按事实展示草稿、提交、风险审查、两级审批、开通与恢复时间线，断线时在业务页面显示可恢复的重连状态。
 - **后续演进：** provider token 延迟、政策召回率和生产 SLA 尚未测量；它们不属于本地 deterministic_offline 单样本结论。
 
 ## 项目目标
@@ -35,15 +35,16 @@ AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent�
 - T09：Workspace 后端演示身份、身份迁移、刷新恢复和申请/审批越权守卫已完成；
 - T10：按后端身份查询可自助申请权限与当前有效 `AccessGrant` 已完成；
 - T11：7 类意图路由、只读工具执行器、咨询/草稿隔离、基础敏感信息拒绝与脱敏已完成。
-- T12：产品身份与 Demo 控制面分层、Workspace/Cookie 隔离、预算边界、Demo 控制台与三档视口验收已完成并本地验证；
+- T12：历史产品身份与 Demo 控制面分层、Workspace/Cookie 隔离、预算边界和三档视口验收已完成；T19 已关闭旧 Demo 控制台和匿名入口；
 - T13：自然语言权限名称经当前身份目录确定性解析，歧义与未知权限 fail-closed，业务字段变化使确认失效，已完成并本地验证；
 - T14：当前轮增量 SSE、Workspace 回放后长连接、稳定游标与关联 ID、取消/唯一终态、刷新恢复和 Nginx 禁缓冲已完成并本地验证；
 - T15：政策问答与提示词攻击防护、8 条基本政策主题、三态证据回答、自审批规则（`POL-006`）和复合攻击安全回归已完成并本地验证；模型输出、草稿、事件和错误正文均通过敏感信息边界检查。
 - T16：权限、政策与申请状态业务卡片已完成；权限五态、名称解析三态、政策证据三态、申请生命周期时间线、加载/空/错误/安全拒绝和断线重连状态均已接入产品导航并本地验证。
-- T17：10 个固定场景、30 个案例全部通过；后端全量 339 passed（1 warning）、前端 14 files/48 passed、Ruff、MyPy（41 sources）、Alembic（无漂移/head 0006）、TypeScript app+node、ESLint 和正式构建均通过。脱敏单样本观测来自本机 direct-ASGI `deterministic_offline`：首事件 7.666417 ms、首个非空 `message.delta` 35.480167 ms、完成 39.017833 ms、计费模型调用 1 次；Workspace 重连回放 2 条、重复 0 条；复合攻击 4/4 阻断。上述延迟不是 provider token、p50/p95 或生产 SLA，不代表真实模型质量。
-- T18：ConversationCursor、纯数字 `111` 期限上下文、失效/消费与 draft revision/CAS 已完成并独立验收；固定 T18 评测 11/11，T17+T18 产品固定评测总计 41/41。T19–T25 尚未开始。
+- T17：v1.1 历史基线在 `c683d84` 冻结为 10 个场景、30/30；后端全量 339 passed（1 warning）、前端 14 files/48 passed、Ruff、MyPy（41 sources）、Alembic（无漂移/head 0006）、TypeScript app+node、ESLint 和正式构建均通过。脱敏单样本观测来自本机 direct-ASGI `deterministic_offline`：首事件 7.666417 ms、首个非空 `message.delta` 35.480167 ms、完成 39.017833 ms、计费模型调用 1 次；Workspace 重连回放 2 条、重复 0 条；复合攻击 4/4 阻断。上述延迟不是 provider token、p50/p95 或生产 SLA，不代表真实模型质量。
+- T18：ConversationCursor、纯数字 `111` 期限上下文、失效/消费与 draft revision/CAS 已完成并独立验收；固定 T18 评测 11/11。
+- T19：四账号 Mock Login、AuthSession/Principal、Origin/CSRF、Cookie、身份注入、旧入口关闭、Cursor session 绑定和 0008 迁移已完成；固定 T19-01 23/23、前端 59 passed，当前 compatible/new registry 共 58 个唯一案例；独立 verifier 结论 PASS（P0=0、P1=0）。T20–T25 尚未开始。
 
-Demo 控制台只能切换独立演示 Workspace 中的预置虚构员工，不是真实 SSO 或生产级授权边界；普通产品身份始终由服务端配置，真实系统仍必须由可信登录态确定操作者身份。
+登录页的四个账号只能证明会话隔离与 ACL 边界，不是真实 SSO 或生产级认证；访问者仍可选择任一虚构账号。真实系统仍必须由可信登录态确定操作者身份。
 
 ## 目录结构
 
@@ -120,11 +121,13 @@ pnpm --filter @accesspilot/web build
 pnpm --filter @accesspilot/web exec vite --host 127.0.0.1 --port 5173
 ```
 
-开发服务器会把 `/api` 和 `/health` 代理到 `http://127.0.0.1:8000`。浏览器只持有 HttpOnly Workspace cookie；DeepSeek 与百炼密钥始终留在 FastAPI 的本地 `.env`。
+开发服务器会把 `/api` 和 `/health` 代理到 `http://127.0.0.1:8000`。浏览器使用 HttpOnly `accesspilot_session` cookie，CSRF 明文只保留在可读 cookie/内存中；开发 Origin 必须精确为 `http://127.0.0.1:5173`，不要混用 `localhost`。DeepSeek 与百炼密钥始终留在 FastAPI 的本地 `.env`。
 
 ## 固定评测与统一检查
 
-T08 的 12 条固定场景覆盖黄金路径、缺项、未确认、政策失败、审批乱序、驳回、IAM 超时恢复、重复幂等调用、SSE 重连、配额、Workspace 隔离和模型结构错误；T17 另有 10 个产品化场景、30 个案例；T18 另有 11 个固定案例，T17+T18 产品总计 41/41：
+T08 历史清单在 `c683d84` 有 12 条；在 T19 阶段，`eval01/05/06` 明确延期到 T20/T22（完整四角色黄金路径由 T24 恢复），旧 Workspace 隔离 `eval11` 已由 T19 的 AuthSession 隔离证据取代。当前 runner 只将其余 8 条 compatible 案例作为通过证据，不收集延期/取代项，也不以 skip 计入结果。`eval07/08` 使用预置 approved Case 与确定性 Sequenced/Counting IAM，继续真实验证 timeout→recover 和单次幂等开通，不用 404/409 替代旧语义。
+
+v1.1 T17 历史记录为 30/30 @ `c683d84`。当前 T19 compatible/new registry 排除已被 T19 产品边界取代的 `T17-01` 和 `T17-09`，唯一计数为 active T17 24 + T18 11 + T19 23 = 58；这不是同分母历史对比：
 
 ```bash
 ./scripts/run-evals.sh
@@ -151,21 +154,21 @@ docker compose ps
 
 浏览器访问 `http://127.0.0.1:8080`。普通停止使用 `docker compose down`，它会保留 PostgreSQL 具名卷；只有明确要删除全部本地 Demo 数据时才使用 `docker compose down -v`。
 
-当前仓库只提供可部署的本地 Compose 包，没有执行推送或部署。真正放到公网前，必须在外层终止 TLS、设置 `ACCESSPILOT_WORKSPACE_COOKIE_SECURE=true`、关闭数据库公开端口、使用密钥管理服务，并用服务端可信登录态替换演示 `actor_id`。
+当前仓库只提供可部署的本地 Compose 包，没有执行推送或部署。Compose 本地入口 Origin 是精确的 `http://127.0.0.1:8080`；真正放到公网前，必须在外层终止 TLS、设置 `ACCESSPILOT_AUTH_COOKIE_SECURE=true`、关闭数据库公开端口、使用密钥管理服务，并用真实可信登录态替换 Mock Login。
 
 ### 腾讯云部署前说明（本轮未执行）
 
 - 服务器只开放必要的 SSH、80 和 443；Compose 中数据库端口继续绑定 `127.0.0.1`，不得加入公网安全组。
 - 通过服务器的密钥管理或受控文件传输写入 `.env`，不要把真实 Key、数据库密码或服务器地址提交到 Git。
 - 由宿主机 Nginx/Caddy 在 TLS 后代理到 `127.0.0.1:8080`，并保留本仓库针对 `/api/events` 的禁缓冲和长连接配置。
-- TLS 生效后设置 `ACCESSPILOT_WORKSPACE_COOKIE_SECURE=true`，再验证 `/health`、`/ready`、SSE 重连和完整黄金路径。
+- TLS 生效后设置 `ACCESSPILOT_AUTH_COOKIE_SECURE=true`，并将 Compose 的 `ACCESSPILOT_COMPOSE_WEB_ORIGIN` 配置为唯一 HTTPS Origin，再验证 `/health`、`/ready`、SSE 重连和完整黄金路径。Vite 本地开发仍使用 `ACCESSPILOT_WEB_ORIGIN=http://127.0.0.1:5173`。
 - 上线前补充 PostgreSQL 卷备份、日志采集、监控告警和回滚方案，并再次获得用户明确部署授权。
 
 ## 已知限制
 
 - 全部人员、权限、政策和 IAM 都是原创虚构数据；IAM 是幂等模拟器，不连接真实企业系统。
-- 角色选择器和客户端 `actor_id` 只用于 Demo，不是 SSO、身份认证或生产授权边界。
-- Workspace cookie、调用配额和数据隔离面向单机演示，不等于生产级多租户、防滥用或限流体系。
+- Mock Login 账号选择和客户端展示的 `employee_id` 只用于作品集演示，不是 SSO、身份认证或生产授权边界。
+- 旧 Workspace cookie 不参与鉴权；Session、调用配额和数据隔离面向单机演示，不等于生产级多租户、防滥用或限流体系。
 - 离线提取、向量和风险审查是透明的确定性回退，不等同于 DeepSeek/百炼真实效果。
 - `/health` 只表示进程存活，`/ready` 才检查数据库；两者都不会调用外部模型或 IAM。
 - 当前前端主包约 524 KB，T17 正式构建报告 561.02 KB chunk warning（P2）；不影响本地功能，但不应视为最终性能优化结果。
@@ -178,7 +181,7 @@ docker compose ps
 ## 架构文档
 
 - [AccessPilot v1.1 产品功能书（历史基线）](docs/product/accesspilot-product-function-book-v1.1.md)
-- [AccessPilot v1.2 精简产品说明书（当前仅 T18 已完成）](docs/product/accesspilot-product-function-book-v1.2.md)
+- [AccessPilot v1.2 精简产品说明书（T18–T19 已完成）](docs/product/accesspilot-product-function-book-v1.2.md)
 - [访问申请与权限开通流程](docs/architecture/access-flow.md)
 - [数据库 ER 图](docs/architecture/data-model-er.md)
 - [项目实现计划](docs/plans/accesspilot-mvp.md)

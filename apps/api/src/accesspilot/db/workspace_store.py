@@ -71,6 +71,7 @@ class SqlAlchemyWorkspaceStore:
                         consumed_at=record.cursor_consumed_at,
                     )
                     if record.cursor_expected_field is not None
+                    and record.cursor_auth_session_id is not None
                     else None
                 ),
                 fault_mode=record.fault_mode,
@@ -174,6 +175,7 @@ class SqlAlchemyWorkspaceStore:
         *,
         expected_revision: int,
         draft: RequestDraft,
+        auth_session_id: str | None = None,
     ) -> bool:
         """在 Workspace 行锁内接受一次 draft + revision CAS 更新。"""
 
@@ -184,6 +186,12 @@ class SqlAlchemyWorkspaceStore:
                 .with_for_update()
             )
             if record is None or record.draft_revision != expected_revision:
+                session.rollback()
+                return False
+            if record.cursor_expected_field is not None and (
+                auth_session_id is None
+                or record.cursor_auth_session_id != auth_session_id
+            ):
                 session.rollback()
                 return False
             record.draft = draft.model_dump(mode="json")
@@ -205,6 +213,7 @@ class SqlAlchemyWorkspaceStore:
         expected_revision: int,
         expected_field: str,
         draft: RequestDraft,
+        auth_session_id: str,
     ) -> bool:
         """在同一事务内写入期限、递增 revision 并消费活动 Cursor。"""
 
@@ -222,6 +231,7 @@ class SqlAlchemyWorkspaceStore:
                 or record.cursor_expected_field != expected_field
                 or record.cursor_consumed_at is not None
                 or record.cursor_actor_id != record.actor_id
+                or record.cursor_auth_session_id != auth_session_id
             ):
                 session.rollback()
                 return False
@@ -237,6 +247,7 @@ class SqlAlchemyWorkspaceStore:
         *,
         expected_revision: int,
         cursor: ConversationCursor,
+        auth_session_id: str,
     ) -> bool:
         """仅在 revision 未变化时原子写入下一追问 Cursor。"""
 
@@ -250,6 +261,10 @@ class SqlAlchemyWorkspaceStore:
                 record is None
                 or record.draft_revision != expected_revision
                 or cursor.actor_id != record.actor_id
+                or (
+                    record.cursor_expected_field is not None
+                    and record.cursor_auth_session_id != auth_session_id
+                )
             ):
                 session.rollback()
                 return False
@@ -267,6 +282,7 @@ class SqlAlchemyWorkspaceStore:
         token: str,
         *,
         expected_revision: int,
+        auth_session_id: str,
     ) -> bool:
         """仅在 revision 未变化时原子清空 Cursor 列，避免整行覆盖草稿。"""
 
@@ -277,6 +293,12 @@ class SqlAlchemyWorkspaceStore:
                 .with_for_update()
             )
             if record is None or record.draft_revision != expected_revision:
+                session.rollback()
+                return False
+            if record.cursor_expected_field is not None and (
+                auth_session_id is None
+                or record.cursor_auth_session_id != auth_session_id
+            ):
                 session.rollback()
                 return False
             record.cursor_actor_id = None

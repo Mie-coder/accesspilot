@@ -5,7 +5,6 @@ import type {
   RequestResult,
   WorkspaceEvent,
   WorkspaceIdentity,
-  DemoSession,
   EntitlementSelectionResult,
   ConnectionState,
 } from './types'
@@ -14,7 +13,6 @@ export interface WorkbenchContextValue {
   identity: WorkspaceIdentity
   draft: RequestDraft | null
   missingFields: string[]
-  demoSession: DemoSession
   events: WorkspaceEvent[]
   businessStatus: string
   error: string | null

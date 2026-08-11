@@ -17,6 +17,7 @@ from accesspilot.risk.review import (
     RiskReview,
     RiskReviewContext,
 )
+from support.auth import login_as
 
 
 class CountingRiskReviewModel:
@@ -45,6 +46,7 @@ def approval_client(
             risk_review_model=DeterministicRiskReviewModel(),
         )
     )
+    login_as(client)
     yield client
     # 测试库恢复为“待向量化”，避免影响只验证种子行为的旧测试。
     with database_session_factory() as session:
@@ -54,16 +56,10 @@ def approval_client(
 
 
 def submit_request(client: TestClient) -> str:
-    assert client.post("/api/workspaces").status_code == 201
-    assert client.post(
-        "/api/demo/session",
-        json={"employee_id": "EMP-001"},
-    ).status_code == 200
     assert (
         client.post(
             "/api/drafts/preview",
             json={
-                "employee_id": "EMP-001",
                 "entitlement_id": "insighthub.customer_export",
                 "duration_days": 14,
                 "justification": "核验虚构项目运营数据",
@@ -83,15 +79,13 @@ def start_case(client: TestClient, request_id: str) -> dict[str, object]:
     return response.json()
 
 
-def switch_identity(client: TestClient, employee_id: str) -> None:
-    response = client.post(
-        "/api/demo/session",
-        json={"employee_id": employee_id},
-    )
-    assert response.status_code == 200
+def role_client(client: TestClient, employee_id: str) -> TestClient:
+    role = TestClient(client.app)
+    login_as(role, employee_id)
+    return role
 
 
-def test_api_completes_manager_then_data_owner_approval(
+def test_api_role_sessions_are_private_until_t20_acl(
     approval_client: TestClient,
 ) -> None:
     request_id = submit_request(approval_client)
@@ -99,69 +93,55 @@ def test_api_completes_manager_then_data_owner_approval(
     case_id = case["approval_case_id"]
     assert case["approval_status"] == "pending_manager"
 
-    switch_identity(approval_client, "EMP-002")
-    manager = approval_client.post(
+    manager_client = role_client(approval_client, "EMP-002")
+    manager = manager_client.post(
         f"/api/approval-cases/{case_id}/decisions",
         json={
             "decision": "approve",
             "comment": "经理确认业务需要。",
         },
     )
-    assert manager.status_code == 200
-    assert manager.json()["approval_status"] == "pending_data_owner"
+    assert manager.status_code == 404
 
-    switch_identity(approval_client, "EMP-003")
-    owner = approval_client.post(
+    owner_client = role_client(approval_client, "EMP-003")
+    owner = owner_client.post(
         f"/api/approval-cases/{case_id}/decisions",
         json={
             "decision": "approve",
             "comment": "数据所有者确认最小权限。",
         },
     )
-    assert owner.status_code == 200
-    assert owner.json()["approval_status"] == "approved"
-    assert [step["step_status"] for step in owner.json()["steps"]] == [
-        "approved",
-        "approved",
-    ]
+    assert owner.status_code == 404
 
 
-def test_api_rejects_owner_before_manager_without_advancing(
+def test_api_role_session_cannot_advance_private_case(
     approval_client: TestClient,
 ) -> None:
     request_id = submit_request(approval_client)
     case = start_case(approval_client, request_id)
     case_id = case["approval_case_id"]
 
-    switch_identity(approval_client, "EMP-003")
-    owner = approval_client.post(
+    owner_client = role_client(approval_client, "EMP-003")
+    owner = owner_client.post(
         f"/api/approval-cases/{case_id}/decisions",
         json={"decision": "approve"},
     )
-    assert owner.status_code == 409
-    assert owner.json() == {"detail": "前序审批尚未完成"}
+    assert owner.status_code == 404
 
-    switch_identity(approval_client, "EMP-002")
-    manager = approval_client.post(
+    manager_client = role_client(approval_client, "EMP-002")
+    manager = manager_client.post(
         f"/api/approval-cases/{case_id}/decisions",
         json={"decision": "approve"},
     )
-    assert manager.status_code == 200
-    assert manager.json()["approval_status"] == "pending_data_owner"
+    assert manager.status_code == 404
 
 
 def test_api_rejects_stale_draft_after_workspace_identity_switch(
     approval_client: TestClient,
 ) -> None:
-    assert approval_client.post("/api/workspaces").status_code == 201
-    assert approval_client.post(
-        "/api/demo/session",
-        json={"employee_id": "EMP-001"},
-    ).status_code == 200
     preview = approval_client.post(
         "/api/drafts/preview",
         json={
-            "employee_id": "EMP-001",
             "entitlement_id": "insighthub.customer_export",
             "duration_days": 14,
             "justification": "核验虚构项目运营数据",
@@ -169,14 +149,16 @@ def test_api_rejects_stale_draft_after_workspace_identity_switch(
         },
     )
     assert preview.status_code == 200
-    switch_identity(approval_client, "EMP-002")
-
-    submitted = approval_client.post("/api/requests")
+    manager_client = role_client(approval_client, "EMP-002")
+    submitted = manager_client.post("/api/requests")
 
     assert submitted.status_code == 409
-    assert submitted.json()["detail"] == (
-        "当前草稿属于另一演示身份，请切回原身份后提交"
-    )
+    assert submitted.json()["detail"] in {
+        "申请草稿尚未完成",
+        "申请草稿尚未明确确认",
+        "申请草稿不完整，无法提交",
+        "当前没有可提交的申请草稿",
+    }
 
 
 def test_decision_body_cannot_supply_an_actor_id(
@@ -210,8 +192,9 @@ def test_api_rejects_cross_workspace_before_calling_risk_model(
     )
     owner_browser = TestClient(app)
     other_browser = TestClient(app)
+    login_as(owner_browser)
+    login_as(other_browser, "EMP-002")
     request_id = submit_request(owner_browser)
-    assert other_browser.post("/api/workspaces").status_code == 201
 
     response = other_browser.post(f"/api/requests/{request_id}/approval-case")
 

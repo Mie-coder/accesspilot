@@ -12,13 +12,6 @@ export interface ModelQuota {
   remaining: number
   retry_consumed: number
 }
-export interface DemoSession {
-  demo_mode_enabled: boolean
-  demo_session_active: boolean
-  employee_id?: string
-  fault_mode: 'iam_failure' | 'iam_timeout' | null
-}
-
 export type ConnectionState = 'connected' | 'reconnecting'
 
 
@@ -54,7 +47,6 @@ export interface WorkspaceIdentity {
 export interface WorkspaceSnapshot {
   identity: WorkspaceIdentity
   draft: RequestDraft | null
-  demoSession: DemoSession
   events: WorkspaceEvent[]
   lastEventId: number
 }

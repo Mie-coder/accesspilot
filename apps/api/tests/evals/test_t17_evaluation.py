@@ -16,6 +16,8 @@ from types import SimpleNamespace
 import pytest
 
 from accesspilot.evaluation import (
+    T17_BASELINE_CASE_COUNT,
+    T17_BASELINE_GIT_REVISION,
     T17_SCENARIOS,
     EvaluationReport,
     EvaluationScenario,
@@ -35,6 +37,117 @@ EXPECTED_CATEGORIES = {
     "budget_degradation",
     "draft_isolation",
     "compound_security",
+}
+
+EXPECTED_T17_METADATA = {
+    "T17-01": (
+        "identity_demo",
+        3,
+        (
+            "apps/api/tests/api/test_demo_boundary.py::"
+            "test_product_identity_ignores_legacy_workspace_actor_and_hides_controls",
+            "apps/api/tests/api/test_demo_boundary.py::"
+            "test_demo_session_requires_explicit_entry_and_exit_restores_product_identity",
+            "apps/api/tests/api/test_demo_boundary.py::"
+            "test_product_and_demo_facts_are_isolated_across_cookie_switches",
+        ),
+    ),
+    "T17-02": (
+        "resolution",
+        4,
+        (
+            "apps/api/tests/tools/test_entitlement_resolution.py::"
+            "test_resolution_matches_code_name_and_controlled_alias",
+            "apps/api/tests/tools/test_entitlement_resolution.py::"
+            "test_system_name_can_return_typed_ambiguous_candidates_without_draft_mutation",
+            "apps/api/tests/tools/test_entitlement_resolution.py::"
+            "test_no_match_returns_current_eligible_access_and_never_fuzzy_matches",
+            "apps/api/tests/api/test_t16_business_facts.py::"
+            "test_selected_entitlement_is_revalidated_and_invalidates_old_confirmation",
+        ),
+    ),
+    "T17-03": (
+        "current_turn_stream",
+        2,
+        (
+            "apps/api/tests/api/test_chat_stream.py::"
+            "test_current_turn_sse_emits_ordered_real_deltas_and_persists_before_completed",
+            "apps/api/tests/evals/test_t17_stream_measurement.py::"
+            "test_direct_asgi_stream_records_observed_latency_and_model_calls",
+        ),
+    ),
+    "T17-04": (
+        "workspace_reconnect",
+        2,
+        (
+            "apps/api/tests/api/test_events.py::"
+            "test_sse_reconnect_only_replays_events_after_last_event_id",
+            "apps/api/tests/evals/test_t17_stream_measurement.py::"
+            "test_reconnect_observation_has_no_duplicate_persisted_event_ids",
+        ),
+    ),
+    "T17-05": (
+        "turn_interrupted",
+        2,
+        (
+            "apps/api/tests/api/test_chat_stream.py::"
+            "test_current_turn_cancellation_persists_interrupted_without_completed",
+            "apps/api/tests/events/test_t14_contract.py::"
+            "test_terminal_event_is_compare_and_set_and_second_terminal_is_a_noop",
+        ),
+    ),
+    "T17-06": (
+        "policy_states",
+        4,
+        (
+            "apps/api/tests/rag/test_t15_policy_service.py::"
+            "test_policy_catalog_returns_all_eight_fact_source_records",
+            "apps/api/tests/rag/test_t15_policy_service.py::"
+            "test_policy_query_is_grounded_only_in_current_matches",
+            "apps/api/tests/rag/test_t15_policy_service.py::"
+            "test_low_similarity_returns_insufficient_without_policy_body",
+            "apps/api/tests/rag/test_t15_policy_service.py::"
+            "test_partial_index_maps_to_retrieval_unavailable",
+        ),
+    ),
+    "T17-07": (
+        "self_approval",
+        4,
+        (
+            "apps/api/tests/conversation/test_t15_policy_conversation.py::"
+            "test_self_approval_conversation_is_explicitly_forbidden",
+        ),
+    ),
+    "T17-08": (
+        "budget_degradation",
+        2,
+        (
+            "apps/api/tests/evals/test_t17_productized_behaviors.py::"
+            "test_budget_exhaustion_keeps_read_only_facts_and_confirmed_submit_available",
+            "apps/api/tests/conversation/test_service.py::"
+            "test_access_consultation_uses_read_only_tool_without_mutating_draft_or_quota",
+        ),
+    ),
+    "T17-09": (
+        "draft_isolation",
+        3,
+        (
+            "apps/api/tests/api/test_demo_boundary.py::"
+            "test_other_demo_identity_draft_is_not_exposed_or_rebound",
+            "apps/api/tests/api/test_demo_boundary.py::"
+            "test_product_draft_is_hidden_during_demo_and_restored_after_exit",
+            "apps/api/tests/evals/test_fixed_scenarios.py::"
+            "test_eval_11_workspace_cannot_read_another_request",
+        ),
+    ),
+    "T17-10": (
+        "compound_security",
+        4,
+        (
+            "apps/api/tests/conversation/test_t15_policy_conversation.py::"
+            "test_compound_security_inputs_preserve_business_boundary",
+        ),
+    ),
 }
 
 
@@ -107,9 +220,11 @@ def _load_product_eval_runner():
     return module
 
 
-def test_t17_registry_freezes_ten_scenarios_and_safe_selectors() -> None:
+def test_t17_registry_freezes_v11_metadata_and_safe_selectors() -> None:
     scenarios = tuple(T17_SCENARIOS)
 
+    assert T17_BASELINE_GIT_REVISION == "c683d84"
+    assert T17_BASELINE_CASE_COUNT == 30
     assert tuple(scenario.scenario_id for scenario in scenarios) == EXPECTED_SCENARIO_IDS
     assert {scenario.category for scenario in scenarios} == EXPECTED_CATEGORIES
     assert len({scenario.scenario_id for scenario in scenarios}) == 10
@@ -118,6 +233,13 @@ def test_t17_registry_freezes_ten_scenarios_and_safe_selectors() -> None:
         assert len(scenario.selectors) == len(set(scenario.selectors))
         assert scenario.expected_case_count >= 1
         assert scenario.adapter_mode == "deterministic_offline"
+        assert (
+            scenario.category,
+            scenario.expected_case_count,
+            scenario.selectors,
+        ) == EXPECTED_T17_METADATA[scenario.scenario_id]
+
+    assert sum(scenario.expected_case_count for scenario in scenarios) == 30
 
     compound = _scenario("T17-10")
     assert compound.category == "compound_security"

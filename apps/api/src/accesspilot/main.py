@@ -1,14 +1,25 @@
 """FastAPI 应用入口"""
 
 import asyncio
+import json
+import re
 import time
 from collections.abc import AsyncIterator
 from typing import Literal
+from urllib.parse import parse_qs
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    field_validator,
+)
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -36,6 +47,17 @@ from accesspilot.approvals import (
     decide_approval,
     require_approval_startable,
     start_approval_case,
+)
+from accesspilot.auth import (
+    AuthContext,
+    CsrfMismatchError,
+    InvalidAuthSessionError,
+    LoginAccountError,
+    create_login_session,
+    load_auth_context,
+    revoke_session,
+    rotate_csrf,
+    verify_csrf,
 )
 from accesspilot.config import Settings
 from accesspilot.conversation import (
@@ -129,6 +151,40 @@ class DemoSessionBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     employee_id: str
+
+
+class LoginBody(BaseModel):
+    """账号选择式 Mock Login；不接受密码、角色或其他身份字段。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: StrictStr
+
+
+class DraftPreviewBody(BaseModel):
+    """Client-editable draft fields; employee identity is server-owned."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entitlement_id: str | None = None
+    duration_days: StrictInt | None = None
+    justification: str | None = None
+    confirmed: StrictBool = False
+
+    @field_validator("duration_days")
+    @classmethod
+    def require_positive_duration(cls, value: int | None) -> int | None:
+        if value is not None and value <= 0:
+            raise ValueError("申请期限必须是正整数")
+        return value
+
+    @field_validator("entitlement_id", "justification")
+    @classmethod
+    def normalize_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
 
 class ApprovalDecisionBody(BaseModel):
@@ -269,6 +325,275 @@ def create_app(
     )
     app = FastAPI(title=active_settings.app_name)
 
+    # v1.2 closes the anonymous Workspace/Demo surface at the application
+    # boundary.  Keeping this guard ahead of route matching also prevents a
+    # stale browser from receiving a misleading 401/405 from a legacy route.
+    _closed_prefixes = ("/api/workspaces", "/api/demo")
+    _public_paths = {"/health", "/ready", "/api/auth/login"}
+    _reserved_identity_fields = {
+        "account_id",
+        "employee",
+        "employee_id",
+        "actor",
+        "actor_id",
+        "role",
+        "roles",
+        "organization",
+        "organization_code",
+        "workspace",
+        "workspace_id",
+        "workspace_token",
+        "workspace_cookie",
+        "session",
+        "session_id",
+        "session_token",
+        "auth_session",
+        "auth_session_id",
+        "auth_token",
+        "principal",
+        "tenant",
+        "tenant_id",
+        "organization_id",
+    }
+    _compact_reserved_identity_fields = {
+        field.replace("_", "") for field in _reserved_identity_fields
+    }
+
+    def _normalize_identity_key(key: str) -> str:
+        """Canonicalize snake, kebab, camel, and ASGI-lowercased names."""
+
+        with_camel_boundaries = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key.strip())
+        normalized = with_camel_boundaries.lower().replace("-", "_")
+        return normalized.removeprefix("x_")
+
+    def _is_reserved_identity_key(key: str) -> bool:
+        normalized = _normalize_identity_key(key)
+        return normalized in _reserved_identity_fields or (
+            normalized.replace("_", "") in _compact_reserved_identity_fields
+        )
+
+    def _has_reserved_identity_key(key: str) -> bool:
+        """Match direct and bracket/dot-qualified form/query field names."""
+
+        normalized = _normalize_identity_key(key)
+        candidates = [normalized, *re.split(r"[\[\].]+", normalized)]
+        return any(
+            candidate and _is_reserved_identity_key(candidate)
+            for candidate in candidates
+        )
+
+    def _find_reserved_identity_keys(
+        value: object,
+        *,
+        allow_login_account: bool,
+        depth: int = 0,
+    ) -> set[str]:
+        """Recursively find identity-looking keys in a decoded JSON value.
+
+        ``account_id`` is the sole exception: only a top-level login body may
+        carry it.  Traversing lists as well as dictionaries prevents an
+        attacker from hiding identity input under an arbitrary nested object.
+        """
+
+        found: set[str] = set()
+        if isinstance(value, dict):
+            for raw_key, nested in value.items():
+                key = str(raw_key)
+                normalized = _normalize_identity_key(key)
+                if _has_reserved_identity_key(key) and not (
+                    allow_login_account
+                    and depth == 0
+                    and normalized == "account_id"
+                    and key.strip() == "account_id"
+                ):
+                    found.add(normalized)
+                found.update(
+                    _find_reserved_identity_keys(
+                        nested,
+                        allow_login_account=allow_login_account,
+                        depth=depth + 1,
+                    )
+                )
+        elif isinstance(value, list):
+            for nested in value:
+                found.update(
+                    _find_reserved_identity_keys(
+                        nested,
+                        allow_login_account=allow_login_account,
+                        depth=depth + 1,
+                    )
+                )
+        return found
+
+    def _multipart_field_names(body: bytes, content_type: str) -> set[str]:
+        """Extract multipart field *names* from part headers only.
+
+        This intentionally never searches multipart values.  Parsing the
+        ``Content-Disposition`` header is enough to apply the identity-field
+        guard without adding a multipart dependency (the API does not consume
+        multipart business payloads).
+        """
+
+        boundary_match = re.search(
+            r"(?:^|;)\s*boundary\s*=\s*(?:\"([^\"]+)\"|([^;\s]+))",
+            content_type,
+            flags=re.IGNORECASE,
+        )
+        if boundary_match is None:
+            return set()
+        boundary_text = boundary_match.group(1) or boundary_match.group(2)
+        if not boundary_text:
+            return set()
+        delimiter = b"--" + boundary_text.encode("utf-8", errors="ignore")
+        if delimiter == b"--":
+            return set()
+
+        names: set[str] = set()
+        for part in body.split(delimiter):
+            if part.startswith(b"--"):
+                continue
+            header_end = part.find(b"\r\n\r\n")
+            if header_end < 0:
+                header_end = part.find(b"\n\n")
+            if header_end < 0:
+                continue
+            header_block = part[:header_end]
+            for raw_line in re.split(br"\r?\n", header_block):
+                line = raw_line.decode("latin-1", errors="ignore")
+                if not line.lower().startswith("content-disposition:"):
+                    continue
+                name_match = re.search(
+                    r";\s*name\s*=\s*(?:\"([^\"]*)\"|([^;\s]+))",
+                    line,
+                    flags=re.IGNORECASE,
+                )
+                if name_match is not None:
+                    name = name_match.group(1) or name_match.group(2)
+                    if name:
+                        names.add(name)
+        return names
+
+    def _form_identity_keys(body: bytes, content_type: str) -> set[str]:
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if media_type == "application/x-www-form-urlencoded":
+            decoded = body.decode("utf-8", errors="replace")
+            return {
+                key
+                for key in parse_qs(decoded, keep_blank_values=True)
+                if _has_reserved_identity_key(key)
+            }
+        if media_type == "multipart/form-data":
+            return {
+                key
+                for key in _multipart_field_names(body, content_type)
+                if _has_reserved_identity_key(key)
+            }
+        return set()
+
+    @app.middleware("http")
+    async def auth_boundary(request: Request, call_next):  # type: ignore[no-untyped-def]
+        path = request.url.path
+        if any(path == prefix or path.startswith(f"{prefix}/") for prefix in _closed_prefixes):
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+        if not path.startswith("/api/"):
+            return await call_next(request)
+
+        # Read the small body once to reject identity injection before Pydantic
+        # or any business side effect runs. JSON is decoded recursively; form
+        # names are inspected without touching their values. Unsupported body
+        # media types are rejected after the required auth check.
+        # Starlette's
+        # BaseHTTPMiddleware wraps this Request in CachedRequest; its body
+        # cache is replayed to downstream handlers while preserving the
+        # original disconnect signal.  Do not replace ``request._receive``:
+        # doing so turns the second receive into a duplicate http.request and
+        # breaks streaming/SSE handlers that check for disconnects.
+        body = await request.body()
+        keys: set[str] = set()
+        keys.update(key for key in request.query_params if _has_reserved_identity_key(key))
+        for header_name in request.headers:
+            normalized_header = header_name.lower()
+            if _has_reserved_identity_key(normalized_header):
+                return JSONResponse(
+                    status_code=422,
+                    content={"detail": "请求不能注入身份字段"},
+                )
+        raw_content_type = request.headers.get("content-type", "")
+        content_type = raw_content_type.lower()
+        media_type = content_type.split(";", 1)[0].strip()
+        is_json = media_type == "application/json" or media_type.endswith("+json")
+        is_form = media_type in {
+            "application/x-www-form-urlencoded",
+            "multipart/form-data",
+        }
+        if body and is_json:
+            try:
+                decoded = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                decoded = None
+            if decoded is not None:
+                keys.update(
+                    _find_reserved_identity_keys(
+                        decoded,
+                        allow_login_account=path == "/api/auth/login",
+                    )
+                )
+        elif body and is_form:
+            keys.update(_form_identity_keys(body, raw_content_type))
+        if keys:
+            return JSONResponse(
+                status_code=422,
+                content={"detail": "请求不能注入身份字段"},
+            )
+
+        if path in _public_paths and path != "/api/auth/login":
+            return await call_next(request)
+
+        # Login is the only API path that is not session-bound; it still must
+        # carry the exact configured Origin for non-safe methods.
+        if path == "/api/auth/login":
+            if request.method not in {"GET", "HEAD"} and request.headers.get(
+                "origin"
+            ) != active_settings.web_origin:
+                return JSONResponse(status_code=403, content={"detail": "Origin 不被允许"})
+            if body and not is_json:
+                return JSONResponse(
+                    status_code=422,
+                    content={"detail": "请求体必须使用 JSON"},
+                )
+            return await call_next(request)
+
+        # Login is the only API path that is not session-bound; it still went
+        # through the identity scanner above. Every other API path is
+        # session-bound.
+        is_write = request.method not in {"GET", "HEAD", "OPTIONS"}
+
+        try:
+            context = load_auth_context(
+                active_session_factory,
+                token=request.cookies.get(active_settings.auth_cookie_name),
+            )
+        except InvalidAuthSessionError:
+            return JSONResponse(status_code=401, content={"detail": "登录会话无效或已过期"})
+        request.state.auth_context = context
+        if is_write:
+            if request.headers.get("origin") != active_settings.web_origin:
+                return JSONResponse(status_code=403, content={"detail": "Origin 不被允许"})
+            try:
+                verify_csrf(
+                    active_session_factory,
+                    context=context,
+                    token=request.headers.get("X-CSRF-Token"),
+                )
+            except (CsrfMismatchError, InvalidAuthSessionError):
+                return JSONResponse(status_code=403, content={"detail": "CSRF 校验失败"})
+        if body and not is_json:
+            return JSONResponse(
+                status_code=422,
+                content={"detail": "请求体必须使用 JSON"},
+            )
+        return await call_next(request)
+
     def _set_workspace_cookie(response: Response, token: str) -> None:
         response.set_cookie(
             key=active_settings.workspace_cookie_name,
@@ -330,9 +655,28 @@ def create_app(
         request: Request,
         response: Response,
     ) -> Workspace:
-        """读取当前有效 Workspace；必要时恢复产品 Cookie。"""
+        """Resolve Workspace directly from AuthSession, never from a locator cookie."""
 
-        return _resolve_workspace(request, response)
+        del response
+        context: AuthContext | None = getattr(request.state, "auth_context", None)
+        if context is None:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期")
+        try:
+            workspace = workspace_service.get(
+                context.token,
+                auth_session_id=str(context.session_id),
+            )
+        except UnknownWorkspaceError as error:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期") from error
+        if workspace.workspace_id is None or str(workspace.workspace_id) != str(
+            context.workspace_id
+        ):
+            raise HTTPException(status_code=401, detail="登录会话绑定无效")
+        # This is trusted request state, not a client body/header value.  It
+        # lets T18 Cursor CAS bind each active cursor to the current Session.
+        workspace.auth_session_id = str(context.session_id)
+        workspace.actor_id = context.principal.employee_id
+        return workspace
 
     def require_active_demo(
         request: Request,
@@ -430,6 +774,93 @@ def create_app(
         if workspace.demo_session_active and workspace.demo_actor_id:
             payload["employee_id"] = workspace.demo_actor_id
         return payload
+
+    def _set_auth_cookies(response: Response, *, token: str, csrf_token: str) -> None:
+        response.set_cookie(
+            key=active_settings.auth_cookie_name,
+            value=token,
+            httponly=True,
+            secure=active_settings.auth_cookie_secure,
+            samesite="lax",
+            max_age=active_settings.auth_session_ttl_seconds,
+            path="/",
+        )
+        # The CSRF value is intentionally readable by the browser.  The
+        # server stores only its hash and still requires the explicit header
+        # on every write.
+        response.set_cookie(
+            key=active_settings.csrf_cookie_name,
+            value=csrf_token,
+            httponly=False,
+            secure=active_settings.auth_cookie_secure,
+            samesite="lax",
+            max_age=active_settings.auth_session_ttl_seconds,
+            path="/",
+        )
+
+    def _clear_auth_cookies(response: Response) -> None:
+        response.delete_cookie(active_settings.auth_cookie_name, path="/")
+        response.delete_cookie(active_settings.csrf_cookie_name, path="/")
+
+    @app.post("/api/auth/login")
+    def login(body: LoginBody, response: Response) -> dict[str, object]:
+        """Select one fixed fictional account and atomically create a Session."""
+
+        try:
+            context, token, csrf_token = create_login_session(
+                active_session_factory,
+                account_id=body.account_id,
+                ttl_seconds=active_settings.auth_session_ttl_seconds,
+            )
+        except LoginAccountError as error:
+            raise HTTPException(status_code=422, detail="不支持该 Mock 账号") from error
+        _set_auth_cookies(response, token=token, csrf_token=csrf_token)
+        return {
+            "csrf_token": csrf_token,
+            "principal": context.principal.as_payload(),
+            "expires_at": context.expires_at.isoformat(),
+        }
+
+    @app.get("/api/auth/session")
+    def read_auth_session(request: Request, response: Response) -> dict[str, object]:
+        """Refresh the Principal and rotate CSRF after a page reload."""
+
+        context: AuthContext | None = getattr(request.state, "auth_context", None)
+        if context is None:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期")
+        try:
+            csrf_token = rotate_csrf(active_session_factory, context=context)
+        except InvalidAuthSessionError as error:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期") from error
+        response.set_cookie(
+            key=active_settings.csrf_cookie_name,
+            value=csrf_token,
+            httponly=False,
+            secure=active_settings.auth_cookie_secure,
+            samesite="lax",
+            max_age=active_settings.auth_session_ttl_seconds,
+            path="/",
+        )
+        return {
+            "csrf_token": csrf_token,
+            "principal": context.principal.as_payload(),
+            "expires_at": context.expires_at.isoformat(),
+        }
+
+    @app.post("/api/auth/logout")
+    def logout(request: Request, response: Response) -> dict[str, str]:
+        """Revoke the current Session without deleting its Workspace."""
+
+        context: AuthContext | None = getattr(request.state, "auth_context", None)
+        if context is None:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期")
+        try:
+            revoke_session(active_session_factory, context=context)
+        except InvalidAuthSessionError as error:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期") from error
+        _clear_auth_cookies(response)
+        return {"status": "logged_out"}
+
     @app.get("/health")
     def health() -> dict[str, str]:
         """返回最小存活状态，不访问外部依赖"""
@@ -606,7 +1037,7 @@ def create_app(
             },
         )
 
-    @app.get("/api/demo/model-quota")
+    @app.get("/api/demo/model-quota", include_in_schema=False)
     def read_model_quota(
         workspace: Workspace = Depends(require_active_demo),  # noqa: B008
     ) -> dict[str, int]:
@@ -669,6 +1100,7 @@ def create_app(
 
         async def stream_generator() -> AsyncIterator[str]:
             seq = 1
+            auth_session_id = workspace.auth_session_id
             # 首帧只依赖已提交的 started 事实，不等待同步结构化提取。
             yield encode_persisted_frame(
                 started_event,
@@ -687,6 +1119,7 @@ def create_app(
                     model=structured_reply_model,
                     turn_id=turn_id,
                     policy_service=active_policy_service,
+                    auth_session_id=auth_session_id,
                 )
             except ModelQuotaExceededError:
                 message = "模型调用额度已用尽，当前为只读回放模式"
@@ -907,6 +1340,7 @@ def create_app(
                 workspace_service,
                 workspace_token=workspace.token,
                 turn=prepared,
+                auth_session_id=auth_session_id,
             )
             payload = dict(event.payload)
             payload["persisted_event_id"] = event.id
@@ -942,6 +1376,7 @@ def create_app(
                 content=body.content,
                 model=structured_reply_model,
                 policy_service=active_policy_service,
+                auth_session_id=workspace.auth_session_id,
             )
         except ModelQuotaExceededError as error:
             raise HTTPException(
@@ -952,7 +1387,7 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(error)) from error
         return turn.model_dump(mode="json", exclude={"quota"})
 
-    @app.post("/api/workspaces")
+    @app.post("/api/workspaces", include_in_schema=False)
     def create_workspace(request: Request, response: Response) -> dict[str, str]:
         """首次创建 Workspace；已有有效 Cookie 时保持原空间。"""
 
@@ -971,7 +1406,7 @@ def create_app(
         response.status_code = 201
         return {"status": "created"}
 
-    @app.post("/api/workspaces/ensure")
+    @app.post("/api/workspaces/ensure", include_in_schema=False)
     def ensure_workspace(request: Request, response: Response) -> dict[str, str]:
         """复用有效 Workspace；首次或陈旧 Cookie 才创建新空间。"""
 
@@ -1000,7 +1435,7 @@ def create_app(
         _set_workspace_cookie(response, workspace.token)
 
         return {"status": "created"}
-    @app.post("/api/demo/reset")
+    @app.post("/api/demo/reset", include_in_schema=False)
     def reset_workspace(
         response: Response,
         workspace: Workspace = Depends(require_active_demo),  # noqa: B008
@@ -1019,7 +1454,7 @@ def create_app(
         _set_workspace_cookie(response, replacement.token)
         return {"status": "reset"}
 
-    @app.get("/api/workspaces/identity")
+    @app.get("/api/workspaces/identity", include_in_schema=False)
     def read_workspace_identity(
         workspace: Workspace = Depends(require_workspace),  # noqa: B008
     ) -> dict[str, object]:
@@ -1027,7 +1462,7 @@ def create_app(
 
         return identity_payload(workspace)
 
-    @app.post("/api/demo/session")
+    @app.post("/api/demo/session", include_in_schema=False)
     def switch_workspace_identity(
         body: DemoSessionBody,
         response: Response,
@@ -1049,20 +1484,19 @@ def create_app(
         else:
             # A replacement Demo Workspace must not leave a product Cursor that
             # can be replayed after the product backup is restored.
-            workspace_service.clear_cursor(workspace.token)
             _set_product_backup_cookie(response, workspace.token)
             replacement = workspace_service.create()
             updated = workspace_service.enter_demo(replacement.token, body.employee_id)
         _set_workspace_cookie(response, updated.token)
         return {**identity_payload(updated), **demo_session_payload(updated)}
 
-    @app.get("/api/demo/session")
+    @app.get("/api/demo/session", include_in_schema=False)
     def read_demo_session(
         workspace: Workspace = Depends(require_demo_feature),  # noqa: B008
     ) -> dict[str, object]:
         return demo_session_payload(workspace)
 
-    @app.post("/api/demo/session/exit")
+    @app.post("/api/demo/session/exit", include_in_schema=False)
     def exit_demo_session(
         request: Request,
         response: Response,
@@ -1084,7 +1518,7 @@ def create_app(
         _clear_product_backup_cookie(response)
         return {**identity_payload(restored), **demo_session_payload(restored)}
 
-    @app.post("/api/demo/fault-mode")
+    @app.post("/api/demo/fault-mode", include_in_schema=False)
     def set_workspace_fault_mode(
         body: FaultModeBody,
         workspace: Workspace = Depends(require_active_demo),  # noqa: B008
@@ -1099,7 +1533,7 @@ def create_app(
 
     @app.post("/api/drafts/preview")
     def preview_draft(
-        draft: RequestDraft,
+        draft: DraftPreviewBody,
         workspace: Workspace = Depends(require_workspace),  # noqa: B008
     ) -> dict[str, object]:
         """解析权限、预校验草稿并返回仍需补充的字段。"""
@@ -1115,8 +1549,15 @@ def create_app(
                 detail="当前草稿属于另一演示身份，请先切回原身份",
             )
 
-        # employee_id 是后端事实；请求体中的同名字段只为兼容旧表单。
-        bound_draft = draft.model_copy(update={"employee_id": workspace.actor_id})
+        # employee_id is a Principal-bound fact; it is intentionally absent
+        # from DraftPreviewBody so clients cannot even submit that field.
+        bound_draft = RequestDraft(
+            employee_id=workspace.actor_id,
+            entitlement_id=draft.entitlement_id,
+            duration_days=draft.duration_days,
+            justification=draft.justification,
+            confirmed=draft.confirmed,
+        )
         resolution_result: ToolResult | None = None
         resolution = None
         if bound_draft.entitlement_id is not None:
@@ -1183,7 +1624,11 @@ def create_app(
             # 旧 preview 的渐进式收集行为。
             bound_draft = bound_draft.model_copy(update={"confirmed": False})
 
-        workspace_service.save_draft(workspace.token, bound_draft)
+        workspace_service.save_draft(
+            workspace.token,
+            bound_draft,
+            auth_session_id=workspace.auth_session_id,
+        )
         missing_fields = bound_draft.missing_fields()
         return {
             "draft": bound_draft.model_dump(mode="json"),
@@ -1258,7 +1703,12 @@ def create_app(
                     detail="申请未通过目录校验",
                 ) from error
 
-        workspace_service.clear_cursor(workspace.token)
+        if workspace.auth_session_id is None:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期")
+        workspace_service.clear_cursor(
+            workspace.token,
+            auth_session_id=workspace.auth_session_id,
+        )
         return {
             "request_id": str(request.id),
             "request_status": request.request_status,

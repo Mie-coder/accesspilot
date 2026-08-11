@@ -7,6 +7,7 @@
 
 from dataclasses import dataclass
 from hashlib import sha256
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -15,7 +16,12 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from accesspilot.agent.deepseek import SYSTEM_PROMPT
 from accesspilot.agent.embeddings import DeterministicEmbeddingModel
-from accesspilot.conversation import DeterministicStructuredReplyModel, handle_chat_message
+from accesspilot.conversation import (
+    DeterministicStructuredReplyModel,
+)
+from accesspilot.conversation import (
+    handle_chat_message as _handle_chat_message,
+)
 from accesspilot.db.models import PolicyChunkRecord, WorkspaceRecord
 from accesspilot.db.seed import seed_catalog
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
@@ -23,6 +29,15 @@ from accesspilot.domain.models import ParsedReply
 from accesspilot.events import get_model_quota, list_workspace_events
 from accesspilot.rag.policies import index_policy_embeddings
 from accesspilot.workspaces import WorkspaceService
+
+AUTH_SESSION_ID = "policy-conversation-test-auth-session"
+
+
+def handle_chat_message(*args: Any, **kwargs: Any):
+    """Bind direct policy conversation tests to one explicit AuthSession."""
+
+    kwargs.setdefault("auth_session_id", AUTH_SESSION_ID)
+    return _handle_chat_message(*args, **kwargs)
 
 
 @dataclass

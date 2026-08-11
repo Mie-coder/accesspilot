@@ -22,6 +22,7 @@ EvaluationCategory = Literal[
     "draft_isolation",
     "compound_security",
     "numeric_context",
+    "auth_session_isolation",
 ]
 JsonScalar: TypeAlias = str | int | float | bool | None
 TerminalEvent = Literal[
@@ -29,6 +30,45 @@ TerminalEvent = Literal[
     "error.recoverable",
     "turn.interrupted",
 ]
+
+T17_BASELINE_GIT_REVISION = "c683d84"
+T17_BASELINE_CASE_COUNT = 30
+
+# T08 remains a historical twelve-case record at the v1.1 snapshot.  T19 can
+# still run eight cases without changing their original meaning.  Three
+# cross-role cases wait for shared Case/approval work in T20/T22, while the old
+# Workspace-isolation case is superseded by T19's AuthSession evidence.
+T08_BASELINE_GIT_REVISION = "c683d84"
+T08_BASELINE_CASE_COUNT = 12
+DEFERRED_T08_SELECTORS: tuple[str, ...] = (
+    "apps/api/tests/evals/test_fixed_scenarios.py::"
+    "test_eval_01_golden_path_creates_auditable_grant",
+    "apps/api/tests/evals/test_fixed_scenarios.py::"
+    "test_eval_05_data_owner_cannot_approve_out_of_order",
+    "apps/api/tests/evals/test_fixed_scenarios.py::test_eval_06_rejection_is_terminal",
+)
+SUPERSEDED_T08_SELECTORS: tuple[str, ...] = (
+    "apps/api/tests/evals/test_fixed_scenarios.py::"
+    "test_eval_11_workspace_cannot_read_another_request",
+)
+CURRENT_T08_COMPATIBLE_SELECTORS: tuple[str, ...] = (
+    "apps/api/tests/evals/test_fixed_scenarios.py::"
+    "test_eval_02_missing_fields_remain_a_draft",
+    "apps/api/tests/evals/test_fixed_scenarios.py::"
+    "test_eval_03_complete_but_unconfirmed_cannot_submit",
+    "apps/api/tests/evals/test_fixed_scenarios.py::"
+    "test_eval_04_policy_failure_is_recoverable_without_approval",
+    "apps/api/tests/evals/test_fixed_scenarios.py::"
+    "test_eval_07_timeout_recovers_by_querying_original_operation",
+    "apps/api/tests/evals/test_fixed_scenarios.py::"
+    "test_eval_08_duplicate_retry_reuses_one_attempt_and_grant",
+    "apps/api/tests/evals/test_fixed_scenarios.py::"
+    "test_eval_09_sse_reconnect_only_replays_newer_events",
+    "apps/api/tests/evals/test_fixed_scenarios.py::"
+    "test_eval_10_quota_exhaustion_keeps_history_readable",
+    "apps/api/tests/evals/test_fixed_scenarios.py::"
+    "test_eval_12_two_malformed_replies_fail_closed",
+)
 
 
 class EvaluationScenario(BaseModel):
@@ -158,6 +198,16 @@ T17_SCENARIOS: tuple[EvaluationScenario, ...] = (
     ),
 )
 
+# T17 is immutable v1.1 evidence.  T19 permanently closes the Demo/anonymous
+# identity surface, so those historical selectors remain recorded but must not
+# be collected as current proof or silently replaced with new 404 assertions.
+SUPERSEDED_T17_SCENARIO_IDS = frozenset({"T17-01", "T17-09"})
+ACTIVE_T17_SCENARIOS: tuple[EvaluationScenario, ...] = tuple(
+    scenario
+    for scenario in T17_SCENARIOS
+    if scenario.scenario_id not in SUPERSEDED_T17_SCENARIO_IDS
+)
+
 
 T18_SCENARIOS: tuple[EvaluationScenario, ...] = (
     _scenario(
@@ -180,7 +230,23 @@ T18_SCENARIOS: tuple[EvaluationScenario, ...] = (
 )
 
 
-PRODUCT_SCENARIOS: tuple[EvaluationScenario, ...] = T17_SCENARIOS + T18_SCENARIOS
+T19_SCENARIOS: tuple[EvaluationScenario, ...] = (
+    _scenario(
+        "T19-01",
+        "auth_session_isolation",
+        23,
+        "apps/api/tests/api/test_t19_auth.py",
+        "apps/api/tests/db/test_t19_migration.py",
+    ),
+)
+
+
+# PRODUCT_SCENARIOS is current compatible/new proof.  The full T17_SCENARIOS
+# tuple above is historical v1.1 metadata and therefore has a different
+# denominator; T19 evidence is counted only in T19_SCENARIOS.
+PRODUCT_SCENARIOS: tuple[EvaluationScenario, ...] = (
+    ACTIVE_T17_SCENARIOS + T18_SCENARIOS + T19_SCENARIOS
+)
 
 
 class ScenarioResult(BaseModel):

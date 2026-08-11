@@ -46,7 +46,7 @@ function ChatMessage() {
   )
 }
 
-function StarterPrompts() {
+export function StarterPrompts() {
   const aui = useAui()
   const send = (content: string) => {
     void aui.thread.append({ role: 'user', content: [{ type: 'text', text: content }] })
@@ -58,20 +58,20 @@ function StarterPrompts() {
       </div>
       <p className="eyebrow">APPLICANT WORKBENCH</p>
       <h2>从一句真实需求开始</h2>
-      <p>我会逐项收集员工编号、权限、期限和理由。信息完整后，仍需你明确确认。</p>
+      <p>登录身份已确认。我会逐项收集权限、期限和理由。信息完整后，仍需你明确确认。</p>
       <div className="starter-actions">
-        <button type="button" onClick={() => send('我是 EMP-001')}>
-          从员工编号开始
+        <button type="button" onClick={() => send('我需要申请一个权限')}>
+          从权限需求开始
         </button>
         <button
           type="button"
           onClick={() =>
             send(
-              '我是 EMP-001，需要 insighthub.customer_export 权限 14 天，用于季度客户分析。',
+              '我需要 insighthub.customer_export 权限 14 天，用于季度客户分析。',
             )
           }
         >
-          填入完整演示申请
+          填入完整申请示例
         </button>
       </div>
     </div>
@@ -138,7 +138,7 @@ function Composer() {
         <ComposerPrimitive.Input
           className="composer-input"
           aria-label="描述权限申请"
-          placeholder="例如：我是 EMP-001，需要 insighthub.customer_export 权限 14 天…"
+          placeholder="例如：需要 insighthub.customer_export 权限 14 天…"
           rows={1}
           unstable_insertNewlineOnTouchEnter
         />

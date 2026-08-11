@@ -5,6 +5,7 @@ import {
   Bot,
   Database,
   LoaderCircle,
+  LogOut,
   RotateCcw,
   ShieldCheck,
   Sparkles,
@@ -12,11 +13,10 @@ import {
 import { useEffect, useState } from 'react'
 
 import { approvalRoleFor } from './approval'
-import { ApiError, bootstrapWorkspace } from './api'
+import { ApiError, bootstrapWorkspace, login, logout, resetAuthClientState } from './api'
 import { AccessCards } from './AccessCards'
 import { ChatThread } from './ChatThread'
 import { DraftCard } from './DraftCard'
-import { DemoConsole } from './DemoConsole'
 import { OperationsConsole } from './OperationsConsole'
 import { PolicyCard } from './PolicyCard'
 import { RequestTimeline } from './RequestTimeline'
@@ -97,11 +97,13 @@ function ActivityFeed({ events }: { events: WorkspaceEvent[] }) {
   )
 }
 
-function WorkbenchPage() {
+function WorkbenchPage({ onLogout }: { onLogout: () => Promise<void> }) {
   const workbench = useWorkbench()
   const approvalRole = approvalRoleFor(workbench.identity)
   const [showOperations, setShowOperations] = useState(false)
   const [activeView, setActiveView] = useState<'assistant' | 'access' | 'policy' | 'request'>('assistant')
+  const [logoutBusy, setLogoutBusy] = useState(false)
+  const [logoutError, setLogoutError] = useState<string | null>(null)
   const aui = useAui()
   const isRunning = useAuiState((state) => state.thread.isRunning)
   const confirm = () => {
@@ -109,6 +111,21 @@ function WorkbenchPage() {
       role: 'user',
       content: [{ type: 'text', text: '确认提交' }],
     })
+  }
+  const handleLogout = async () => {
+    setLogoutBusy(true)
+    setLogoutError(null)
+    try {
+      await onLogout()
+    } catch (logoutFailure: unknown) {
+      setLogoutError(
+        logoutFailure instanceof ApiError || logoutFailure instanceof Error
+          ? logoutFailure.message
+          : '退出登录失败，请稍后重试',
+      )
+    } finally {
+      setLogoutBusy(false)
+    }
   }
 
   return (
@@ -128,9 +145,8 @@ function WorkbenchPage() {
             <strong>{workbench.identity.name}</strong>
             <span>{workbench.identity.department} · {workbench.identity.employee_id}</span>
           </div>
-          <DemoConsole session={workbench.demoSession} />
           {approvalRole ? (
-            <button className="demo-console-toggle" type="button" onClick={() => setShowOperations((value) => !value)}>
+            <button className="operations-toggle" type="button" onClick={() => setShowOperations((value) => !value)}>
               {showOperations ? '返回产品工作台' : '打开审批工作台'}
             </button>
           ) : null}
@@ -142,8 +158,24 @@ function WorkbenchPage() {
             <span aria-hidden="true" />
             {workbench.connectionState === 'reconnecting' ? '活动流重连中' : 'API 已连接'}
           </div>
+          <button
+            className="logout-button"
+            type="button"
+            disabled={logoutBusy}
+            onClick={() => void handleLogout()}
+          >
+            <LogOut size={16} />
+            {logoutBusy ? '退出中…' : '退出登录'}
+          </button>
         </div>
       </header>
+
+      {logoutError ? (
+        <div className="recoverable-banner product-global-error" role="alert">
+          <AlertCircle size={17} />
+          <span>{logoutError}</span>
+        </div>
+      ) : null}
 
       <nav className="product-nav" aria-label="产品导航">
         {([
@@ -166,13 +198,6 @@ function WorkbenchPage() {
           </button>
         ))}
       </nav>
-
-      {workbench.demoSession.demo_session_active ? (
-        <div className="demo-session-banner" role="status">
-          <Sparkles size={15} />
-          演示场景已激活 · {workbench.demoSession.employee_id ?? '虚构身份'} · 仅用于作品集演示，不代表真实产品权限
-        </div>
-      ) : null}
 
       {(activeView !== 'assistant' || showOperations) && workbench.error ? (
         <div className="recoverable-banner product-global-error" role="alert">
@@ -237,8 +262,66 @@ function LoadingScreen() {
     <main className="boot-screen" aria-live="polite">
       <div className="boot-mark"><Sparkles size={24} /></div>
       <LoaderCircle className="spin" size={20} />
-      <h1>正在准备你的演示空间</h1>
-      <p>连接 PostgreSQL 并回放当前 Workspace 的安全事件…</p>
+      <h1>正在检查登录状态</h1>
+      <p>恢复当前 Session 与安全事件回放…</p>
+    </main>
+  )
+}
+
+const MOCK_ACCOUNTS = [
+  { id: 'EMP-001', role: '申请人', detail: '发起权限申请并查看自己的 Case' },
+  { id: 'EMP-002', role: '直属经理', detail: '处理当前轮到的经理审批' },
+  { id: 'EMP-003', role: '数据负责人', detail: '处理经理通过后的数据审批' },
+  { id: 'EMP-004', role: '权限管理员', detail: '执行已全部批准的模拟开通' },
+] as const
+
+function LoginScreen({ onAuthenticated }: { onAuthenticated: () => Promise<void> }) {
+  const [busyAccount, setBusyAccount] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const chooseAccount = async (accountId: string) => {
+    setBusyAccount(accountId)
+    setError(null)
+    try {
+      await login(accountId)
+      await onAuthenticated()
+    } catch (loginError: unknown) {
+      if (loginError instanceof ApiError || loginError instanceof Error) {
+        setError(loginError.message)
+      } else {
+        setError('登录暂时失败，请稍后重试')
+      }
+    } finally {
+      setBusyAccount(null)
+    }
+  }
+
+  return (
+    <main className="login-screen">
+      <section className="login-card" aria-labelledby="login-title">
+        <p className="eyebrow">ACCESSPILOT · MOCK LOGIN</p>
+        <h1 id="login-title">选择一个作品集账号</h1>
+        <p className="login-disclaimer">
+          作品集 Mock 登录，非真实身份认证。账号只用于演示 Session 隔离与角色边界，不包含密码或注册。
+        </p>
+        <div className="login-account-grid">
+          {MOCK_ACCOUNTS.map((account) => (
+            <button
+              key={account.id}
+              className="login-account-card"
+              type="button"
+              disabled={busyAccount !== null}
+              onClick={() => void chooseAccount(account.id)}
+            >
+              <span className="login-account-id">{account.id}</span>
+              <strong>{account.role}</strong>
+              <small>{account.detail}</small>
+              {busyAccount === account.id ? <LoaderCircle className="spin" size={16} /> : null}
+            </button>
+          ))}
+        </div>
+        {error ? <p className="login-error" role="alert">{error}</p> : null}
+      </section>
     </main>
   )
 }
@@ -258,16 +341,26 @@ export function App() {
   const [snapshot, setSnapshot] = useState<WorkspaceSnapshot | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [attempt, setAttempt] = useState(0)
+  const [authState, setAuthState] = useState<'checking' | 'anonymous' | 'authenticated'>('checking')
 
   useEffect(() => {
     let active = true
     setError(null)
     void bootstrapWorkspace()
       .then((value) => {
-        if (active) setSnapshot(value)
+        if (active) {
+          setSnapshot(value)
+          setAuthState('authenticated')
+        }
       })
       .catch((bootError: unknown) => {
         if (!active) return
+        if (bootError instanceof ApiError && bootError.status === 401) {
+          resetAuthClientState()
+          setSnapshot(null)
+          setAuthState('anonymous')
+          return
+        }
         setError(
           bootError instanceof ApiError || bootError instanceof Error
             ? bootError.message
@@ -279,13 +372,45 @@ export function App() {
     }
   }, [attempt])
 
+  useEffect(() => {
+    const onUnauthorized = () => {
+      resetAuthClientState()
+      setSnapshot(null)
+      setAuthState('anonymous')
+    }
+    window.addEventListener('accesspilot:unauthorized', onUnauthorized)
+    return () => window.removeEventListener('accesspilot:unauthorized', onUnauthorized)
+  }, [])
+
+  if (authState === 'checking') {
+    return error
+      ? <BootError message={error} onRetry={() => setAttempt((value) => value + 1)} />
+      : <LoadingScreen />
+  }
+  if (authState === 'anonymous') {
+    return (
+      <LoginScreen
+        onAuthenticated={async () => {
+          setAuthState('checking')
+          setError(null)
+          setAttempt((value) => value + 1)
+        }}
+      />
+    )
+  }
   if (error) {
     return <BootError message={error} onRetry={() => setAttempt((value) => value + 1)} />
   }
   if (snapshot === null) return <LoadingScreen />
   return (
     <WorkbenchRuntime snapshot={snapshot}>
-      <WorkbenchPage />
+      <WorkbenchPage
+        onLogout={async () => {
+          await logout()
+          setSnapshot(null)
+          setAuthState('anonymous')
+        }}
+      />
     </WorkbenchRuntime>
   )
 }

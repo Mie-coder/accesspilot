@@ -8,7 +8,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useEffect } from 'react'
 import { describe, expect, it } from 'vitest'
 
-import { ChatThread } from './ChatThread'
+import { ChatThread, StarterPrompts } from './ChatThread'
 
 const idleAdapter: ChatModelAdapter = {
   async *run() {
@@ -54,6 +54,15 @@ function RunningThread() {
   )
 }
 
+function EmptyThread() {
+  const runtime = useLocalRuntime(idleAdapter)
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <StarterPrompts />
+    </AssistantRuntimeProvider>
+  )
+}
+
 
 
 function PartialRunningThread() {
@@ -71,6 +80,15 @@ function PartialRunningThread() {
   )
 }
 describe('ChatThread', () => {
+  it('starts from a confirmed login identity instead of asking the user to self-identify', () => {
+    render(<EmptyThread />)
+
+    expect(screen.getByText(/登录身份已确认/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '从权限需求开始' })).toBeInTheDocument()
+    expect(screen.queryByText(/从员工编号开始/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/我是 EMP-001/)).not.toBeInTheDocument()
+  })
+
   it('shows progress with an accessible cancel action', async () => {
     render(<RunningThread />)
 
