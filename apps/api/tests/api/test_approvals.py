@@ -40,7 +40,7 @@ def approval_client(
     client = TestClient(
         create_app(
             store=SqlAlchemyWorkspaceStore(database_session_factory),
-            settings=Settings(demo_mode_enabled=True),
+            settings=Settings(demo_mode_enabled=True, deepseek_api_key=None),
             session_factory=database_session_factory,
             embedding_model=embedding_model,
             risk_review_model=DeterministicRiskReviewModel(),
@@ -74,6 +74,8 @@ def submit_request(client: TestClient) -> str:
 
 
 def start_case(client: TestClient, request_id: str) -> dict[str, object]:
+    packet = client.post(f"/api/requests/{request_id}/decision-packet")
+    assert packet.status_code == 201
     response = client.post(f"/api/requests/{request_id}/approval-case")
     assert response.status_code == 201
     return response.json()
@@ -185,7 +187,7 @@ def test_api_rejects_cross_workspace_before_calling_risk_model(
         index_policy_embeddings(session, embedding_model)
     app = create_app(
         store=SqlAlchemyWorkspaceStore(database_session_factory),
-        settings=Settings(demo_mode_enabled=True),
+        settings=Settings(demo_mode_enabled=True, deepseek_api_key=None),
         session_factory=database_session_factory,
         embedding_model=embedding_model,
         risk_review_model=review_model,

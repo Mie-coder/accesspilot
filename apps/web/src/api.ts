@@ -2,6 +2,7 @@ import type {
   ApprovalInbox,
   CaseList,
   ChatTurn,
+  DecisionPacket,
   RequestDraft,
   RequestResult,
   RequestDetail,
@@ -524,6 +525,17 @@ export async function readAccessibleRequests(signal?: AbortSignal): Promise<Case
 
 export async function submitRequest(signal?: AbortSignal): Promise<RequestResult> {
   return requestJson<RequestResult>('/api/requests', { method: 'POST', signal })
+}
+
+/** Create or return the server-owned immutable Packet; the client supplies no business facts. */
+export async function createDecisionPacket(
+  requestId: string,
+  signal?: AbortSignal,
+): Promise<DecisionPacket> {
+  return requestJson<DecisionPacket>(
+    `/api/requests/${encodeURIComponent(requestId)}/decision-packet`,
+    { method: 'POST', signal },
+  )
 }
 
 export async function readApprovalInbox(): Promise<ApprovalInbox> {

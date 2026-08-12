@@ -44,6 +44,7 @@ from accesspilot.approvals import (
     ApprovalStepAlreadyDecidedError,
     ApprovalTerminalError,
     ApprovalWorkspaceMismatchError,
+    DecisionPacketRequiredError,
     decide_approval,
     require_approval_startable,
     start_approval_case,
@@ -82,6 +83,14 @@ from accesspilot.db.models import (
 )
 from accesspilot.db.session import build_engine, build_session_factory
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
+from accesspilot.decision_packets import (
+    DecisionAdvisoryModel,
+    DecisionPacketGenerationError,
+    DecisionPacketNotFoundError,
+    DecisionPacketStateError,
+    decision_packet_payload,
+    generate_decision_packet,
+)
 from accesspilot.domain.models import RequestDraft
 from accesspilot.events import (
     ModelQuotaExceededError,
@@ -119,14 +128,8 @@ from accesspilot.requests import (
     RequestWorkspaceNotFoundError,
     submit_access_request,
 )
-from accesspilot.risk.deepseek import DeepSeekRiskReviewModel
-from accesspilot.risk.review import (
-    DeterministicRiskReviewModel,
-    RiskReviewFailed,
-    RiskReviewModel,
-    RiskReviewRequestNotFoundError,
-    review_request_risk,
-)
+from accesspilot.risk.decision_packet import DeepSeekDecisionAdvisoryModel
+from accesspilot.risk.review import RiskReviewModel
 from accesspilot.streaming import (
     AnswerStreamModel,
     DeterministicAnswerStreamModel,
@@ -268,6 +271,7 @@ def create_app(
     session_factory: sessionmaker[Session] | None = None,
     embedding_model: EmbeddingModel | None = None,
     risk_review_model: RiskReviewModel | None = None,
+    decision_advisory_model: DecisionAdvisoryModel | None = None,
     iam_provisioner: IamProvisioner | None = None,
     structured_reply_model: StructuredReplyModel | None = None,
     answer_stream_model: AnswerStreamModel | None = None,
@@ -296,15 +300,17 @@ def create_app(
         embedding_model=embedding_model,
         similarity_threshold=active_settings.policy_similarity_threshold,
     )
-    if risk_review_model is None:
-        if active_settings.deepseek_api_key is None:
-            risk_review_model = DeterministicRiskReviewModel()
-        else:
-            risk_review_model = DeepSeekRiskReviewModel(
-                api_key=active_settings.deepseek_api_key.get_secret_value(),
-                model_name=active_settings.deepseek_model,
-                base_url=active_settings.deepseek_base_url,
-            )
+    # Kept as a constructor seam for v1.1 callers; T21 never consults this
+    # model from the approval endpoint. Decision advice has its own bounded
+    # schema and an honest no-key unavailable mode.
+    del risk_review_model
+    if decision_advisory_model is None and active_settings.deepseek_api_key is not None:
+        decision_advisory_model = DeepSeekDecisionAdvisoryModel(
+            api_key=active_settings.deepseek_api_key.get_secret_value(),
+            model_name=active_settings.deepseek_model,
+            base_url=active_settings.deepseek_base_url,
+            timeout_seconds=active_settings.decision_packet_timeout_seconds,
+        )
     if iam_provisioner is None:
         iam_provisioner = SimulatedIamProvisioner()
     if structured_reply_model is None:
@@ -1715,46 +1721,76 @@ def create_app(
             "request_status": request.request_status,
         }
 
-    @app.post("/api/requests/{request_id}/approval-case", status_code=201)
-    def create_approval_case(
+    @app.post("/api/requests/{request_id}/decision-packet", status_code=201)
+    async def create_decision_packet(
+        request: Request,
+        response: Response,
         request_id: UUID,
         workspace: Workspace = Depends(require_workspace),  # noqa: B008
     ) -> dict[str, object]:
-        """执行只读风险审查后，为正式申请创建人工审批路线。"""
+        """为 requester 的已提交 Case 创建或返回唯一决策材料。"""
 
+        if await request.body():
+            raise HTTPException(status_code=422, detail="决策材料接口不接受业务输入")
+        context: AuthContext | None = getattr(request.state, "auth_context", None)
+        if context is None:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期")
         with active_session_factory() as session:
             try:
-                # 先做本地所有权和重复检查，避免越权请求触发外部模型调用。
+                packet, created = generate_decision_packet(
+                    session,
+                    request_id=request_id,
+                    actor_id=context.principal.employee_id,
+                    embedding_model=embedding_model,
+                    advisory_model=decision_advisory_model,
+                )
+            except DecisionPacketNotFoundError as error:
+                raise HTTPException(status_code=404, detail="申请不存在") from error
+            except DecisionPacketStateError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            except (DecisionPacketGenerationError, ApprovalRoutingError) as error:
+                raise HTTPException(
+                    status_code=503,
+                    detail="决策材料暂时无法生成，请重试",
+                ) from error
+        del workspace
+        response.status_code = 201 if created else 200
+        return decision_packet_payload(packet)
+
+    @app.post("/api/requests/{request_id}/approval-case", status_code=201)
+    def create_approval_case(
+        request: Request,
+        request_id: UUID,
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> dict[str, object]:
+        """只根据已冻结 Packet 和目录创建人工审批路线。"""
+
+        context: AuthContext | None = getattr(request.state, "auth_context", None)
+        if context is None:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期")
+        with active_session_factory() as session:
+            try:
                 require_approval_startable(
                     session,
-                    workspace_token=workspace.token,
                     request_id=request_id,
-                )
-                review = review_request_risk(
-                    session,
-                    request_id=request_id,
-                    embedding_model=embedding_model,
-                    review_model=risk_review_model,
+                    actor_id=context.principal.employee_id,
                 )
                 case = start_approval_case(
                     session,
-                    workspace_token=workspace.token,
                     request_id=request_id,
-                    review=review,
+                    actor_id=context.principal.employee_id,
                 )
-            except (RiskReviewRequestNotFoundError, ApprovalNotFoundError) as error:
+            except ApprovalNotFoundError as error:
                 raise HTTPException(status_code=404, detail="申请不存在") from error
             except ApprovalWorkspaceMismatchError as error:
                 raise HTTPException(status_code=404, detail="申请不存在") from error
             except ApprovalAlreadyStartedError as error:
                 raise HTTPException(status_code=409, detail="审批流已经创建") from error
+            except DecisionPacketRequiredError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
             except ApprovalRoutingError as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
-            except RiskReviewFailed as error:
-                raise HTTPException(
-                    status_code=503,
-                    detail="风险审查暂时不可用，请稍后重试",
-                ) from error
+            del workspace
             return approval_payload(session, case)
 
     @app.get("/api/approval-inbox")

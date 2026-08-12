@@ -15,6 +15,7 @@ from accesspilot.db.models import (
     ApprovalCaseRecord,
     ApprovalStepRecord,
     AuditEventRecord,
+    DecisionPacketRecord,
     EmployeeRecord,
     EntitlementRecord,
     PolicyChunkRecord,
@@ -22,6 +23,7 @@ from accesspilot.db.models import (
     WorkspaceRecord,
 )
 from accesspilot.db.workspace_store import hash_workspace_token
+from accesspilot.decision_packets import DecisionPacketPayload, decision_packet_payload
 
 _APPROVER_ROLES = frozenset({"manager", "data_owner"})
 
@@ -130,6 +132,7 @@ class _PublicRequestDetail(BaseModel):
     view_mode: str
     request: _PublicRequest
     entitlement: _PublicEntitlement
+    decision_packet: DecisionPacketPayload | None
     risk_review: _PublicRiskReview | None
     approval: _PublicApproval | None
     provisioning: _PublicProvisioning
@@ -308,6 +311,11 @@ def _build_request_detail(
         if case is not None
         else []
     )
+    packet = session.scalar(
+        select(DecisionPacketRecord).where(
+            DecisionPacketRecord.request_id == request.id
+        )
+    )
     attempt = session.scalar(
         select(ProvisioningAttemptRecord).where(
             ProvisioningAttemptRecord.workspace_id == workspace_id,
@@ -353,6 +361,9 @@ def _build_request_detail(
             "approval_policy": entitlement.approval_policy,
             "owner_id": entitlement.owner_id,
         },
+        "decision_packet": (
+            decision_packet_payload(packet) if packet is not None else None
+        ),
         "risk_review": _risk_review_payload(session, audit_events),
         "approval": (
             {
@@ -824,6 +835,7 @@ def _project_public_request_detail(detail: dict[str, object]) -> dict[str, objec
             "view_mode": detail.get("view_mode"),
             "request": detail.get("request"),
             "entitlement": detail.get("entitlement"),
+            "decision_packet": detail.get("decision_packet"),
             "risk_review": public_risk,
             "approval": public_approval,
             "provisioning": public_provisioning,

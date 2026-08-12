@@ -16,6 +16,7 @@ import {
   readAccessibleRequests,
   readRequestDetail,
 } from './api'
+import { DecisionPacketPanel } from './DecisionPacketPanel'
 import type { CaseList, RequestDetail } from './types'
 
 interface OperationsViewProps {
@@ -200,27 +201,31 @@ export function OperationsView({
             <p>{detail.request.justification}</p>
           </div>
 
-          <section className="detail-section" aria-labelledby="risk-title">
-            <div className="section-heading compact">
-              <div><p className="eyebrow">POLICY EVIDENCE</p><h3 id="risk-title">风险审查与政策引用</h3></div>
-              <ShieldAlert size={18} />
-            </div>
-            {detail.risk_review ? (
-              <>
-                <p className="risk-summary">{detail.risk_review.summary}</p>
-                <ul className="policy-list">
-                  {detail.risk_review.citations.map((citation) => (
-                    <li key={citation.policy_code}>
-                      <span>{citation.policy_code}</span>
-                      <div><strong>{citation.title ?? '已引用政策'}</strong><p>{citation.reason}</p></div>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            ) : (
-              <p className="detail-empty">审批路线启动后才会出现风险结论和真实政策引用。</p>
-            )}
-          </section>
+          {detail.decision_packet ? (
+            <DecisionPacketPanel packet={detail.decision_packet} />
+          ) : (
+            <section className="detail-section" aria-labelledby="risk-title">
+              <div className="section-heading compact">
+                <div><p className="eyebrow">POLICY EVIDENCE</p><h3 id="risk-title">风险审查与政策引用</h3></div>
+                <ShieldAlert size={18} />
+              </div>
+              {detail.risk_review ? (
+                <>
+                  <p className="risk-summary">{detail.risk_review.summary}</p>
+                  <ul className="policy-list">
+                    {detail.risk_review.citations.map((citation) => (
+                      <li key={citation.policy_code}>
+                        <span>{citation.policy_code}</span>
+                        <div><strong>{citation.title ?? '已引用政策'}</strong><p>{citation.reason}</p></div>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <p className="detail-empty">决策材料尚未生成。</p>
+              )}
+            </section>
+          )}
 
           <section className="detail-section" aria-labelledby="steps-title">
             <div className="section-heading compact">

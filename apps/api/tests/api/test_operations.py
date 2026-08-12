@@ -28,7 +28,7 @@ def operations_client(
     client = TestClient(
         create_app(
             store=SqlAlchemyWorkspaceStore(database_session_factory),
-            settings=Settings(demo_mode_enabled=True),
+            settings=Settings(demo_mode_enabled=True, deepseek_api_key=None),
             session_factory=database_session_factory,
             embedding_model=embedding_model,
             risk_review_model=DeterministicRiskReviewModel(),
@@ -54,6 +54,8 @@ def submit_and_start(client: TestClient) -> tuple[str, str]:
         },
     ).status_code == 200
     request_id = client.post("/api/requests").json()["request_id"]
+    packet = client.post(f"/api/requests/{request_id}/decision-packet")
+    assert packet.status_code == 201
     started = client.post(f"/api/requests/{request_id}/approval-case")
     assert started.status_code == 201
     return request_id, started.json()["approval_case_id"]
@@ -103,8 +105,10 @@ def test_detail_returns_policy_steps_and_append_only_audit(
     assert body["view_mode"] == "read_only_replay"
     assert body["request"]["request_id"] == request_id
     assert body["entitlement"]["risk_level"] == "high"
-    assert body["risk_review"]["citations"]
-    assert body["risk_review"]["citations"][0]["title"]
+    assert any(
+        item["source_kind"] == "policy_evidence"
+        for item in body["decision_packet"]["items"]
+    )
     assert [step["step_status"] for step in body["approval"]["steps"]] == [
         "pending",
         "waiting",
@@ -122,7 +126,7 @@ def test_detail_returns_policy_steps_and_append_only_audit(
     }
     assert [event["event_type"] for event in body["audit_events"]] == [
         "request.submitted",
-        "risk_review.completed",
+        "decision_packet.created",
         "approval.started",
     ]
 

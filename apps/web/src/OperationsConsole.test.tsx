@@ -52,6 +52,7 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
       approval_policy: 'manager_and_data_owner',
       owner_id: 'EMP-003',
     },
+    decision_packet: null,
     risk_review: {
       risk_level: 'high',
       outcome: 'requires_human_review',

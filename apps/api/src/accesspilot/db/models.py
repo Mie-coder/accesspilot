@@ -356,6 +356,32 @@ class AccessRequestRecord(Base):
     )
 
 
+class DecisionPacketRecord(Base):
+    """One immutable, source-labelled decision snapshot per formal request."""
+
+    __tablename__ = "decision_packets"
+    __table_args__ = (
+        CheckConstraint(
+            "generation_mode IN ('provider', 'deterministic', 'unavailable')",
+            name="generation_mode_valid",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    request_id: Mapped[UUID] = mapped_column(
+        ForeignKey("access_requests.id", ondelete="CASCADE"),
+        unique=True,
+    )
+    packet_version: Mapped[str] = mapped_column(String(30))
+    generation_mode: Mapped[str] = mapped_column(String(30))
+    catalog_version: Mapped[str] = mapped_column(String(50))
+    frozen_content: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+    )
+
+
 class ApprovalCaseRecord(Base):
     """保存一份申请的整体审批流程状态。"""
 

@@ -1,14 +1,24 @@
-import { Check, Circle, FileCheck2, LoaderCircle, ShieldCheck } from 'lucide-react'
+import { AlertCircle, Check, Circle, FileCheck2, LoaderCircle, RefreshCw, ShieldCheck } from 'lucide-react'
 
-import type { RequestDraft, RequestResult } from './types'
+import type { DecisionPacket, RequestDraft, RequestResult } from './types'
 
 interface DraftCardProps {
   draft: RequestDraft | null
   missingFields: string[]
   requestResult: RequestResult | null
+  decisionPacket: DecisionPacket | null
+  decisionPacketError: string | null
+  isGeneratingDecisionPacket: boolean
   isBusy: boolean
   onConfirm: () => void
   onSubmit: () => void
+  onRetryDecisionPacket: () => void
+}
+
+const generationModeLabels: Record<DecisionPacket['generation_mode'], string> = {
+  provider: 'DeepSeek AI 建议',
+  deterministic: '规则建议',
+  unavailable: '建议不可用',
 }
 
 const fields: Array<{ key: keyof RequestDraft; label: string }> = [
@@ -28,9 +38,13 @@ export function DraftCard({
   draft,
   missingFields,
   requestResult,
+  decisionPacket,
+  decisionPacketError,
+  isGeneratingDecisionPacket,
   isBusy,
   onConfirm,
   onSubmit,
+  onRetryDecisionPacket,
 }: DraftCardProps) {
   const confirmed = draft?.confirmed === true && missingFields.length === 0
   const complete = draft !== null && missingFields.length === 0
@@ -74,12 +88,39 @@ export function DraftCard({
       </div>
 
       {requestResult ? (
-        <div className="request-created" role="status">
-          <FileCheck2 size={18} />
-          <div>
-            <strong>正式申请已创建</strong>
-            <span>{requestResult.request_id}</span>
+        <div className="submitted-result">
+          <div className="request-created" role="status">
+            <FileCheck2 size={18} />
+            <div>
+              <strong>正式申请已创建</strong>
+              <span>{requestResult.request_id}</span>
+            </div>
           </div>
+
+          {isGeneratingDecisionPacket ? (
+            <div className="packet-generation-state" role="status">
+              <LoaderCircle className="spin" size={16} />
+              <span>正在冻结决策材料…</span>
+            </div>
+          ) : decisionPacket ? (
+            <div className="packet-generation-state is-ready" role="status">
+              <ShieldCheck size={16} />
+              <span>
+                <strong>决策材料已冻结</strong>
+                {generationModeLabels[decisionPacket.generation_mode]} · {decisionPacket.generation_mode}
+              </span>
+            </div>
+          ) : (
+            <div className={`packet-generation-state is-error${decisionPacketError ? '' : ' is-pending'}`}>
+              <div role={decisionPacketError ? 'alert' : 'status'}>
+                <AlertCircle size={16} />
+                <span>{decisionPacketError ?? '决策材料尚未生成，可在当前申请上安全重试。'}</span>
+              </div>
+              <button type="button" onClick={onRetryDecisionPacket}>
+                <RefreshCw size={14} />重试生成决策材料
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         <button

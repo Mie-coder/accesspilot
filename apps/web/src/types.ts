@@ -37,6 +37,61 @@ export interface RequestResult {
   request_status: string
 }
 
+export type DecisionPacketGenerationMode = 'provider' | 'deterministic' | 'unavailable'
+
+export type DecisionPacketSourceKind =
+  | 'verified_fact'
+  | 'policy_evidence'
+  | 'user_claim'
+  | 'advisory'
+
+export interface DecisionPacketItem {
+  source_kind: DecisionPacketSourceKind
+  source_ref: string
+  source_version: string
+  title: string
+  content: string
+  generation_mode: DecisionPacketGenerationMode | null
+}
+
+export interface DecisionPacket {
+  packet_id: string
+  request_id: string
+  packet_version: string
+  generation_mode: DecisionPacketGenerationMode
+  catalog_version: string
+  created_at: string
+  frozen_request: {
+    requester_id: string
+    requester_name: string
+    entitlement_code: string
+    entitlement_name: string
+    duration_days: number
+    justification: string
+    request_status: string
+    confirmed_at: string
+  }
+  catalog: {
+    risk_level: string
+    approval_policy: string
+    max_duration_days: number | null
+  }
+  fixed_route: Array<{
+    step_order: number
+    approver_id: string
+    approver_role: string
+  }>
+  items: DecisionPacketItem[]
+  advisory: {
+    assessment: 'clear' | 'risk' | 'blocked'
+    summary: string
+    unknowns: string[]
+    recommendations: string[]
+    citations: string[]
+  } | null
+  availability_message: string | null
+}
+
 export interface WorkspaceIdentity {
   employee_id: string
   name: string
@@ -225,6 +280,7 @@ export interface RequestDetail {
     approval_policy: string
     owner_id: string | null
   }
+  decision_packet: DecisionPacket | null
   risk_review: {
     risk_level: string
     outcome: string

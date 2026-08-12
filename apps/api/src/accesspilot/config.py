@@ -35,6 +35,7 @@ class Settings(BaseSettings):
         default="https://api.deepseek.com",
         validation_alias="DEEPSEEK_BASE_URL",
     )
+    decision_packet_timeout_seconds: float = Field(default=20.0, ge=1.0, le=60.0)
     dashscope_api_key: SecretStr | None = Field(
         default=None,
         validation_alias="DASHSCOPE_API_KEY",

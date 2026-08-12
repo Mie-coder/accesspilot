@@ -11,6 +11,7 @@ from accesspilot.db.models import (
     ApprovalCaseRecord,
     ApprovalStepRecord,
     AuditEventRecord,
+    DecisionPacketRecord,
     EmployeeRecord,
     EntitlementRecord,
     WorkspaceRecord,
@@ -19,7 +20,6 @@ from accesspilot.db.models import (
 from accesspilot.db.workspace_store import hash_workspace_token
 from accesspilot.domain.catalog import ApprovalPolicy
 from accesspilot.domain.workflow import ApprovalStatus
-from accesspilot.risk.review import RiskReview
 
 
 class ApprovalError(RuntimeError):
@@ -40,6 +40,10 @@ class ApprovalAlreadyStartedError(ApprovalError):
 
 class ApprovalRoutingError(ApprovalError):
     """目录缺少可执行的审批路由。"""
+
+
+class DecisionPacketRequiredError(ApprovalError):
+    """启动审批前必须已存在冻结的 Decision Packet。"""
 
 
 class ApprovalActorMismatchError(ApprovalError):
@@ -77,7 +81,7 @@ def _require_workspace_scope(
         raise ApprovalWorkspaceMismatchError("审批流不属于当前 Workspace")
 
 
-def _build_route(
+def build_approval_route(
     requester: EmployeeRecord,
     entitlement: EntitlementRecord,
 ) -> list[tuple[str, str]]:
@@ -98,16 +102,23 @@ def _build_route(
 def require_approval_startable(
     session: Session,
     *,
-    workspace_token: str,
     request_id: UUID,
+    actor_id: str | None = None,
+    workspace_token: str | None = None,
 ) -> None:
-    """在调用外部风险模型前先验证 Workspace、申请状态与重复提交。"""
+    """在任何写入前验证 requester ACL、状态、Packet 与重复启动。"""
 
-    workspace = _load_workspace(session, workspace_token)
     request = session.get(AccessRequestRecord, request_id)
     if request is None:
         raise ApprovalNotFoundError("申请不存在")
-    _require_workspace_scope(workspace, request.workspace_id)
+    if actor_id is not None:
+        if request.requester_id != actor_id:
+            raise ApprovalNotFoundError("申请不存在")
+    elif workspace_token is not None:
+        workspace = _load_workspace(session, workspace_token)
+        _require_workspace_scope(workspace, request.workspace_id)
+    else:
+        raise ApprovalNotFoundError("申请不存在")
     if request.request_status != "submitted":
         raise ApprovalRoutingError("只有已提交申请才能启动审批")
     if session.scalar(
@@ -116,22 +127,34 @@ def require_approval_startable(
         )
     ) is not None:
         raise ApprovalAlreadyStartedError("审批流已经创建")
+    if session.scalar(
+        select(DecisionPacketRecord.id).where(
+            DecisionPacketRecord.request_id == request_id
+        )
+    ) is None:
+        raise DecisionPacketRequiredError("决策材料尚未生成")
 
 
 def start_approval_case(
     session: Session,
     *,
-    workspace_token: str,
     request_id: UUID,
-    review: RiskReview,
+    actor_id: str | None = None,
+    workspace_token: str | None = None,
 ) -> ApprovalCaseRecord:
-    """根据目录冻结人工审批路线，并保存风险审查证据。"""
+    """从冻结 Packet 读取路线，并用当前目录二次校验。"""
 
-    workspace = _load_workspace(session, workspace_token)
     request = session.get(AccessRequestRecord, request_id, with_for_update=True)
     if request is None:
         raise ApprovalNotFoundError("申请不存在")
-    _require_workspace_scope(workspace, request.workspace_id)
+    if actor_id is not None:
+        if request.requester_id != actor_id:
+            raise ApprovalNotFoundError("申请不存在")
+    elif workspace_token is not None:
+        workspace = _load_workspace(session, workspace_token)
+        _require_workspace_scope(workspace, request.workspace_id)
+    else:
+        raise ApprovalNotFoundError("申请不存在")
     if request.request_status != "submitted":
         raise ApprovalRoutingError("只有已提交申请才能启动审批")
     if session.scalar(
@@ -145,16 +168,29 @@ def start_approval_case(
     entitlement = session.get(EntitlementRecord, request.entitlement_code)
     if requester is None or entitlement is None:
         raise ApprovalRoutingError("申请引用的目录信息不存在")
-    if review.risk_level != entitlement.risk_level:
-        raise ApprovalRoutingError("风险审查等级与权限目录不一致")
-    if entitlement.risk_level in {"high", "critical"} and review.outcome == "clear":
-        raise ApprovalRoutingError("高风险权限不得绕过人工审查")
-    if review.outcome == "blocked":
-        raise ApprovalRoutingError("风险审查已阻止该申请进入自助审批")
-
-    route = _build_route(requester, entitlement)
+    packet = session.scalar(
+        select(DecisionPacketRecord).where(
+            DecisionPacketRecord.request_id == request.id
+        )
+    )
+    if packet is None:
+        raise DecisionPacketRequiredError("决策材料尚未生成")
+    raw_route = packet.frozen_content.get("fixed_route")
+    if not isinstance(raw_route, list):
+        raise ApprovalRoutingError("决策材料中的审批路线无效")
+    route: list[tuple[str, str]] = []
+    for index, raw_step in enumerate(raw_route, start=1):
+        if not isinstance(raw_step, dict) or raw_step.get("step_order") != index:
+            raise ApprovalRoutingError("决策材料中的审批顺序无效")
+        approver_id = raw_step.get("approver_id")
+        approver_role = raw_step.get("approver_role")
+        if not isinstance(approver_id, str) or not isinstance(approver_role, str):
+            raise ApprovalRoutingError("决策材料中的审批路线无效")
+        route.append((approver_id, approver_role))
+    if route != build_approval_route(requester, entitlement):
+        raise ApprovalRoutingError("决策材料与当前目录路线不一致")
     case = ApprovalCaseRecord(
-        workspace_id=workspace.id,
+        workspace_id=request.workspace_id,
         request_id=request.id,
         approval_status=ApprovalStatus.PENDING_MANAGER.value,
     )
@@ -165,7 +201,7 @@ def start_approval_case(
         for index, (approver_id, role) in enumerate(route, start=1):
             session.add(
                 ApprovalStepRecord(
-                    workspace_id=workspace.id,
+                    workspace_id=request.workspace_id,
                     approval_case_id=case.id,
                     step_order=index,
                     approver_id=approver_id,
@@ -173,38 +209,25 @@ def start_approval_case(
                     step_status="pending" if index == 1 else "waiting",
                 )
             )
-        session.add_all(
-            [
-                AuditEventRecord(
-                    workspace_id=workspace.id,
-                    request_id=request.id,
-                    actor_type="agent",
-                    actor_id="risk-review",
-                    event_type="risk_review.completed",
-                    details=review.model_dump(mode="json"),
-                ),
-                AuditEventRecord(
-                    workspace_id=workspace.id,
-                    request_id=request.id,
-                    actor_type="system",
-                    actor_id=None,
-                    event_type="approval.started",
-                    details={
-                        "approval_case_id": str(case.id),
-                        "route": [
-                            {
-                                "step_order": index,
-                                "approver_id": approver_id,
-                                "approver_role": role,
-                            }
-                            for index, (approver_id, role) in enumerate(
-                                route,
-                                start=1,
-                            )
-                        ],
-                    },
-                ),
-            ]
+        session.add(
+            AuditEventRecord(
+                workspace_id=request.workspace_id,
+                request_id=request.id,
+                actor_type="employee",
+                actor_id=request.requester_id,
+                event_type="approval.started",
+                details={
+                    "approval_case_id": str(case.id),
+                    "route": [
+                        {
+                            "step_order": index,
+                            "approver_id": approver_id,
+                            "approver_role": role,
+                        }
+                        for index, (approver_id, role) in enumerate(route, start=1)
+                    ],
+                },
+            )
         )
         session.commit()
     except Exception:

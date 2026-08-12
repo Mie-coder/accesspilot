@@ -241,9 +241,13 @@ function WorkbenchPage({ onLogout }: { onLogout: () => Promise<void> }) {
             draft={workbench.draft}
             missingFields={workbench.missingFields}
             requestResult={workbench.requestResult}
+            decisionPacket={workbench.decisionPacket}
+            decisionPacketError={workbench.decisionPacketError}
+            isGeneratingDecisionPacket={workbench.isGeneratingDecisionPacket}
             isBusy={isRunning || workbench.isSubmitting}
             onConfirm={confirm}
             onSubmit={() => void workbench.submit()}
+            onRetryDecisionPacket={() => void workbench.retryDecisionPacket()}
           />
           <ActivityFeed events={workbench.events} />
           <div className="source-note">

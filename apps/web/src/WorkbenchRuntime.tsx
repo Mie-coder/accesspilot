@@ -14,6 +14,7 @@ import {
 } from 'react'
 
 import {
+  createDecisionPacket,
   replayEvents,
   previewDraft,
   submitRequest,
@@ -24,6 +25,7 @@ import { createChatModelAdapter } from './runtime'
 import type {
   ChatTurn,
   ConnectionState,
+  DecisionPacket,
   RequestDraft,
   RequestResult,
   EntitlementSelectionResult,
@@ -175,7 +177,11 @@ export function WorkbenchRuntime({
   const [requestResult, setRequestResult] = useState<RequestResult | null>(() =>
     submittedRequest(snapshot.events),
   )
+  const [decisionPacket, setDecisionPacket] = useState<DecisionPacket | null>(null)
+  const [decisionPacketError, setDecisionPacketError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isGeneratingDecisionPacket, setIsGeneratingDecisionPacket] = useState(false)
+  const packetRequestInFlightRef = useRef(false)
   const [retryableInterruption, setRetryableInterruption] = useState(false)
   const [connectionState, setConnectionState] = useState<ConnectionState>('connected')
   const lastEventIdRef = useRef(snapshot.lastEventId)
@@ -307,13 +313,33 @@ export function WorkbenchRuntime({
     }
   }, [onEvents])
 
+  const generateDecisionPacket = useCallback(async (requestId: string) => {
+    if (packetRequestInFlightRef.current) return
+    packetRequestInFlightRef.current = true
+    setIsGeneratingDecisionPacket(true)
+    setDecisionPacketError(null)
+    try {
+      setDecisionPacket(await createDecisionPacket(requestId))
+    } catch (packetError) {
+      setDecisionPacketError(
+        packetError instanceof Error ? packetError.message : '决策材料暂时无法生成，请重试。',
+      )
+    } finally {
+      packetRequestInFlightRef.current = false
+      setIsGeneratingDecisionPacket(false)
+    }
+  }, [])
+
   const submit = useCallback(async () => {
     setIsSubmitting(true)
     setError(null)
     try {
       const result = await submitRequest()
       setRequestResult(result)
+      setDecisionPacket(null)
+      setDecisionPacketError(null)
       setBusinessStatus('submitted')
+      await generateDecisionPacket(result.request_id)
       try {
         onEvents(await replayEvents(lastEventIdRef.current))
       } catch {
@@ -325,7 +351,12 @@ export function WorkbenchRuntime({
     } finally {
       setIsSubmitting(false)
     }
-  }, [onEvents])
+  }, [generateDecisionPacket, onEvents])
+
+  const retryDecisionPacket = useCallback(async () => {
+    if (requestResult === null) return
+    await generateDecisionPacket(requestResult.request_id)
+  }, [generateDecisionPacket, requestResult])
 
   const selectEntitlement = useCallback(async (
     entitlementId: string,
@@ -368,11 +399,15 @@ export function WorkbenchRuntime({
       businessStatus,
       error,
       requestResult,
+      decisionPacket,
+      decisionPacketError,
       isSubmitting,
+      isGeneratingDecisionPacket,
       retryableInterruption,
       connectionState,
       selectEntitlement,
       submit,
+      retryDecisionPacket,
     }),
     [
       businessStatus,
@@ -380,12 +415,16 @@ export function WorkbenchRuntime({
       error,
       events,
       identity,
+      decisionPacket,
+      decisionPacketError,
+      isGeneratingDecisionPacket,
       isSubmitting,
       requestResult,
       retryableInterruption,
       connectionState,
       selectEntitlement,
       submit,
+      retryDecisionPacket,
       principalDraft,
     ],
   )

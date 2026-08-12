@@ -6,11 +6,11 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from accesspilot.agent.embeddings import DeterministicEmbeddingModel
 from accesspilot.approvals import (
     ApprovalActorMismatchError,
     ApprovalAlreadyStartedError,
     ApprovalOutOfOrderError,
-    ApprovalRoutingError,
     ApprovalStepAlreadyDecidedError,
     ApprovalTerminalError,
     ApprovalWorkspaceMismatchError,
@@ -26,7 +26,8 @@ from accesspilot.db.models import (
     WorkspaceRecord,
 )
 from accesspilot.db.seed import seed_catalog
-from accesspilot.risk.review import PolicyCitation, RiskReview
+from accesspilot.decision_packets import generate_decision_packet
+from accesspilot.rag.policies import index_policy_embeddings
 
 
 def create_submitted_request(
@@ -52,22 +53,16 @@ def create_submitted_request(
     )
     session.add(request)
     session.commit()
-    return token, request.id
-
-
-def risk_review() -> RiskReview:
-    return RiskReview(
-        risk_level="high",
-        outcome="requires_human_review",
-        summary="高风险权限需要两级人工审批。",
-        findings=["申请期限为 14 天"],
-        citations=[
-            PolicyCitation(
-                policy_code="POL-003",
-                reason="该政策要求直属经理和数据所有者依次审批。",
-            )
-        ],
+    embedding_model = DeterministicEmbeddingModel()
+    index_policy_embeddings(session, embedding_model)
+    generate_decision_packet(
+        session,
+        request_id=request.id,
+        actor_id=requester_id,
+        embedding_model=embedding_model,
+        advisory_model=None,
     )
+    return token, request.id
 
 
 def load_steps(session: Session, case_id: UUID) -> list[ApprovalStepRecord]:
@@ -97,7 +92,6 @@ def test_start_case_freezes_manager_then_data_owner_route(
         database_session,
         workspace_token=token,
         request_id=request_id,
-        review=risk_review(),
     )
 
     steps = load_steps(database_session, case.id)
@@ -111,7 +105,7 @@ def test_start_case_freezes_manager_then_data_owner_route(
     assert [step.approver_role for step in steps] == ["manager", "data_owner"]
     assert [step.step_status for step in steps] == ["pending", "waiting"]
     assert [event.event_type for event in events] == [
-        "risk_review.completed",
+        "decision_packet.created",
         "approval.started",
     ]
 
@@ -120,29 +114,25 @@ def test_start_case_freezes_manager_then_data_owner_route(
             database_session,
             workspace_token=token,
             request_id=request_id,
-            review=risk_review(),
         )
 
 
-def test_high_risk_review_cannot_mark_case_clear_and_start_approval(
+def test_unavailable_advisory_does_not_block_fixed_route(
     database_session: Session,
 ) -> None:
     token, request_id = create_submitted_request(database_session)
-    unsafe_review = risk_review().model_copy(update={"outcome": "clear"})
 
-    with pytest.raises(ApprovalRoutingError):
-        start_approval_case(
-            database_session,
-            workspace_token=token,
-            request_id=request_id,
-            review=unsafe_review,
-        )
+    case = start_approval_case(
+        database_session,
+        workspace_token=token,
+        request_id=request_id,
+    )
 
-    assert database_session.scalar(
+    assert case == database_session.scalar(
         select(ApprovalCaseRecord).where(
             ApprovalCaseRecord.request_id == request_id
         )
-    ) is None
+    )
 
 
 def test_correct_approvers_complete_two_steps_in_order(
@@ -153,7 +143,6 @@ def test_correct_approvers_complete_two_steps_in_order(
         database_session,
         workspace_token=token,
         request_id=request_id,
-        review=risk_review(),
     )
 
     decide_approval(
@@ -200,7 +189,6 @@ def test_wrong_actor_and_out_of_order_owner_do_not_change_facts(
         database_session,
         workspace_token=token,
         request_id=request_id,
-        review=risk_review(),
     )
     audit_count = request_audit_count(database_session, request_id)
 
@@ -238,7 +226,6 @@ def test_duplicate_decision_is_rejected_without_new_audit(
         database_session,
         workspace_token=token,
         request_id=request_id,
-        review=risk_review(),
     )
     decide_approval(
         database_session,
@@ -274,7 +261,6 @@ def test_same_employee_can_decide_two_distinct_roles_in_order(
         database_session,
         workspace_token=token,
         request_id=request_id,
-        review=risk_review(),
     )
 
     decide_approval(
@@ -326,7 +312,6 @@ def test_rejection_terminates_case_and_cancels_later_step(
         database_session,
         workspace_token=token,
         request_id=request_id,
-        review=risk_review(),
     )
 
     decide_approval(

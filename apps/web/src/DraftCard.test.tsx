@@ -19,9 +19,13 @@ describe('DraftCard', () => {
         draft={{ ...completeDraft, entitlement_id: null }}
         missingFields={['entitlement_id']}
         requestResult={null}
+        decisionPacket={null}
+        decisionPacketError={null}
+        isGeneratingDecisionPacket={false}
         isBusy={false}
         onConfirm={vi.fn()}
         onSubmit={vi.fn()}
+        onRetryDecisionPacket={vi.fn()}
       />,
     )
 
@@ -36,9 +40,13 @@ describe('DraftCard', () => {
         draft={completeDraft}
         missingFields={[]}
         requestResult={null}
+        decisionPacket={null}
+        decisionPacketError={null}
+        isGeneratingDecisionPacket={false}
         isBusy={false}
         onConfirm={onConfirm}
         onSubmit={vi.fn()}
+        onRetryDecisionPacket={vi.fn()}
       />,
     )
 
@@ -54,14 +62,41 @@ describe('DraftCard', () => {
         draft={{ ...completeDraft, confirmed: true }}
         missingFields={[]}
         requestResult={null}
+        decisionPacket={null}
+        decisionPacketError={null}
+        isGeneratingDecisionPacket={false}
         isBusy={false}
         onConfirm={vi.fn()}
         onSubmit={onSubmit}
+        onRetryDecisionPacket={vi.fn()}
       />,
     )
 
     expect(screen.getByText('已确认，可送审')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '提交正式申请' }))
     expect(onSubmit).toHaveBeenCalledOnce()
+  })
+
+  it('keeps the formal request id and retries only its Decision Packet', () => {
+    const onRetryDecisionPacket = vi.fn()
+    render(
+      <DraftCard
+        draft={{ ...completeDraft, confirmed: true }}
+        missingFields={[]}
+        requestResult={{ request_id: 'request-1', request_status: 'submitted' }}
+        decisionPacket={null}
+        decisionPacketError="决策材料暂时无法生成"
+        isGeneratingDecisionPacket={false}
+        isBusy={false}
+        onConfirm={vi.fn()}
+        onSubmit={vi.fn()}
+        onRetryDecisionPacket={onRetryDecisionPacket}
+      />,
+    )
+
+    expect(screen.getByText('request-1')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('决策材料暂时无法生成')
+    fireEvent.click(screen.getByRole('button', { name: '重试生成决策材料' }))
+    expect(onRetryDecisionPacket).toHaveBeenCalledOnce()
   })
 })

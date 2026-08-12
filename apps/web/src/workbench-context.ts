@@ -1,6 +1,7 @@
 import { createContext, useContext } from 'react'
 
 import type {
+  DecisionPacket,
   RequestDraft,
   RequestResult,
   WorkspaceEvent,
@@ -17,11 +18,15 @@ export interface WorkbenchContextValue {
   businessStatus: string
   error: string | null
   requestResult: RequestResult | null
+  decisionPacket: DecisionPacket | null
+  decisionPacketError: string | null
   retryableInterruption: boolean
   connectionState: ConnectionState
   submit: () => Promise<void>
+  retryDecisionPacket: () => Promise<void>
   selectEntitlement: (entitlementId: string) => Promise<EntitlementSelectionResult>
   isSubmitting: boolean
+  isGeneratingDecisionPacket: boolean
 }
 
 export const WorkbenchContext = createContext<WorkbenchContextValue | null>(null)

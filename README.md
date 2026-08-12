@@ -6,7 +6,7 @@ AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent�
 
 - **稳定基线：MVP v1.0** — T01–T08 已完成本地实现和验收；没有推送、部署或接入真实企业系统。
 - **本地完成版本：v1.1** — T09–T17 已完成本地实现与验证；没有推送、合并、部署或接入真实企业系统。
-- **当前本地版本：v1.2 精简版 T20 已完成并独立验收** — 四账号 AuthSession 之上已建立共享正式 Case 与资源级 SQL ACL；申请人重登、当前/已决定审批人和已批准 Case 管理员可按关系重读，草稿、聊天、事件和 Cursor 仍保持私有。T20 攻击矩阵 14/14，API 396 passed，前端 61 passed，当前产品固定评测 72/72。T21–T25 尚未开始；没有推送、合并或部署。
+- **当前本地版本：v1.2 精简版 T21 已完成并独立验收** — 共享 Case 现包含唯一冻结 Decision Packet，区分已验证事实、政策证据、申请人说明和非权威建议；真实 provider、离线规则与不可用状态均诚实标注，建议不能改变固定审批路线。T21 后端相关 39 passed、前端 69 passed，当前产品 registry 88 项。T22–T25 尚未开始；没有推送、合并或部署。
 - **当前能力：** 产品工作台只接受 `accesspilot_session → AuthSession → EmployeeRecord` 身份链；旧 Workspace/Demo 入口返回 404，旧 Workspace cookie 单独访问返回 401。登录页明确标注“作品集 Mock 登录，非真实身份认证”，不实现密码、注册、OIDC 或真实 SSO。业务写请求要求精确 Origin 与内存 CSRF，Session 刷新轮换 CSRF，退出只吊销 Session、不删除 Workspace。其余能力包括多意图路由、只读工具白名单、确定性权限名称解析、8 条基本政策主题问答、基于本轮证据的 `grounded`/`insufficient_evidence`/`retrieval_unavailable` 三态政策回答、自审批禁止规则，以及当前轮增量 SSE、事件回放、取消、断线重连和刷新恢复。产品工作台还提供类型化业务卡片：权限按 `eligible`、`owned`、`pending`、`expiring_soon`、`expired` 五态展示；权限名称解析按 `matched`、`ambiguous`、`no_match` 三态展示候选和重新校验结果；政策按三态展示证据、提示和下一步；申请页按事实展示草稿、提交、风险审查、两级审批、开通与恢复时间线，断线时在业务页面显示可恢复的重连状态。
 - **后续演进：** provider token 延迟、政策召回率和生产 SLA 尚未测量；它们不属于本地 deterministic_offline 单样本结论。
 
@@ -44,6 +44,7 @@ AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent�
 - T18：ConversationCursor、纯数字 `111` 期限上下文、失效/消费与 draft revision/CAS 已完成并独立验收；固定 T18 评测 11/11。
 - T19：四账号 Mock Login、AuthSession/Principal、Origin/CSRF、Cookie、身份注入、旧入口关闭、Cursor session 绑定和 0008 迁移已完成；固定 T19-01 23/23；独立 verifier 结论 PASS（P0=0、P1=0）。
 - T20：共享正式 Case、requester/approver/admin 资源级 SQL ACL、跨 Session 重读与私有 Workspace 边界已完成；固定 T20-01 14/14，当前产品 registry 72/72；独立 verifier 结论 PASS（P0=0、P1=0）。T21–T25 尚未开始。
+- T21：唯一冻结 Decision Packet、四类来源、受限脱敏 DeepSeek、诚实 unavailable、并发唯一和审批 Packet 前置已完成；固定 T21-01 16/16，当前产品 registry 88 项；独立 verifier 结论 PASS（P0=0、P1=0）。T22–T25 尚未开始。
 
 登录页的四个账号只能证明会话隔离与 ACL 边界，不是真实 SSO 或生产级认证；访问者仍可选择任一虚构账号。真实系统仍必须由可信登录态确定操作者身份。
 

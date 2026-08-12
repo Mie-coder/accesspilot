@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   bootstrapWorkspace,
+  createDecisionPacket,
   parseSseEvents,
   readAccessibleRequests,
   readMyRequests,
@@ -86,5 +87,24 @@ describe('principal-scoped Case lists', () => {
     for (const [, init] of fetchMock.mock.calls) {
       expect(init).toEqual(expect.objectContaining({ credentials: 'include' }))
     }
+  })
+})
+
+describe('Decision Packet write boundary', () => {
+  it('posts only the request path and sends no client-controlled packet body', async () => {
+    const response = { packet_id: 'packet-1', request_id: 'request-1' }
+    const fetchMock = vi.fn(async () => Response.json(response))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(createDecisionPacket('request/with spaces')).resolves.toEqual(response)
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/requests/request%2Fwith%20spaces/decision-packet',
+      expect.objectContaining({
+        method: 'POST',
+        credentials: 'include',
+      }),
+    )
+    expect(fetchMock.mock.calls[0]?.[1]?.body).toBeUndefined()
   })
 })

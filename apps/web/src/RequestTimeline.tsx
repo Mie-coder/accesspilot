@@ -2,6 +2,7 @@ import { AlertCircle, CheckCircle2, Clock3, FileCheck2, History, LoaderCircle, R
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { readMyRequests, readRequestDetail } from './api'
+import { DecisionPacketPanel } from './DecisionPacketPanel'
 import type { CaseSummary, RequestDetail, RequestDraft } from './types'
 
 export interface RequestTimelineViewProps {
@@ -451,6 +452,10 @@ export function RequestTimelineView({
         </div>
       ) : null}
 
+      {detail?.decision_packet ? (
+        <DecisionPacketPanel packet={detail.decision_packet} />
+      ) : null}
+
       {loading ? (
         <div className="business-state" role="status"><LoaderCircle className="spin" size={20} /><strong>正在加载申请事实</strong></div>
       ) : error ? (
@@ -480,7 +485,7 @@ export function RequestTimelineView({
       )}
 
       {detail && detail.approval === null ? (
-        <p className="timeline-note"><strong>尚未创建审批路线</strong>，后续步骤会在风险审查完成后出现。</p>
+        <p className="timeline-note"><strong>尚未创建审批路线</strong>，决策材料冻结后才能从固定目录路线创建审批步骤。</p>
       ) : null}
     </section>
   )
