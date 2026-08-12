@@ -3,7 +3,7 @@
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
 
 from accesspilot.db.models import (
@@ -241,26 +241,36 @@ def start_approval_case(
 def decide_approval(
     session: Session,
     *,
-    workspace_token: str,
     case_id: UUID,
+    expected_step_id: UUID,
     actor_id: str,
+    roles: tuple[str, ...] | list[str] | set[str],
     decision: Literal["approve", "reject"],
     comment: str | None = None,
 ) -> ApprovalCaseRecord:
-    """由当前指定审批人决定一步，并按顺序推进或终止流程。"""
+    """由 Principal 对客户端看到的当前步骤做一次原子决定。"""
 
     if decision not in {"approve", "reject"}:
         raise ApprovalError("审批决定只能是 approve 或 reject")
-    workspace = _load_workspace(session, workspace_token)
-    case = session.get(ApprovalCaseRecord, case_id, with_for_update=True)
+    allowed_roles = tuple(sorted({"manager", "data_owner"}.intersection(roles)))
+    if not allowed_roles:
+        raise ApprovalNotFoundError("审批流不存在")
+    case = session.scalar(
+        select(ApprovalCaseRecord)
+        .where(
+            ApprovalCaseRecord.id == case_id,
+            exists(
+                select(ApprovalStepRecord.id).where(
+                    ApprovalStepRecord.approval_case_id == ApprovalCaseRecord.id,
+                    ApprovalStepRecord.approver_id == actor_id,
+                    ApprovalStepRecord.approver_role.in_(allowed_roles),
+                )
+            ),
+        )
+        .with_for_update()
+    )
     if case is None:
         raise ApprovalNotFoundError("审批流不存在")
-    _require_workspace_scope(workspace, case.workspace_id)
-    if case.approval_status in {
-        ApprovalStatus.APPROVED.value,
-        ApprovalStatus.REJECTED.value,
-    }:
-        raise ApprovalTerminalError("审批流已经结束")
 
     steps = list(
         session.scalars(
@@ -270,12 +280,24 @@ def decide_approval(
             .with_for_update()
         ).all()
     )
+    if case.approval_status in {
+        ApprovalStatus.APPROVED.value,
+        ApprovalStatus.REJECTED.value,
+    }:
+        raise ApprovalTerminalError("审批流已经结束")
     current_step = next(
         (step for step in steps if step.step_status == "pending"),
         None,
     )
     if current_step is None:
         raise ApprovalTerminalError("审批流没有待处理步骤")
+    if current_step.id != expected_step_id:
+        actor_steps = [step for step in steps if step.approver_id == actor_id]
+        if any(step.id == expected_step_id for step in actor_steps):
+            if any(step.step_status == "waiting" for step in actor_steps):
+                raise ApprovalOutOfOrderError("前序审批尚未完成")
+            raise ApprovalStepAlreadyDecidedError("该审批步骤已经决定")
+        raise ApprovalActorMismatchError("当前员工不是指定审批人")
     if current_step.approver_id != actor_id:
         actor_steps = [step for step in steps if step.approver_id == actor_id]
         if not actor_steps:
@@ -283,6 +305,8 @@ def decide_approval(
         if any(step.step_status == "waiting" for step in actor_steps):
             raise ApprovalOutOfOrderError("前序审批尚未完成")
         raise ApprovalStepAlreadyDecidedError("该审批步骤已经决定")
+    if current_step.approver_role not in allowed_roles:
+        raise ApprovalActorMismatchError("当前账号角色与审批步骤不匹配")
 
     request = session.get(AccessRequestRecord, case.request_id)
     if request is None:
@@ -292,6 +316,8 @@ def decide_approval(
 
     normalized_comment = comment.strip() if comment is not None else None
     normalized_comment = normalized_comment or None
+    if decision == "reject" and normalized_comment is None:
+        raise ApprovalError("驳回必须填写原因")
     decided_at = utc_now()
     current_step.comment = normalized_comment
     current_step.decided_at = decided_at

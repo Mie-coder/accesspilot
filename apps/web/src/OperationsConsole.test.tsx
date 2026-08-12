@@ -1,12 +1,19 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { readAccessibleRequests, readRequestDetail } from './api'
+import {
+  decideApproval,
+  readAccessibleRequests,
+  readApprovalInbox,
+  readRequestDetail,
+} from './api'
 import { OperationsConsole, OperationsView } from './OperationsConsole'
 import type { CaseList, RequestDetail } from './types'
 
 vi.mock('./api', () => ({
+  decideApproval: vi.fn(),
   readAccessibleRequests: vi.fn(),
+  readApprovalInbox: vi.fn(),
   readRequestDetail: vi.fn(),
 }))
 
@@ -28,6 +35,31 @@ const cases: CaseList = {
       created_at: '2026-08-05T01:00:00Z',
     },
   ],
+}
+
+const approvalInbox = {
+  actor: {
+    employee_id: 'EMP-002',
+    name: '周敏',
+    roles: ['manager'],
+  },
+  items: [{
+    request_id: requestId,
+    approval_case_id: caseId,
+    approval_step_id: '33333333-3333-4333-8333-333333333333',
+    step_order: 1,
+    approver_role: 'manager',
+    step_status: 'pending',
+    approval_status: 'pending_manager',
+    requester_id: 'EMP-001',
+    requester_name: '林晓',
+    entitlement_code: 'insighthub.customer_export',
+    entitlement_name: '脱敏客户数据导出',
+    risk_level: 'high',
+    duration_days: 14,
+    justification: '季度客户分析',
+    submitted_at: '2026-08-05T01:00:00Z',
+  }],
 }
 
 function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
@@ -118,6 +150,7 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
 }
 
 const callbacks = {
+  onDecide: vi.fn(),
   onRefresh: vi.fn(),
   onSelectRequest: vi.fn(),
 }
@@ -128,8 +161,11 @@ function renderView(props: Partial<Parameters<typeof OperationsView>[0]> = {}) {
       roleLabel="直属经理"
       cases={cases}
       detail={detail()}
+      approvalInbox={null}
       isLoading={false}
+      isDeciding={false}
       error={null}
+      decisionError={null}
       {...callbacks}
       {...props}
     />,
@@ -158,7 +194,7 @@ describe('OperationsView T20 read-only ACL view', () => {
     expect(screen.getByText(/等待中的未轮到步骤.*不会出现/)).toBeInTheDocument()
   })
 
-  it('shows current or previously decided Case facts but no T22/T23 action controls', () => {
+  it('keeps a Case read-only when the current inbox has no pending relation', () => {
     renderView()
     expect(screen.getByRole('button', { name: /脱敏客户数据导出/ })).toBeInTheDocument()
     expect(screen.getByText('高风险权限双审批')).toBeInTheDocument()
@@ -200,9 +236,102 @@ describe('OperationsView T20 read-only ACL view', () => {
   })
 })
 
+describe('OperationsView T22 ordered decision controls', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('shows controls only for the actor-bound pending step and requires a rejection reason', () => {
+    const onDecide = vi.fn()
+    renderView({ approvalInbox, onDecide })
+
+    expect(screen.getByRole('button', { name: '批准当前步骤' })).toBeEnabled()
+    const reject = screen.getByRole('button', { name: '驳回当前步骤' })
+    expect(reject).toBeDisabled()
+
+    fireEvent.change(screen.getByRole('textbox', { name: '审批评论' }), {
+      target: { value: '   ' },
+    })
+    expect(reject).toBeDisabled()
+    fireEvent.change(screen.getByRole('textbox', { name: '审批评论' }), {
+      target: { value: '权限范围过大' },
+    })
+    fireEvent.click(reject)
+
+    expect(onDecide).toHaveBeenCalledWith(
+      caseId,
+      '33333333-3333-4333-8333-333333333333',
+      'reject',
+      '权限范围过大',
+    )
+  })
+
+  it.each([
+    ['waiting step', detail({
+      approval: {
+        ...detail().approval!,
+        approval_status: 'pending_manager',
+        steps: detail().approval!.steps.map((step) => ({ ...step, step_status: 'waiting' })),
+      },
+    }), approvalInbox],
+    ['decided step', detail({
+      approval: {
+        ...detail().approval!,
+        approval_status: 'pending_data_owner',
+        steps: detail().approval!.steps.map((step, index) => ({
+          ...step,
+          step_status: index === 0 ? 'approved' : 'pending',
+        })),
+      },
+    }), approvalInbox],
+    ['terminal case', detail({
+      approval: { ...detail().approval!, approval_status: 'approved' },
+    }), approvalInbox],
+  ])('keeps %s read-only even if stale inbox data exists', (_label, currentDetail, currentInbox) => {
+    renderView({ detail: currentDetail, approvalInbox: currentInbox })
+    expect(screen.queryByRole('button', { name: '批准当前步骤' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '驳回当前步骤' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /开通/ })).not.toBeInTheDocument()
+  })
+
+  it('makes busy and failed decision states visible without removing Case facts', () => {
+    const { rerender } = render(
+      <OperationsView
+        roleLabel="直属经理"
+        cases={cases}
+        detail={detail()}
+        approvalInbox={approvalInbox}
+        isLoading={false}
+        isDeciding
+        error={null}
+        decisionError={null}
+        {...callbacks}
+      />,
+    )
+    expect(screen.getByRole('button', { name: '正在提交审批决定' })).toBeDisabled()
+
+    rerender(
+      <OperationsView
+        roleLabel="直属经理"
+        cases={cases}
+        detail={detail()}
+        approvalInbox={approvalInbox}
+        isLoading={false}
+        isDeciding={false}
+        error={null}
+        decisionError="当前步骤已被处理，请刷新"
+        {...callbacks}
+      />,
+    )
+    expect(screen.getByRole('alert')).toHaveTextContent('当前步骤已被处理')
+    expect(screen.getByRole('heading', { name: '脱敏客户数据导出' })).toBeInTheDocument()
+  })
+})
+
 describe('OperationsConsole principal-scoped Case loading', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(readApprovalInbox).mockResolvedValue(approvalInbox)
   })
 
   it('selects details only from the server-filtered accessible list', async () => {
@@ -256,5 +385,44 @@ describe('OperationsConsole principal-scoped Case loading', () => {
 
     await waitFor(() => expect(readRequestDetail).toHaveBeenCalledWith(requestId))
     expect(readRequestDetail).not.toHaveBeenCalledWith(untrustedRequestId)
+  })
+
+  it('submits the visible pending step then reloads the same Case and inbox from the server', async () => {
+    const decided = detail({
+      approval: {
+        ...detail().approval!,
+        approval_status: 'pending_data_owner',
+        steps: [
+          { ...detail().approval!.steps[0], step_status: 'approved', comment: '已核对' },
+          { ...detail().approval!.steps[1], step_status: 'pending' },
+        ],
+      },
+    })
+    vi.mocked(readAccessibleRequests).mockResolvedValue(cases)
+    vi.mocked(readRequestDetail)
+      .mockResolvedValueOnce(detail())
+      .mockResolvedValueOnce(decided)
+    vi.mocked(readApprovalInbox)
+      .mockResolvedValueOnce(approvalInbox)
+      .mockResolvedValueOnce({ ...approvalInbox, items: [] })
+    vi.mocked(decideApproval).mockResolvedValue(undefined)
+
+    render(<OperationsConsole roleLabel="直属经理" requestId={null} />)
+
+    fireEvent.change(await screen.findByRole('textbox', { name: '审批评论' }), {
+      target: { value: '已核对' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '批准当前步骤' }))
+
+    await waitFor(() => expect(decideApproval).toHaveBeenCalledWith(
+      caseId,
+      '33333333-3333-4333-8333-333333333333',
+      'approve',
+      '已核对',
+    ))
+    await waitFor(() => expect(readRequestDetail).toHaveBeenCalledTimes(2))
+    expect(readRequestDetail).toHaveBeenLastCalledWith(requestId)
+    expect(readApprovalInbox).toHaveBeenCalledTimes(2)
+    expect(await screen.findByText('待数据负责人审批')).toBeInTheDocument()
   })
 })

@@ -13,20 +13,33 @@ import {
 import { useCallback, useEffect, useState } from 'react'
 
 import {
+  decideApproval,
   readAccessibleRequests,
+  readApprovalInbox,
   readRequestDetail,
 } from './api'
 import { DecisionPacketPanel } from './DecisionPacketPanel'
-import type { CaseList, RequestDetail } from './types'
+import type { ApprovalInbox, CaseList, RequestDetail } from './types'
+
+type ApprovalDecision = 'approve' | 'reject'
 
 interface OperationsViewProps {
   roleLabel: string
   cases: CaseList | null
   detail: RequestDetail | null
+  approvalInbox: ApprovalInbox | null
   isLoading: boolean
+  isDeciding: boolean
   error: string | null
+  decisionError: string | null
   onRefresh: () => void
   onSelectRequest: (requestId: string) => void
+  onDecide: (
+    caseId: string,
+    approvalStepId: string,
+    decision: ApprovalDecision,
+    comment: string | null,
+  ) => void
 }
 
 const statusLabels: Record<string, string> = {
@@ -73,6 +86,106 @@ function formatTime(value: string | null): string {
   }).format(date)
 }
 
+function safeErrorMessage(message: string): string {
+  return message
+    .replace(/system_prompt|system prompt|sk-[a-z0-9_-]+/gi, '受保护内容')
+    .replace(/chain[-_ ]of[-_ ]thought|traceback/gi, '受保护内容')
+}
+
+function currentDecisionTarget(
+  detail: RequestDetail | null,
+  approvalInbox: ApprovalInbox | null,
+) {
+  const approval = detail?.approval
+  if (!detail || !approval || !approvalInbox) return null
+  if (!['pending_manager', 'pending_data_owner'].includes(approval.approval_status)) return null
+  if (detail.request.requester_id === approvalInbox.actor.employee_id) return null
+
+  const item = approvalInbox.items.find((candidate) =>
+    candidate.request_id === detail.request.request_id
+    && candidate.approval_case_id === approval.approval_case_id
+    && candidate.step_status === 'pending'
+    && candidate.approval_status === approval.approval_status
+    && approvalInbox.actor.roles.includes(candidate.approver_role),
+  )
+  if (!item) return null
+  const step = approval.steps.find((candidate) =>
+    candidate.step_id === item.approval_step_id
+    && candidate.approver_id === approvalInbox.actor.employee_id
+    && candidate.approver_role === item.approver_role
+    && candidate.step_status === 'pending',
+  )
+  return step ? { caseId: approval.approval_case_id, step } : null
+}
+
+function ApprovalDecisionCard({
+  caseId,
+  approvalStepId,
+  isDeciding,
+  onDecide,
+}: {
+  caseId: string
+  approvalStepId: string
+  isDeciding: boolean
+  onDecide: OperationsViewProps['onDecide']
+}) {
+  const [comment, setComment] = useState('')
+  const normalizedComment = comment.trim()
+
+  return (
+    <div className="decision-card" aria-label="当前审批操作">
+      <label>
+        审批评论
+        <textarea
+          aria-label="审批评论"
+          rows={3}
+          value={comment}
+          disabled={isDeciding}
+          placeholder="批准可选；驳回必须说明原因"
+          onChange={(event) => setComment(event.target.value)}
+        />
+      </label>
+      <p className="decision-guard-copy">
+        只能处理当前轮到你且状态为 pending 的步骤；服务端会再次原子校验。
+      </p>
+      <div className="decision-actions">
+        {isDeciding ? (
+          <button type="button" disabled aria-label="正在提交审批决定">
+            <LoaderCircle className="spin" size={15} />正在提交…
+          </button>
+        ) : (
+          <>
+            <button
+              className="danger-action"
+              type="button"
+              disabled={normalizedComment.length === 0}
+              onClick={() => onDecide(
+                caseId,
+                approvalStepId,
+                'reject',
+                normalizedComment,
+              )}
+            >
+              驳回当前步骤
+            </button>
+            <button
+              type="button"
+              onClick={() => onDecide(
+                caseId,
+                approvalStepId,
+                'approve',
+                normalizedComment || null,
+              )}
+            >
+              批准当前步骤
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function LoadingState() {
   return (
     <section className="operations-state" role="status" aria-live="polite">
@@ -100,11 +213,16 @@ export function OperationsView({
   roleLabel,
   cases,
   detail,
+  approvalInbox,
   isLoading,
+  isDeciding,
   error,
+  decisionError,
   onRefresh,
   onSelectRequest,
+  onDecide,
 }: OperationsViewProps) {
+  const decisionTarget = currentDecisionTarget(detail, approvalInbox)
   if (isLoading) return <LoadingState />
   if (error && detail === null) return <ErrorState message={error} onRetry={onRefresh} />
 
@@ -233,19 +351,36 @@ export function OperationsView({
               <UserCheck size={18} />
             </div>
             {detail.approval ? (
-              <ol className="approval-steps">
-                {detail.approval.steps.map((step) => (
-                  <li className={`is-${step.step_status}`} key={step.step_id}>
-                    <span className="step-index">{step.step_order}</span>
-                    <div>
-                      <strong>{step.approver_role === 'manager' ? '直属经理' : '数据负责人'}</strong>
-                      <p>{step.approver_id} · {statusLabel(step.step_status)}</p>
-                      {step.comment ? <small>“{step.comment}”</small> : null}
-                    </div>
-                    <time>{formatTime(step.decided_at)}</time>
-                  </li>
-                ))}
-              </ol>
+              <>
+                <ol className="approval-steps">
+                  {detail.approval.steps.map((step) => (
+                    <li className={`is-${step.step_status}`} key={step.step_id}>
+                      <span className="step-index">{step.step_order}</span>
+                      <div>
+                        <strong>{step.approver_role === 'manager' ? '直属经理' : '数据负责人'}</strong>
+                        <p>{step.approver_id} · {statusLabel(step.step_status)}</p>
+                        {step.comment ? <small>“{step.comment}”</small> : null}
+                      </div>
+                      <time>{formatTime(step.decided_at)}</time>
+                    </li>
+                  ))}
+                </ol>
+                {decisionError ? (
+                  <div className="decision-error" role="alert">
+                    <AlertCircle size={15} />
+                    <span>{safeErrorMessage(decisionError)}</span>
+                  </div>
+                ) : null}
+                {decisionTarget ? (
+                  <ApprovalDecisionCard
+                    key={decisionTarget.step.step_id}
+                    caseId={decisionTarget.caseId}
+                    approvalStepId={decisionTarget.step.step_id}
+                    isDeciding={isDeciding}
+                    onDecide={onDecide}
+                  />
+                ) : null}
+              </>
             ) : (
               <p className="detail-empty">尚未创建审批步骤。</p>
             )}
@@ -300,33 +435,72 @@ export function OperationsConsole({
 }) {
   const [cases, setCases] = useState<CaseList | null>(null)
   const [detail, setDetail] = useState<RequestDetail | null>(null)
+  const [approvalInbox, setApprovalInbox] = useState<ApprovalInbox | null>(null)
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(requestId)
   const [isLoading, setIsLoading] = useState(true)
+  const [isDeciding, setIsDeciding] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [decisionError, setDecisionError] = useState<string | null>(null)
+  const canDecide = roleLabel === '直属经理' || roleLabel === '数据负责人'
 
   const fetchFacts = useCallback(async () => {
-    const nextCases = await readAccessibleRequests()
+    const [nextCases, nextApprovalInbox] = await Promise.all([
+      readAccessibleRequests(),
+      canDecide ? readApprovalInbox() : Promise.resolve(null),
+    ])
     const preferredRequestId = selectedRequestId ?? requestId
     const nextRequestId = nextCases.items.some((item) => item.request_id === preferredRequestId)
       ? preferredRequestId
       : nextCases.items[0]?.request_id ?? null
     const nextDetail = nextRequestId ? await readRequestDetail(nextRequestId) : null
-    return { nextCases, nextDetail }
-  }, [requestId, selectedRequestId])
+    return { nextCases, nextDetail, nextApprovalInbox }
+  }, [canDecide, requestId, selectedRequestId])
+
+  const applyFacts = useCallback((facts: Awaited<ReturnType<typeof fetchFacts>>) => {
+    setCases(facts.nextCases)
+    setDetail(facts.nextDetail)
+    setApprovalInbox(facts.nextApprovalInbox)
+  }, [])
 
   const refresh = useCallback(async () => {
     setIsLoading(true)
     setError(null)
+    setDecisionError(null)
     try {
       const facts = await fetchFacts()
-      setCases(facts.nextCases)
-      setDetail(facts.nextDetail)
+      applyFacts(facts)
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : '审批事实读取失败')
     } finally {
       setIsLoading(false)
     }
-  }, [fetchFacts])
+  }, [applyFacts, fetchFacts])
+
+  const handleDecision = useCallback(async (
+    caseId: string,
+    approvalStepId: string,
+    decision: ApprovalDecision,
+    comment: string | null,
+  ) => {
+    setIsDeciding(true)
+    setDecisionError(null)
+    try {
+      await decideApproval(caseId, approvalStepId, decision, comment)
+    } catch (decisionFailure) {
+      setDecisionError(
+        decisionFailure instanceof Error ? decisionFailure.message : '审批决定提交失败，请重试。',
+      )
+      setIsDeciding(false)
+      return
+    }
+    try {
+      applyFacts(await fetchFacts())
+    } catch {
+      setDecisionError('审批决定已提交，但最新事实刷新失败；请手动刷新。')
+    } finally {
+      setIsDeciding(false)
+    }
+  }, [applyFacts, fetchFacts])
 
   useEffect(() => {
     void refresh()
@@ -337,10 +511,14 @@ export function OperationsConsole({
       roleLabel={roleLabel}
       cases={cases}
       detail={detail}
+      approvalInbox={approvalInbox}
       isLoading={isLoading}
+      isDeciding={isDeciding}
       error={error}
+      decisionError={decisionError}
       onRefresh={() => void refresh()}
       onSelectRequest={setSelectedRequestId}
+      onDecide={(...args) => void handleDecision(...args)}
     />
   )
 }

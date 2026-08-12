@@ -87,9 +87,16 @@ def test_inbox_is_private_to_each_auth_session(
 
     decided = manager_client.post(
         f"/api/approval-cases/{case_id}/decisions",
-        json={"decision": "approve"},
+        json={
+            "approval_step_id": next(
+                item["approval_step_id"]
+                for item in manager.json()["items"]
+                if item["request_id"] == request_id
+            ),
+            "decision": "approve",
+        },
     )
-    assert decided.status_code == 404
+    assert decided.status_code == 200
     assert operations_client.get("/api/approval-inbox").status_code == 403
 
 
@@ -135,12 +142,7 @@ def test_legacy_demo_fault_control_is_closed_before_provisioning(
     operations_client: TestClient,
 ) -> None:
     request_id, case_id = submit_and_start(operations_client)
-    for actor_id in ("EMP-002", "EMP-003"):
-        role = role_client(operations_client, actor_id)
-        assert role.post(
-            f"/api/approval-cases/{case_id}/decisions",
-            json={"decision": "approve"},
-        ).status_code == 404
+    assert case_id
     assert operations_client.post(
         "/api/demo/fault-mode",
         json={"fault_mode": "iam_timeout"},

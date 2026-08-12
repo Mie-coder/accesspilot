@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   bootstrapWorkspace,
   createDecisionPacket,
+  decideApproval,
   parseSseEvents,
   readAccessibleRequests,
   readMyRequests,
@@ -106,5 +107,27 @@ describe('Decision Packet write boundary', () => {
       }),
     )
     expect(fetchMock.mock.calls[0]?.[1]?.body).toBeUndefined()
+  })
+})
+
+describe('approval decision write boundary', () => {
+  it('binds the decision to the visible pending step', async () => {
+    const fetchMock = vi.fn(async () => Response.json({ approval_status: 'pending_data_owner' }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await decideApproval('case/1', 'step/1', 'reject', '缺少业务必要性')
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/approval-cases/case%2F1/decisions',
+      expect.objectContaining({
+        method: 'POST',
+        credentials: 'include',
+        body: JSON.stringify({
+          approval_step_id: 'step/1',
+          decision: 'reject',
+          comment: '缺少业务必要性',
+        }),
+      }),
+    )
   })
 })

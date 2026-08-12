@@ -557,13 +557,14 @@ export async function startApproval(requestId: string): Promise<void> {
 
 export async function decideApproval(
   caseId: string,
+  approvalStepId: string,
   decision: 'approve' | 'reject',
   comment: string | null,
 ): Promise<void> {
   await requestJson(`/api/approval-cases/${encodeURIComponent(caseId)}/decisions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ decision, comment }),
+    body: JSON.stringify({ approval_step_id: approvalStepId, decision, comment }),
   })
 }
 

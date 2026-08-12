@@ -87,55 +87,63 @@ def role_client(client: TestClient, employee_id: str) -> TestClient:
     return role
 
 
-def test_api_role_sessions_are_private_until_t20_acl(
+def test_api_role_sessions_advance_shared_case_in_order(
     approval_client: TestClient,
 ) -> None:
     request_id = submit_request(approval_client)
     case = start_case(approval_client, request_id)
     case_id = case["approval_case_id"]
     assert case["approval_status"] == "pending_manager"
+    detail = approval_client.get(f"/api/requests/{request_id}").json()
+    manager_step_id = detail["approval"]["steps"][0]["step_id"]
+    owner_step_id = detail["approval"]["steps"][1]["step_id"]
 
     manager_client = role_client(approval_client, "EMP-002")
     manager = manager_client.post(
         f"/api/approval-cases/{case_id}/decisions",
         json={
+            "approval_step_id": manager_step_id,
             "decision": "approve",
             "comment": "经理确认业务需要。",
         },
     )
-    assert manager.status_code == 404
+    assert manager.status_code == 200
 
     owner_client = role_client(approval_client, "EMP-003")
     owner = owner_client.post(
         f"/api/approval-cases/{case_id}/decisions",
         json={
+            "approval_step_id": owner_step_id,
             "decision": "approve",
             "comment": "数据所有者确认最小权限。",
         },
     )
-    assert owner.status_code == 404
+    assert owner.status_code == 200
 
 
-def test_api_role_session_cannot_advance_private_case(
+def test_api_role_session_cannot_advance_out_of_order_case(
     approval_client: TestClient,
 ) -> None:
     request_id = submit_request(approval_client)
     case = start_case(approval_client, request_id)
     case_id = case["approval_case_id"]
+    detail = approval_client.get(f"/api/requests/{request_id}").json()
+    manager_step_id = detail["approval"]["steps"][0]["step_id"]
+    owner_step_id = detail["approval"]["steps"][1]["step_id"]
 
     owner_client = role_client(approval_client, "EMP-003")
     owner = owner_client.post(
         f"/api/approval-cases/{case_id}/decisions",
-        json={"decision": "approve"},
+        json={"approval_step_id": owner_step_id, "decision": "approve"},
     )
-    assert owner.status_code == 404
+    assert owner.status_code == 409
 
     manager_client = role_client(approval_client, "EMP-002")
     manager = manager_client.post(
         f"/api/approval-cases/{case_id}/decisions",
-        json={"decision": "approve"},
+        json={"approval_step_id": manager_step_id, "decision": "approve"},
     )
-    assert manager.status_code == 404
+    assert manager.status_code == 200
 
 
 def test_api_rejects_stale_draft_after_workspace_identity_switch(
@@ -168,10 +176,16 @@ def test_decision_body_cannot_supply_an_actor_id(
 ) -> None:
     request_id = submit_request(approval_client)
     case_id = start_case(approval_client, request_id)["approval_case_id"]
+    detail = approval_client.get(f"/api/requests/{request_id}").json()
+    step_id = detail["approval"]["steps"][0]["step_id"]
 
     response = approval_client.post(
         f"/api/approval-cases/{case_id}/decisions",
-        json={"actor_id": "EMP-002", "decision": "approve"},
+        json={
+            "approval_step_id": step_id,
+            "actor_id": "EMP-002",
+            "decision": "approve",
+        },
     )
 
     assert response.status_code == 422

@@ -196,8 +196,26 @@ class ApprovalDecisionBody(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    approval_step_id: UUID
     decision: Literal["approve", "reject"]
     comment: str | None = None
+
+    @field_validator("comment")
+    @classmethod
+    def normalize_comment(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @classmethod
+    def validate_rejection_reason(
+        cls,
+        decision: Literal["approve", "reject"],
+        comment: str | None,
+    ) -> None:
+        if decision == "reject" and comment is None:
+            raise HTTPException(status_code=422, detail="驳回必须填写原因")
 
 
 class WorkspaceIdentityBody(BaseModel):
@@ -1907,23 +1925,29 @@ def create_app(
 
     @app.post("/api/approval-cases/{case_id}/decisions")
     def decide_approval_step(
+        request: Request,
         case_id: UUID,
         body: ApprovalDecisionBody,
         workspace: Workspace = Depends(require_workspace),  # noqa: B008
     ) -> dict[str, object]:
         """由当前指定审批人批准或驳回一个审批步骤。"""
 
+        context: AuthContext | None = getattr(request.state, "auth_context", None)
+        if context is None:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期")
+        ApprovalDecisionBody.validate_rejection_reason(body.decision, body.comment)
         with active_session_factory() as session:
             try:
                 case = decide_approval(
                     session,
-                    workspace_token=workspace.token,
                     case_id=case_id,
-                    actor_id=workspace.actor_id,
+                    expected_step_id=body.approval_step_id,
+                    actor_id=context.principal.employee_id,
+                    roles=context.principal.roles,
                     decision=body.decision,
                     comment=body.comment,
                 )
-            except (ApprovalNotFoundError, ApprovalWorkspaceMismatchError) as error:
+            except ApprovalNotFoundError as error:
                 raise HTTPException(status_code=404, detail="审批流不存在") from error
             except ApprovalActorMismatchError as error:
                 raise HTTPException(
@@ -1936,6 +1960,7 @@ def create_app(
                 raise HTTPException(status_code=409, detail="该审批步骤已经决定") from error
             except ApprovalTerminalError as error:
                 raise HTTPException(status_code=409, detail="审批流已经结束") from error
+            del workspace
             return approval_payload(session, case)
 
     @app.post("/api/requests/{request_id}/provision")

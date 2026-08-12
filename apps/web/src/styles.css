@@ -2101,6 +2101,27 @@ a:focus-visible {
   resize: vertical;
 }
 
+.decision-guard-copy {
+  margin: 9px 0 0;
+  color: #718078;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.decision-error {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 12px;
+  border: 1px solid #e1bcae;
+  border-radius: 10px;
+  background: #fff6f2;
+  color: #8a442f;
+  padding: 10px 11px;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 .decision-actions {
   margin-top: 10px;
   display: grid;
@@ -2113,6 +2134,15 @@ a:focus-visible {
   min-height: 42px;
   margin: 0;
   font-size: 11px;
+}
+
+.decision-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.decision-actions button:only-child {
+  grid-column: 1 / -1;
 }
 
 .decision-actions .danger-action {

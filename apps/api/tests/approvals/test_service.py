@@ -8,8 +8,8 @@ from sqlalchemy.orm import Session
 
 from accesspilot.agent.embeddings import DeterministicEmbeddingModel
 from accesspilot.approvals import (
-    ApprovalActorMismatchError,
     ApprovalAlreadyStartedError,
+    ApprovalNotFoundError,
     ApprovalOutOfOrderError,
     ApprovalStepAlreadyDecidedError,
     ApprovalTerminalError,
@@ -144,12 +144,14 @@ def test_correct_approvers_complete_two_steps_in_order(
         workspace_token=token,
         request_id=request_id,
     )
+    steps = load_steps(database_session, case.id)
 
     decide_approval(
         database_session,
-        workspace_token=token,
         case_id=case.id,
+        expected_step_id=steps[0].id,
         actor_id="EMP-002",
+        roles={"employee", "manager"},
         decision="approve",
         comment="经理确认业务需要。",
     )
@@ -160,9 +162,10 @@ def test_correct_approvers_complete_two_steps_in_order(
 
     decide_approval(
         database_session,
-        workspace_token=token,
         case_id=case.id,
+        expected_step_id=steps[1].id,
         actor_id="EMP-003",
+        roles={"employee", "data_owner"},
         decision="approve",
         comment="数据所有者确认最小权限与期限。",
     )
@@ -190,22 +193,25 @@ def test_wrong_actor_and_out_of_order_owner_do_not_change_facts(
         workspace_token=token,
         request_id=request_id,
     )
+    steps = load_steps(database_session, case.id)
     audit_count = request_audit_count(database_session, request_id)
 
     with pytest.raises(ApprovalOutOfOrderError):
         decide_approval(
             database_session,
-            workspace_token=token,
             case_id=case.id,
+            expected_step_id=steps[1].id,
             actor_id="EMP-003",
+            roles={"employee", "data_owner"},
             decision="approve",
         )
-    with pytest.raises(ApprovalActorMismatchError):
+    with pytest.raises(ApprovalNotFoundError):
         decide_approval(
             database_session,
-            workspace_token=token,
             case_id=case.id,
+            expected_step_id=steps[0].id,
             actor_id="EMP-004",
+            roles={"employee", "permissions_admin"},
             decision="approve",
         )
 
@@ -227,11 +233,13 @@ def test_duplicate_decision_is_rejected_without_new_audit(
         workspace_token=token,
         request_id=request_id,
     )
+    steps = load_steps(database_session, case.id)
     decide_approval(
         database_session,
-        workspace_token=token,
         case_id=case.id,
+        expected_step_id=steps[0].id,
         actor_id="EMP-002",
+        roles={"employee", "manager"},
         decision="approve",
     )
     audit_count = request_audit_count(database_session, request_id)
@@ -239,16 +247,17 @@ def test_duplicate_decision_is_rejected_without_new_audit(
     with pytest.raises(ApprovalStepAlreadyDecidedError):
         decide_approval(
             database_session,
-            workspace_token=token,
             case_id=case.id,
+            expected_step_id=steps[0].id,
             actor_id="EMP-002",
+            roles={"employee", "manager"},
             decision="approve",
         )
 
     assert request_audit_count(database_session, request_id) == audit_count
 
 
-def test_same_employee_can_decide_two_distinct_roles_in_order(
+def test_same_employee_cannot_decide_steps_without_server_role_match(
     database_session: Session,
 ) -> None:
     token, request_id = create_submitted_request(
@@ -262,27 +271,23 @@ def test_same_employee_can_decide_two_distinct_roles_in_order(
         workspace_token=token,
         request_id=request_id,
     )
+    steps = load_steps(database_session, case.id)
 
-    decide_approval(
-        database_session,
-        workspace_token=token,
-        case_id=case.id,
-        actor_id="EMP-004",
-        decision="approve",
-    )
-    decide_approval(
-        database_session,
-        workspace_token=token,
-        case_id=case.id,
-        actor_id="EMP-004",
-        decision="approve",
-    )
+    with pytest.raises(ApprovalNotFoundError):
+        decide_approval(
+            database_session,
+            case_id=case.id,
+            expected_step_id=steps[0].id,
+            actor_id="EMP-004",
+            roles={"employee", "permissions_admin"},
+            decision="approve",
+        )
 
     database_session.refresh(case)
-    assert case.approval_status == "approved"
+    assert case.approval_status == "pending_manager"
     assert [step.step_status for step in load_steps(database_session, case.id)] == [
-        "approved",
-        "approved",
+        "pending",
+        "waiting",
     ]
 
 
@@ -313,12 +318,14 @@ def test_rejection_terminates_case_and_cancels_later_step(
         workspace_token=token,
         request_id=request_id,
     )
+    steps = load_steps(database_session, case.id)
 
     decide_approval(
         database_session,
-        workspace_token=token,
         case_id=case.id,
+        expected_step_id=steps[0].id,
         actor_id="EMP-002",
+        roles={"employee", "manager"},
         decision="reject",
         comment="当前理由不足。",
     )
@@ -333,9 +340,10 @@ def test_rejection_terminates_case_and_cancels_later_step(
     with pytest.raises(ApprovalTerminalError):
         decide_approval(
             database_session,
-            workspace_token=token,
             case_id=case.id,
+            expected_step_id=steps[1].id,
             actor_id="EMP-003",
+            roles={"employee", "data_owner"},
             decision="approve",
         )
 
