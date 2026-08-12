@@ -1,6 +1,6 @@
-# AccessPilot v1.2「上下文意图与可信多角色闭环」Tickets（T18–T23 已完成）
+# AccessPilot v1.2「上下文意图与可信多角色闭环」Tickets（T18–T24 已完成）
 
-**状态：** 用户已确认按 T18 → T25 串行实施；T18–T23 已独立验收，T24–T25 待开始；不推送、合并或部署
+**状态：** T18–T24 已独立验收，`product_verified=true`；T25 待完成；不推送、合并或部署
 **更新时间：** 2026-08-12
 **继承基线：** v1.1，HEAD `c683d84`，T01–T17 已完成
 **产品说明书：** `docs/product/accesspilot-product-function-book-v1.2.md`
@@ -195,7 +195,7 @@
 
 ## T24 — 四浏览器闭环、攻击矩阵与 Product Verification
 
-**状态：** 待开始
+**状态：** 已完成并独立验收
 
 **目标：** 在同一实际 revision 上证明精简版主线可运行、可攻击验证且没有把目标值冒充结果。
 
@@ -212,6 +212,13 @@
 **依赖：** T18–T23。
 
 **主要风险：** T24 只能汇总证据，不能通过修改分母、目标值或补写未实现功能获得全绿。
+
+### T24 验收记录（2026-08-12）
+
+- 代码 revision `eec27d7`；API 425 passed，Web 87 passed，Ruff/MyPy/Alembic/ESLint/TypeScript/build 通过。
+- 当前固定评测 15 场景、101/101；T24-01 三项覆盖四角色主链、攻击零写与 SSE Session 失效断流。
+- 四个独立命名浏览器 Session 完成同一 Case；1440×900、1024×768、390×844 无横向溢出，移动端 Tab + Enter 登录通过。
+- 证据与边界见 `docs/evidence/accesspilot-v1.2-product-manifest.md`；`product_verified=true`，不自动推导 `interview_ready`。
 
 ## T25 — ADR、Demo 主线与 Interview Evidence Pack
 

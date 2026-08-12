@@ -20,4 +20,4 @@
 - 精简前 DeepSeek 历史评审：`reviews/accesspilot-v1.2-spec-deepseek-review-2026-08-11.md`
 - T18–T25 精简 Ticket：`tickets/accesspilot-productized-agent-v1.2.md`
 
-用户已于 2026-08-11 确认按 T18 → T25 串行实施；T18–T23 已完成并通过独立验收，T24–T25 待开始。当前仅有本地改动，不推送、合并或部署；实施后的真实能力仍以根目录 `README.md`、对应测试和 evidence 为准。
+T18–T24 已完成并通过独立验收，`product_verified=true`；T25 面试证据包待完成。当前仅有本地提交，不推送、合并或部署；真实能力以根目录 `README.md`、对应测试和 evidence 为准。

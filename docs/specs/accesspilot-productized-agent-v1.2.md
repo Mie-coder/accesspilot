@@ -1,6 +1,6 @@
 # AccessPilot v1.2「上下文意图与可信多角色闭环」Spec（精简版）
 
-**状态：** 用户已确认按 T18 → T25 串行实施；T18–T23 已独立验收，T24–T25 待开始；不推送、合并或部署
+**状态：** T18–T24 已独立验收，`product_verified=true`；T25 待完成；不推送、合并或部署
 **更新时间：** 2026-08-12
 **上游产品定义：** `docs/product/accesspilot-product-function-book-v1.2.md`
 **已验证基线：** AccessPilot v1.1，本地提交 `c683d84`
