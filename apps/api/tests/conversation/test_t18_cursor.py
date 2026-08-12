@@ -31,6 +31,7 @@ from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
 from accesspilot.domain.models import ConversationCursor, ParsedReply, RequestDraft
 from accesspilot.events import ModelQuota
 from accesspilot.streaming import encode_sse_frame
+from accesspilot.tools.catalog import ToolResult
 from accesspilot.workspaces import (
     DraftRevisionConflictError,
     InMemoryWorkspaceStore,
@@ -223,6 +224,91 @@ def test_numeric_follow_up_uses_duration_cursor_instead_of_help(
     assert follow_up.business_status == "collecting"
     assert follow_up.draft.duration_days == 111
     assert model.calls == 1
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_justification", "expected_status", "expected_cursor"),
+    [
+        (
+            "演示测试流程申请",
+            "演示测试流程申请",
+            "awaiting_confirmation",
+            "confirmation",
+        ),
+        ("111", None, "collecting", "justification"),
+        ("帮助", None, "answered", None),
+        ("今天天气怎么样", None, "answered", None),
+        ("测试环境怎么使用？", None, "answered", None),
+        ("测试环境如何使用", None, "answered", None),
+        ("测试环境是什么", None, "answered", None),
+        ("测试哪些流程", None, "answered", None),
+        ("测试环境为什么失败", None, "answered", None),
+        ("测试环境为何失败", None, "answered", None),
+        ("测试环境能否使用", None, "answered", None),
+        ("测试环境是否可用", None, "answered", None),
+        ("测试环境可用吗", None, "answered", None),
+        ("测试环境如何使用呢", None, "answered", None),
+        ("用于什么业务？", None, "answered", None),
+        (
+            "用于测试如何申请权限的演示",
+            "用于测试如何申请权限的演示",
+            "awaiting_confirmation",
+            "confirmation",
+        ),
+        ("employee_id=EMP-003", None, "answered", "justification"),
+    ],
+)
+def test_justification_cursor_accepts_only_safe_plain_language_without_model(
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+    expected_justification: str | None,
+    expected_status: str,
+    expected_cursor: str | None,
+) -> None:
+    """理由 Cursor 仅消费切题、安全的自然语言，不能依赖“用于/为了”。"""
+
+    token, workspace_service, session_factory = isolated_numeric_context(monkeypatch)
+    monkeypatch.setattr(
+        conversation_module,
+        "validate_access_request",
+        lambda session, draft: ToolResult(status="success"),
+    )
+    workspace_service.save_draft(
+        token,
+        RequestDraft(
+            employee_id="EMP-001",
+            entitlement_id="insighthub.customer_export",
+            duration_days=14,
+            confirmed=False,
+        ),
+        auth_session_id=AUTH_SESSION_ID,
+    )
+    workspace_service.activate_cursor(
+        token,
+        expected_revision=2,
+        expected_field="justification",
+        last_question_kind="justification",
+        auth_session_id=AUTH_SESSION_ID,
+    )
+
+    turn = handle_chat_message(
+        session_factory,  # type: ignore[arg-type]
+        workspace_service=workspace_service,
+        workspace_token=token,
+        content=content,
+        model=ExplodingReplyModel(),
+    )
+
+    assert turn.draft.justification == expected_justification
+    assert turn.business_status == expected_status
+    cursor = workspace_service.get(
+        token,
+        auth_session_id=AUTH_SESSION_ID,
+    ).active_cursor()
+    assert (cursor.expected_field if cursor is not None else None) == expected_cursor
+    if expected_justification is not None:
+        assert turn.intent == "request_access"
+        assert turn.missing_fields == []
 
 
 def test_numeric_message_without_active_cursor_needs_clarification_without_model_call(

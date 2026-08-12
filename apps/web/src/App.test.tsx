@@ -1,8 +1,18 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ReactElement } from 'react'
 
 import { resetAuthClientState } from './api'
 import { App } from './App'
+import { entitlementNameForCode } from './entitlement-name'
+import type { RequestDraft } from './types'
+
+const appMocks = vi.hoisted(() => ({
+  append: vi.fn(),
+  draft: null as RequestDraft | null,
+  chatConfirm: null as (() => void) | null,
+  sidebarConfirm: null as (() => void) | null,
+}))
 
 // Keep these tests focused on the auth state machine.  The full workbench has
 // its own component/runtime tests; replacing it here still renders the real
@@ -11,13 +21,25 @@ vi.mock('./WorkbenchRuntime', () => ({
   WorkbenchRuntime: ({ children }: { children: unknown }) => children,
 }))
 vi.mock('@assistant-ui/react', () => ({
-  useAui: () => ({ thread: { append: () => undefined } }),
+  useAui: () => ({ thread: { append: appMocks.append } }),
   useAuiState: (selector: (state: { thread: { isRunning: boolean } }) => unknown) =>
     selector({ thread: { isRunning: false } }),
 }))
-vi.mock('./ChatThread', () => ({ ChatThread: () => null }))
+vi.mock('./ChatThread', () => ({
+  ChatThread: ({ confirmation }: {
+    confirmation?: ReactElement<{ onConfirm: () => void }>
+  }) => {
+    appMocks.chatConfirm = confirmation?.props.onConfirm ?? null
+    return confirmation ?? null
+  },
+}))
 vi.mock('./AccessCards', () => ({ AccessCards: () => null }))
-vi.mock('./DraftCard', () => ({ DraftCard: () => null }))
+vi.mock('./DraftCard', () => ({
+  DraftCard: ({ onConfirm }: { onConfirm: () => void }) => {
+    appMocks.sidebarConfirm = onConfirm
+    return null
+  },
+}))
 vi.mock('./OperationsConsole', () => ({ OperationsConsole: () => null }))
 vi.mock('./PolicyCard', () => ({ PolicyCard: () => null }))
 vi.mock('./RequestTimeline', () => ({ RequestTimeline: () => null }))
@@ -29,8 +51,8 @@ vi.mock('./workbench-context', () => ({
       department: 'security',
       roles: [],
     },
-    draft: null,
-    missingFields: [],
+    draft: appMocks.draft,
+    missingFields: appMocks.draft === null ? [] : [],
     events: [],
     businessStatus: 'collecting',
     error: null,
@@ -97,9 +119,52 @@ function authenticatedFetch(options: { logoutStatus?: number } = {}) {
 beforeEach(() => {
   resetAuthClientState()
   vi.unstubAllGlobals()
+  appMocks.append.mockReset().mockImplementation(() => new Promise<void>(() => undefined))
+  appMocks.draft = null
+  appMocks.chatConfirm = null
+  appMocks.sidebarConfirm = null
+})
+
+describe('application confirmation facts', () => {
+  it('does not reuse a name loaded for an earlier entitlement code', () => {
+    expect(entitlementNameForCode(
+      { code: 'old.permission', name: '旧权限名称' },
+      'new.permission',
+    )).toBeNull()
+  })
 })
 
 describe('App authentication state machine', () => {
+  it('allows only one same-frame explicit confirmation across both confirmation buttons', async () => {
+    appMocks.draft = {
+      employee_id: 'EMP-003',
+      entitlement_id: 'insighthub.customer_export',
+      duration_days: 14,
+      justification: '用于季度客户分析',
+      confirmed: false,
+    }
+    const fetchMock = authenticatedFetch()
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/access-overview') return jsonResponse({ items: [] })
+      if (url === '/api/auth/session') return jsonResponse(authPayload)
+      if (url === '/api/drafts/current') return jsonResponse({ draft: appMocks.draft })
+      if (url === '/api/events?follow=false') return emptyEventsResponse()
+      throw new Error(`unexpected fetch ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+    await waitFor(() => expect(appMocks.chatConfirm).not.toBeNull())
+
+    act(() => {
+      appMocks.chatConfirm?.()
+      appMocks.sidebarConfirm?.()
+    })
+
+    expect(appMocks.append).toHaveBeenCalledOnce()
+  })
+
   it('shows four Mock Login accounts after an anonymous 401 without legacy bootstrap', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       expect(String(input)).toBe('/api/auth/session')

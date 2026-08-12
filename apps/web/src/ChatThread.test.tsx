@@ -5,7 +5,7 @@ import {
   useLocalRuntime,
 } from '@assistant-ui/react'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { useEffect } from 'react'
+import { type ReactNode, useEffect } from 'react'
 import { describe, expect, it } from 'vitest'
 
 import { ChatThread, StarterPrompts } from './ChatThread'
@@ -63,6 +63,15 @@ function EmptyThread() {
   )
 }
 
+function ThreadWithConfirmation({ confirmation }: { confirmation: ReactNode }) {
+  const runtime = useLocalRuntime(idleAdapter)
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <ChatThread confirmation={confirmation} />
+    </AssistantRuntimeProvider>
+  )
+}
+
 
 
 function PartialRunningThread() {
@@ -96,6 +105,21 @@ describe('ChatThread', () => {
       expect(screen.getByRole('status')).toHaveTextContent('后端正在解析并校验草稿')
     })
     expect(screen.getByRole('button', { name: '停止生成' })).toBeInTheDocument()
+  })
+
+  it('places a confirmation slot in the scrollable conversation before the sticky composer', () => {
+    render(
+      <ThreadWithConfirmation confirmation={<section data-testid="confirmation-slot">确认申请信息</section>} />,
+    )
+
+    const slot = screen.getByTestId('confirmation-slot')
+    const viewport = document.querySelector('.thread-viewport')
+    const footer = document.querySelector('.thread-footer')
+
+    expect(viewport).toContainElement(slot)
+    expect(footer).toBeInTheDocument()
+    expect(slot.compareDocumentPosition(footer!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(footer).toContainElement(screen.getByRole('textbox', { name: '描述权限申请' }))
   })
 })
 

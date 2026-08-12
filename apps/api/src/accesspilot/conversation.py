@@ -294,6 +294,35 @@ def _sanitize_model_text(content: str | None) -> str | None:
     return redacted
 
 
+_QUESTION_WORD_MARKERS = (
+    "怎么",
+    "如何",
+    "什么",
+    "哪些",
+    "为什么",
+    "为何",
+    "能否",
+    "是否",
+)
+
+
+def _is_obvious_question(content: str) -> bool:
+    """识别不能被理由追问吞掉的明显问句。"""
+
+    normalized = " ".join(content.casefold().split())
+    if "?" in normalized or "？" in normalized:
+        return True
+    if re.search(r"(?:吗|呢)[。！!]*$", normalized) is not None:
+        return True
+    for prefix in ("用于", "为了"):
+        if normalized.startswith(prefix):
+            remainder = normalized[len(prefix) :].lstrip("：:,， ")
+            return any(
+                remainder.startswith(marker) for marker in _QUESTION_WORD_MARKERS
+            )
+    return any(marker in normalized for marker in _QUESTION_WORD_MARKERS)
+
+
 def _is_request_collection_follow_up(
     content: str,
     missing_fields: list[str],
@@ -311,6 +340,8 @@ def _is_request_collection_follow_up(
     if next_field == "duration_days":
         return re.search(r"\d+\s*天", normalized) is not None
     if next_field == "justification":
+        if _is_obvious_question(normalized):
+            return False
         return any(
             marker in normalized
             for marker in (
@@ -331,6 +362,22 @@ def _is_request_collection_follow_up(
             )
         )
     return False
+
+
+def _is_safe_justification_cursor_reply(
+    content: str,
+    route: IntentRoute,
+) -> bool:
+    """只在理由 Cursor 中接受切题且无安全标记的自然语言续答。"""
+
+    return (
+        route.intent == "request_access"
+        and not route.security_probe
+        and not _is_numeric_input(content)
+        and not contains_protected_internal_content(content)
+        and re.search(r"[^\W\d_]", content) is not None
+        and _is_request_collection_follow_up(content, ["justification"])
+    )
 
 
 def _tool_answer(route: IntentRoute, result: ToolResult | None) -> str:
@@ -808,6 +855,15 @@ def _process_chat_message(
         route = route_with_validation(normalized_content, active_router)
     except IntentRoutingFailed as error:
         raise ConversationInputError("暂时无法可靠识别该请求意图") from error
+    active_cursor = workspace.active_cursor()
+    if (
+        active_cursor is not None
+        and active_cursor.expected_field == "justification"
+        and route.intent in {"help", "request_access"}
+        and _is_obvious_question(normalized_content)
+    ):
+        # 明显问句是在换题，不能因包含“测试/申请”等理由关键词被写入草稿。
+        route = IntentRoute(intent="help", security_probe=route.security_probe)
     if (
         route.intent == "help"
         and visible_draft is not None
@@ -851,6 +907,11 @@ def _process_chat_message(
         )
     safe_content = _redact_sensitive_content(normalized_content)
     current_draft = visible_draft or RequestDraft(employee_id=workspace.actor_id)
+    is_justification_cursor_reply = (
+        active_cursor is not None
+        and active_cursor.expected_field == "justification"
+        and _is_safe_justification_cursor_reply(normalized_content, route)
+    )
 
     if route.intent != "request_access":
         with session_factory() as session:
@@ -944,7 +1005,11 @@ def _process_chat_message(
         raise ConversationInputError("当前草稿属于另一演示身份，请先切回原身份")
 
     with session_factory() as session:
-        quota = consume_model_call(session, workspace_token=workspace_token)
+        quota = (
+            get_model_quota(session, workspace_token=workspace_token)
+            if is_justification_cursor_reply
+            else consume_model_call(session, workspace_token=workspace_token)
+        )
     _append_event(
         session_factory,
         workspace_token=workspace_token,
@@ -969,10 +1034,14 @@ def _process_chat_message(
                     is_retry=True,
                 )
 
-        parsed = parse_reply_with_retry(
-            safe_content,
-            model,
-            before_retry=consume_retry_quota,
+        parsed = (
+            ParsedReply(justification=normalized_content)
+            if is_justification_cursor_reply
+            else parse_reply_with_retry(
+                safe_content,
+                model,
+                before_retry=consume_retry_quota,
+            )
         )
         explicit_confirmation = _explicit_confirmation_from_text(normalized_content)
         if route.security_probe and explicit_confirmation is None:
@@ -1108,13 +1177,23 @@ def _process_chat_message(
     draft_changed = workspace.draft is None or workspace.draft != draft
     if draft_changed:
         try:
-            updated_workspace = workspace_service.save_draft_cas(
-                workspace_token,
-                expected_revision=entry_draft_revision,
-                draft=draft,
-                auth_session_id=auth_session_id,
-            )
-        except DraftRevisionConflictError:
+            if is_justification_cursor_reply:
+                assert active_cursor is not None
+                updated_workspace = workspace_service.consume_cursor_cas(
+                    workspace_token,
+                    expected_revision=active_cursor.draft_revision,
+                    expected_field="justification",
+                    draft=draft,
+                    auth_session_id=auth_session_id,
+                )
+            else:
+                updated_workspace = workspace_service.save_draft_cas(
+                    workspace_token,
+                    expected_revision=entry_draft_revision,
+                    draft=draft,
+                    auth_session_id=auth_session_id,
+                )
+        except (CursorConflictError, DraftRevisionConflictError):
             # The model parsed an older snapshot while another request advanced
             # the draft. Keep the newer fact and close this turn safely.
             latest_workspace = workspace_service.get(

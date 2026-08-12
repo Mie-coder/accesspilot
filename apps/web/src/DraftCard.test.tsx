@@ -82,6 +82,7 @@ describe('DraftCard', () => {
         approvalError={null}
         isStartingApproval={false}
         isBusy={false}
+        entitlementName="脱敏客户数据导出"
         onConfirm={onConfirm}
         onSubmit={vi.fn()}
         onRetryDecisionPacket={vi.fn()}
@@ -90,6 +91,7 @@ describe('DraftCard', () => {
     )
 
     expect(screen.getByText('完整，等待确认')).toBeInTheDocument()
+    expect(screen.getByText('脱敏客户数据导出（insighthub.customer_export）')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '确认申请内容' }))
     expect(onConfirm).toHaveBeenCalledOnce()
   })

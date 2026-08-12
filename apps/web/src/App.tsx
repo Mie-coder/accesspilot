@@ -10,13 +10,22 @@ import {
   ShieldCheck,
   Sparkles,
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { approvalRoleFor } from './approval'
-import { ApiError, bootstrapWorkspace, login, logout, resetAuthClientState } from './api'
+import {
+  ApiError,
+  bootstrapWorkspace,
+  login,
+  logout,
+  readAccessOverview,
+  resetAuthClientState,
+} from './api'
 import { AccessCards } from './AccessCards'
 import { ChatThread } from './ChatThread'
+import { ConfirmationSummary } from './ConfirmationSummary'
 import { DraftCard } from './DraftCard'
+import { entitlementNameForCode, type EntitlementNameFact } from './entitlement-name'
 import { OperationsConsole } from './OperationsConsole'
 import { PolicyCard } from './PolicyCard'
 import { RequestTimeline } from './RequestTimeline'
@@ -97,6 +106,33 @@ function ActivityFeed({ events }: { events: WorkspaceEvent[] }) {
   )
 }
 
+function useEntitlementName(entitlementCode: string | null): string | null {
+  const [fact, setFact] = useState<EntitlementNameFact | null>(null)
+
+  useEffect(() => {
+    let active = true
+    if (entitlementCode === null) return () => { active = false }
+
+    void readAccessOverview()
+      .then(({ items }) => {
+        if (!active) return
+        setFact({
+          code: entitlementCode,
+          name: items.find((item) => item.code === entitlementCode)?.name ?? null,
+        })
+      })
+      .catch(() => {
+        // The code remains a valid server-derived draft fact, so a transient
+        // name lookup failure must not hide the confirmation action.
+        if (active) setFact({ code: entitlementCode, name: null })
+      })
+
+    return () => { active = false }
+  }, [entitlementCode])
+
+  return entitlementNameForCode(fact, entitlementCode)
+}
+
 function WorkbenchPage({ onLogout }: { onLogout: () => Promise<void> }) {
   const workbench = useWorkbench()
   const approvalRole = approvalRoleFor(workbench.identity)
@@ -104,14 +140,23 @@ function WorkbenchPage({ onLogout }: { onLogout: () => Promise<void> }) {
   const [activeView, setActiveView] = useState<'assistant' | 'access' | 'policy' | 'request'>('assistant')
   const [logoutBusy, setLogoutBusy] = useState(false)
   const [logoutError, setLogoutError] = useState<string | null>(null)
+  const [isConfirming, setIsConfirming] = useState(false)
+  const confirmationInFlightRef = useRef(false)
   const aui = useAui()
   const isRunning = useAuiState((state) => state.thread.isRunning)
-  const confirm = () => {
-    void aui.thread.append({
+  const entitlementName = useEntitlementName(workbench.draft?.entitlement_id ?? null)
+  const confirm = useCallback(() => {
+    if (confirmationInFlightRef.current || isRunning) return
+    confirmationInFlightRef.current = true
+    setIsConfirming(true)
+    void Promise.resolve(aui.thread.append({
       role: 'user',
       content: [{ type: 'text', text: '确认提交' }],
+    })).finally(() => {
+      confirmationInFlightRef.current = false
+      setIsConfirming(false)
     })
-  }
+  }, [aui, isRunning])
   const handleLogout = async () => {
     setLogoutBusy(true)
     setLogoutError(null)
@@ -233,7 +278,17 @@ function WorkbenchPage({ onLogout }: { onLogout: () => Promise<void> }) {
               <span>{workbench.error}</span>
             </div>
           ) : null}
-          <ChatThread />
+          <ChatThread
+            confirmation={(
+              <ConfirmationSummary
+                identity={workbench.identity}
+                draft={workbench.draft}
+                entitlementName={entitlementName}
+                isBusy={isRunning || isConfirming}
+                onConfirm={confirm}
+              />
+            )}
+          />
         </section>
 
         <aside className="right-rail" aria-label="申请状态">
@@ -247,7 +302,8 @@ function WorkbenchPage({ onLogout }: { onLogout: () => Promise<void> }) {
             approvalCase={workbench.approvalCase}
             approvalError={workbench.approvalError}
             isStartingApproval={workbench.isStartingApproval}
-            isBusy={isRunning || workbench.isSubmitting}
+            isBusy={isRunning || isConfirming || workbench.isSubmitting}
+            entitlementName={entitlementName}
             onConfirm={confirm}
             onSubmit={() => void workbench.submit()}
             onRetryDecisionPacket={() => void workbench.retryDecisionPacket()}

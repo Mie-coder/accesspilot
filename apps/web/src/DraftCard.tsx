@@ -13,6 +13,7 @@ interface DraftCardProps {
   approvalError: string | null
   isStartingApproval: boolean
   isBusy: boolean
+  entitlementName?: string | null
   onConfirm: () => void
   onSubmit: () => void
   onRetryDecisionPacket: () => void
@@ -38,6 +39,10 @@ function displayValue(key: keyof RequestDraft, value: RequestDraft[keyof Request
   return String(value)
 }
 
+function entitlementDisplay(name: string | null | undefined, code: string): string {
+  return name ? `${name}（${code}）` : code
+}
+
 export function DraftCard({
   draft,
   missingFields,
@@ -49,6 +54,7 @@ export function DraftCard({
   approvalError,
   isStartingApproval,
   isBusy,
+  entitlementName,
   onConfirm,
   onSubmit,
   onRetryDecisionPacket,
@@ -76,6 +82,9 @@ export function DraftCard({
         {fields.map(({ key, label }) => {
           const value = draft?.[key] ?? null
           const isPresent = value !== null
+          const displayedValue = key === 'entitlement_id' && typeof value === 'string'
+            ? entitlementDisplay(entitlementName, value)
+            : displayValue(key, value)
           return (
             <div className="draft-field" key={key}>
               <span className={`field-state ${isPresent ? 'is-present' : ''}`} aria-hidden="true">
@@ -83,7 +92,7 @@ export function DraftCard({
               </span>
               <div>
                 <span className="field-label">{label}</span>
-                <strong className={isPresent ? '' : 'is-empty'}>{displayValue(key, value)}</strong>
+                <strong className={isPresent ? '' : 'is-empty'}>{displayedValue}</strong>
               </div>
             </div>
           )

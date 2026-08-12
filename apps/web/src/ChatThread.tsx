@@ -7,7 +7,7 @@ import {
   useAui,
   useAuiState,
 } from '@assistant-ui/react'
-import { useCallback, useEffect, useRef } from 'react'
+import { type ReactNode, useCallback, useEffect, useRef } from 'react'
 
 import {
   AlertCircle,
@@ -163,7 +163,7 @@ function Composer() {
   )
 }
 
-export function ChatThread() {
+export function ChatThread({ confirmation }: { confirmation?: ReactNode }) {
   return (
     <ThreadPrimitive.Root className="thread-root">
       <ThreadPrimitive.Viewport className="thread-viewport" turnAnchor="top">
@@ -173,6 +173,7 @@ export function ChatThread() {
         <ThreadPrimitive.Messages>
           {() => <ChatMessage />}
         </ThreadPrimitive.Messages>
+        {confirmation}
         <ThreadPrimitive.ViewportFooter className="thread-footer">
           <ThreadPrimitive.ScrollToBottom className="scroll-bottom" aria-label="滚动到最新消息">
             <ArrowDown size={16} />
