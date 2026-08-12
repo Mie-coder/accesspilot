@@ -1,6 +1,6 @@
 import { AlertCircle, Check, Circle, FileCheck2, LoaderCircle, RefreshCw, ShieldCheck } from 'lucide-react'
 
-import type { DecisionPacket, RequestDraft, RequestResult } from './types'
+import type { DecisionPacket, RequestDetail, RequestDraft, RequestResult } from './types'
 
 interface DraftCardProps {
   draft: RequestDraft | null
@@ -9,10 +9,14 @@ interface DraftCardProps {
   decisionPacket: DecisionPacket | null
   decisionPacketError: string | null
   isGeneratingDecisionPacket: boolean
+  approvalCase: RequestDetail['approval']
+  approvalError: string | null
+  isStartingApproval: boolean
   isBusy: boolean
   onConfirm: () => void
   onSubmit: () => void
   onRetryDecisionPacket: () => void
+  onStartApproval: () => void
 }
 
 const generationModeLabels: Record<DecisionPacket['generation_mode'], string> = {
@@ -41,10 +45,14 @@ export function DraftCard({
   decisionPacket,
   decisionPacketError,
   isGeneratingDecisionPacket,
+  approvalCase,
+  approvalError,
+  isStartingApproval,
   isBusy,
   onConfirm,
   onSubmit,
   onRetryDecisionPacket,
+  onStartApproval,
 }: DraftCardProps) {
   const confirmed = draft?.confirmed === true && missingFields.length === 0
   const complete = draft !== null && missingFields.length === 0
@@ -103,13 +111,33 @@ export function DraftCard({
               <span>正在冻结决策材料…</span>
             </div>
           ) : decisionPacket ? (
-            <div className="packet-generation-state is-ready" role="status">
-              <ShieldCheck size={16} />
-              <span>
-                <strong>决策材料已冻结</strong>
-                {generationModeLabels[decisionPacket.generation_mode]} · {decisionPacket.generation_mode}
-              </span>
-            </div>
+            <>
+              <div className="packet-generation-state is-ready" role="status">
+                <ShieldCheck size={16} />
+                <span>
+                  <strong>决策材料已冻结</strong>
+                  {generationModeLabels[decisionPacket.generation_mode]} · {decisionPacket.generation_mode}
+                </span>
+              </div>
+              {approvalCase ? (
+                <div className="approval-start-state is-ready" role="status">
+                  <Check size={16} />
+                  <span><strong>审批已启动</strong>{statusLabels[approvalCase.approval_status] ?? approvalCase.approval_status}</span>
+                </div>
+              ) : (
+                <div className={`approval-start-state${approvalError ? ' is-error' : ''}`}>
+                  {approvalError ? <p role="alert">{approvalError}</p> : <p>决策材料已就绪，由申请人明确启动审批路线。</p>}
+                  <button
+                    type="button"
+                    disabled={isStartingApproval}
+                    aria-label={isStartingApproval ? '正在启动审批' : approvalError ? '重试启动审批' : '启动审批'}
+                    onClick={onStartApproval}
+                  >
+                    {isStartingApproval ? <><LoaderCircle className="spin" size={14} />正在启动…</> : approvalError ? <><RefreshCw size={14} />重试启动审批</> : '启动审批'}
+                  </button>
+                </div>
+              )}
+            </>
           ) : (
             <div className={`packet-generation-state is-error${decisionPacketError ? '' : ' is-pending'}`}>
               <div role={decisionPacketError ? 'alert' : 'status'}>
@@ -139,4 +167,11 @@ export function DraftCard({
       )}
     </section>
   )
+}
+
+const statusLabels: Record<string, string> = {
+  pending_manager: '待直属经理审批',
+  pending_data_owner: '待数据负责人审批',
+  approved: '审批通过',
+  rejected: '已驳回',
 }

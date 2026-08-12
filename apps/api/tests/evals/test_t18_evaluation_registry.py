@@ -25,6 +25,7 @@ from accesspilot.evaluation import (
     T21_SCENARIOS,
     T22_SCENARIOS,
     T23_SCENARIOS,
+    T24_SCENARIOS,
     EvaluationScenario,
 )
 
@@ -136,6 +137,13 @@ def test_current_registry_preserves_history_without_double_counting_superseded_t
         "apps/api/tests/api/test_t23_admin_provisioning.py",
     )
 
+    assert tuple(scenario.scenario_id for scenario in T24_SCENARIOS) == ("T24-01",)
+    assert T24_SCENARIOS[0].category == "four_role_lifecycle"
+    assert T24_SCENARIOS[0].expected_case_count == 3
+    assert T24_SCENARIOS[0].selectors == (
+        "apps/api/tests/api/test_t24_product_verification.py",
+    )
+
     assert SUPERSEDED_T17_SCENARIO_IDS == frozenset({"T17-01", "T17-09"})
     assert tuple(scenario.scenario_id for scenario in ACTIVE_T17_SCENARIOS) == (
         "T17-02",
@@ -157,9 +165,10 @@ def test_current_registry_preserves_history_without_double_counting_superseded_t
         + T21_SCENARIOS
         + T22_SCENARIOS
         + T23_SCENARIOS
+        + T24_SCENARIOS
     )
-    assert tuple(scenario.scenario_id for scenario in PRODUCT_SCENARIOS)[-1] == "T23-01"
-    assert sum(scenario.expected_case_count for scenario in PRODUCT_SCENARIOS) == 98
+    assert tuple(scenario.scenario_id for scenario in PRODUCT_SCENARIOS)[-1] == "T24-01"
+    assert sum(scenario.expected_case_count for scenario in PRODUCT_SCENARIOS) == 101
 
     all_selectors = [selector for scenario in PRODUCT_SCENARIOS for selector in scenario.selectors]
     assert len(all_selectors) == len(set(all_selectors))
@@ -170,7 +179,7 @@ def test_current_registry_preserves_history_without_double_counting_superseded_t
     )
 
 
-def test_current_registry_collects_exactly_98_unique_pytest_cases() -> None:
+def test_current_registry_collects_exactly_101_unique_pytest_cases() -> None:
     repo_root = Path(__file__).resolve().parents[4]
     selectors = [selector for scenario in PRODUCT_SCENARIOS for selector in scenario.selectors]
 
@@ -184,7 +193,7 @@ def test_current_registry_collects_exactly_98_unique_pytest_cases() -> None:
 
     assert completed.returncode == 0, completed.stderr
     node_ids = tuple(line for line in completed.stdout.splitlines() if "::" in line)
-    assert len(node_ids) == 98
+    assert len(node_ids) == 101
     assert len(node_ids) == len(set(node_ids))
 
 

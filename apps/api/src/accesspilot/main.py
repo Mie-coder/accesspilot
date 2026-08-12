@@ -1014,6 +1014,31 @@ def create_app(
     ) -> StreamingResponse:
         """回放安全事件；默认持续跟随，follow=false 只返回有限历史。"""
 
+        initial_context: AuthContext | None = getattr(
+            request.state,
+            "auth_context",
+            None,
+        )
+        if initial_context is None:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期")
+
+        def stream_session_is_active() -> bool:
+            """Revalidate a long-lived stream instead of trusting its handshake."""
+
+            try:
+                current = load_auth_context(
+                    active_session_factory,
+                    token=initial_context.token,
+                )
+            except InvalidAuthSessionError:
+                return False
+            return (
+                current.session_id == initial_context.session_id
+                and current.workspace_id == initial_context.workspace_id
+                and current.principal.employee_id
+                == initial_context.principal.employee_id
+            )
+
         raw_last_event_id = request.headers.get("Last-Event-ID", "0")
         try:
             after_id = int(raw_last_event_id)
@@ -1032,6 +1057,8 @@ def create_app(
             cursor = after_id
             last_heartbeat = time.monotonic()
             while True:
+                if not stream_session_is_active():
+                    return
                 with active_session_factory() as session:
                     events = list_workspace_events(
                         session,
@@ -1040,6 +1067,8 @@ def create_app(
                     )
                 if events:
                     for event in events:
+                        if not stream_session_is_active():
+                            return
                         cursor = max(cursor, event.id)
                         # 历史回放保留旧 message.assistant 合同；当前轮客户端
                         # 使用 /stream 的 v1 envelope 与 turn:seq 游标。

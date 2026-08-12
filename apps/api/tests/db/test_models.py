@@ -14,8 +14,8 @@ def load_tables():  # type: ignore[no-untyped-def]
     return Base.metadata.tables
 
 
-def test_metadata_contains_day4_tables() -> None:
-    """ER 图中的 12 张表必须全部进入 ORM 元数据。"""
+def test_metadata_contains_product_tables() -> None:
+    """当前产品表（包含 v1.2 Decision Packet）必须入 ORM 元数据。"""
 
     assert set(load_tables()) == {
         "access_grants",
@@ -24,6 +24,7 @@ def test_metadata_contains_day4_tables() -> None:
         "approval_cases",
         "approval_steps",
         "audit_events",
+        "decision_packets",
         "employees",
         "entitlements",
         "policy_chunks",

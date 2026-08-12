@@ -877,6 +877,53 @@ a:focus-visible {
   gap: 7px;
 }
 
+.approval-start-state {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #cbd8d1;
+  border-radius: 10px;
+  background: #f4f9f6;
+  padding: 10px;
+  color: #496056;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.approval-start-state p {
+  margin: 0;
+}
+
+.approval-start-state button {
+  min-height: 40px;
+  border: 0;
+  border-radius: 9px;
+  background: #173f31;
+  color: #fff;
+  font-weight: 680;
+}
+
+.approval-start-state button:disabled {
+  cursor: wait;
+  opacity: 0.68;
+}
+
+.approval-start-state.is-ready {
+  display: flex;
+  align-items: center;
+  background: #e8f1ec;
+  color: #2b644b;
+}
+
+.approval-start-state.is-ready span {
+  display: grid;
+}
+
+.approval-start-state.is-error {
+  border-color: #e4c6bb;
+  background: #fff4ef;
+  color: #8b4936;
+}
+
 .packet-generation-state button {
   width: max-content;
   border: 0;

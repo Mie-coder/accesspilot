@@ -75,8 +75,12 @@ function Probe() {
       <output data-testid="request-id">{workbench.requestResult?.request_id}</output>
       <output data-testid="packet-mode">{workbench.decisionPacket?.generation_mode}</output>
       <output data-testid="packet-error">{workbench.decisionPacketError}</output>
+      <output data-testid="approval-status">{workbench.approvalCase?.approval_status}</output>
+      <output data-testid="approval-error">{workbench.approvalError}</output>
+      <output data-testid="approval-busy">{String(workbench.isStartingApproval)}</output>
       <button type="button" onClick={() => void workbench.submit()}>submit request</button>
       <button type="button" onClick={() => void workbench.retryDecisionPacket()}>retry packet</button>
+      <button type="button" onClick={() => void workbench.startApproval()}>start approval</button>
     </>
   )
 }
@@ -248,6 +252,139 @@ describe('WorkbenchRuntime hydration', () => {
     await waitFor(() => expect(screen.getByTestId('packet-mode')).toHaveTextContent('provider'))
     expect(fetchMock.mock.calls.filter(([input]) => String(input) === '/api/requests')).toHaveLength(1)
     expect(packetAttempts).toBe(2)
+    view.unmount()
+  })
+
+  it('starts approval only after Packet generation and confirms it by rereading the requester Case', async () => {
+    const requestId = '11111111-1111-4111-8111-111111111111'
+    let approvalStarts = 0
+    let resolveStart: (() => void) | undefined
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/events') {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('请求已取消', 'AbortError')),
+            { once: true },
+          )
+        })
+      }
+      if (url === '/api/requests') {
+        return Response.json({ request_id: requestId, request_status: 'submitted' })
+      }
+      if (url === `/api/requests/${requestId}/decision-packet`) {
+        return Response.json({
+          packet_id: '22222222-2222-4222-8222-222222222222',
+          request_id: requestId,
+          generation_mode: 'deterministic',
+          packet_version: 'v1',
+          catalog_version: 'fictional-catalog-v1',
+          created_at: '2026-08-12T01:00:00Z',
+          frozen_request: {
+            requester_id: 'EMP-001', requester_name: '林晓',
+            entitlement_code: 'insighthub.customer_export', entitlement_name: '脱敏客户数据导出',
+            duration_days: 14, justification: '季度客户分析', request_status: 'submitted',
+            confirmed_at: '2026-08-12T00:58:00Z',
+          },
+          catalog: { risk_level: 'high', approval_policy: 'manager_and_data_owner', max_duration_days: 30 },
+          fixed_route: [],
+          items: [],
+          advisory: null,
+          availability_message: null,
+        })
+      }
+      if (url === `/api/requests/${requestId}/approval-case`) {
+        approvalStarts += 1
+        await new Promise<void>((resolve) => { resolveStart = resolve })
+        return Response.json({ approval_case_id: 'case-1', approval_status: 'pending_manager' })
+      }
+      if (url === `/api/requests/${requestId}`) {
+        return Response.json({
+          approval: {
+            approval_case_id: 'case-1',
+            approval_status: 'pending_manager',
+            created_at: '2026-08-12T01:01:00Z',
+            steps: [],
+          },
+        })
+      }
+      if (url === '/api/events?follow=false') {
+        return new Response('', { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const view = render(
+      <WorkbenchRuntime snapshot={{ ...snapshot, events: [], lastEventId: 0 }}>
+        <Probe />
+      </WorkbenchRuntime>,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'submit request' }))
+    await waitFor(() => expect(screen.getByTestId('packet-mode')).toHaveTextContent('deterministic'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'start approval' }))
+    await waitFor(() => expect(screen.getByTestId('approval-busy')).toHaveTextContent('true'))
+    expect(approvalStarts).toBe(1)
+    resolveStart?.()
+
+    await waitFor(() => expect(screen.getByTestId('approval-status')).toHaveTextContent('pending_manager'))
+    expect(screen.getByTestId('approval-error')).toBeEmptyDOMElement()
+    expect(fetchMock).toHaveBeenCalledWith(`/api/requests/${requestId}`, expect.anything())
+    view.unmount()
+  })
+
+  it('keeps approval start retryable when POST or requester Case refresh fails', async () => {
+    const requestId = '11111111-1111-4111-8111-111111111111'
+    let startAttempts = 0
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/events') {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new DOMException('', 'AbortError')), { once: true })
+        })
+      }
+      if (url === '/api/requests') return Response.json({ request_id: requestId, request_status: 'submitted' })
+      if (url === `/api/requests/${requestId}/decision-packet`) {
+        return Response.json({
+          packet_id: 'packet-1', request_id: requestId, generation_mode: 'deterministic',
+          packet_version: 'v1', catalog_version: 'catalog-v1', created_at: '2026-08-12T01:00:00Z',
+          frozen_request: {
+            requester_id: 'EMP-001', requester_name: '林晓', entitlement_code: 'access.read',
+            entitlement_name: '读取权限', duration_days: 7, justification: '业务查询',
+            request_status: 'submitted', confirmed_at: '2026-08-12T00:58:00Z',
+          },
+          catalog: { risk_level: 'low', approval_policy: 'manager', max_duration_days: 30 },
+          fixed_route: [], items: [], advisory: null, availability_message: null,
+        })
+      }
+      if (url === `/api/requests/${requestId}/approval-case`) {
+        startAttempts += 1
+        if (startAttempts === 1) return Response.json({ detail: '启动审批失败，可安全重试' }, { status: 503 })
+        return Response.json({ detail: '审批流已经创建' }, { status: 409 })
+      }
+      if (url === `/api/requests/${requestId}`) {
+        return Response.json({
+          approval: { approval_case_id: 'case-1', approval_status: 'pending_manager', created_at: '', steps: [] },
+        })
+      }
+      if (url === '/api/events?follow=false') return new Response('', { headers: { 'Content-Type': 'text/event-stream' } })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const view = render(
+      <WorkbenchRuntime snapshot={{ ...snapshot, events: [], lastEventId: 0 }}><Probe /></WorkbenchRuntime>,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'submit request' }))
+    await waitFor(() => expect(screen.getByTestId('packet-mode')).toHaveTextContent('deterministic'))
+    fireEvent.click(screen.getByRole('button', { name: 'start approval' }))
+    await waitFor(() => expect(screen.getByTestId('approval-error')).toHaveTextContent('启动审批失败'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'start approval' }))
+    await waitFor(() => expect(screen.getByTestId('approval-status')).toHaveTextContent('pending_manager'))
+    expect(startAttempts).toBe(2)
     view.unmount()
   })
 

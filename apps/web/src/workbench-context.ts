@@ -4,6 +4,7 @@ import type {
   DecisionPacket,
   RequestDraft,
   RequestResult,
+  RequestDetail,
   WorkspaceEvent,
   WorkspaceIdentity,
   EntitlementSelectionResult,
@@ -20,13 +21,17 @@ export interface WorkbenchContextValue {
   requestResult: RequestResult | null
   decisionPacket: DecisionPacket | null
   decisionPacketError: string | null
+  approvalCase: RequestDetail['approval']
+  approvalError: string | null
   retryableInterruption: boolean
   connectionState: ConnectionState
   submit: () => Promise<void>
   retryDecisionPacket: () => Promise<void>
+  startApproval: () => Promise<void>
   selectEntitlement: (entitlementId: string) => Promise<EntitlementSelectionResult>
   isSubmitting: boolean
   isGeneratingDecisionPacket: boolean
+  isStartingApproval: boolean
 }
 
 export const WorkbenchContext = createContext<WorkbenchContextValue | null>(null)

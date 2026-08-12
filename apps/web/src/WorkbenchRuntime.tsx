@@ -15,9 +15,12 @@ import {
 
 import {
   createDecisionPacket,
+  ApiError,
+  readRequestDetail,
   replayEvents,
   previewDraft,
   submitRequest,
+  startApproval as startApprovalRequest,
   subscribeWorkspaceEvents,
   type TurnSseFrame,
 } from './api'
@@ -26,6 +29,7 @@ import type {
   ChatTurn,
   ConnectionState,
   DecisionPacket,
+  RequestDetail,
   RequestDraft,
   RequestResult,
   EntitlementSelectionResult,
@@ -179,8 +183,11 @@ export function WorkbenchRuntime({
   )
   const [decisionPacket, setDecisionPacket] = useState<DecisionPacket | null>(null)
   const [decisionPacketError, setDecisionPacketError] = useState<string | null>(null)
+  const [approvalCase, setApprovalCase] = useState<RequestDetail['approval']>(null)
+  const [approvalError, setApprovalError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isGeneratingDecisionPacket, setIsGeneratingDecisionPacket] = useState(false)
+  const [isStartingApproval, setIsStartingApproval] = useState(false)
   const packetRequestInFlightRef = useRef(false)
   const [retryableInterruption, setRetryableInterruption] = useState(false)
   const [connectionState, setConnectionState] = useState<ConnectionState>('connected')
@@ -338,6 +345,8 @@ export function WorkbenchRuntime({
       setRequestResult(result)
       setDecisionPacket(null)
       setDecisionPacketError(null)
+      setApprovalCase(null)
+      setApprovalError(null)
       setBusinessStatus('submitted')
       await generateDecisionPacket(result.request_id)
       try {
@@ -357,6 +366,28 @@ export function WorkbenchRuntime({
     if (requestResult === null) return
     await generateDecisionPacket(requestResult.request_id)
   }, [generateDecisionPacket, requestResult])
+
+  const startApproval = useCallback(async () => {
+    if (requestResult === null || decisionPacket === null || isStartingApproval) return
+    setIsStartingApproval(true)
+    setApprovalError(null)
+    try {
+      try {
+        await startApprovalRequest(requestResult.request_id)
+      } catch (startError) {
+        // A repeated click or lost success response is safe: the requester
+        // rereads the authoritative Case and treats an existing route as done.
+        if (!(startError instanceof ApiError && startError.status === 409)) throw startError
+      }
+      const detail = await readRequestDetail(requestResult.request_id)
+      if (detail.approval === null) throw new Error('审批操作已提交，但最新审批事实尚未可读，请重试。')
+      setApprovalCase(detail.approval)
+    } catch (startError) {
+      setApprovalError(startError instanceof Error ? startError.message : '启动审批失败，请重试。')
+    } finally {
+      setIsStartingApproval(false)
+    }
+  }, [decisionPacket, isStartingApproval, requestResult])
 
   const selectEntitlement = useCallback(async (
     entitlementId: string,
@@ -401,13 +432,17 @@ export function WorkbenchRuntime({
       requestResult,
       decisionPacket,
       decisionPacketError,
+      approvalCase,
+      approvalError,
       isSubmitting,
       isGeneratingDecisionPacket,
+      isStartingApproval,
       retryableInterruption,
       connectionState,
       selectEntitlement,
       submit,
       retryDecisionPacket,
+      startApproval,
     }),
     [
       businessStatus,
@@ -417,7 +452,10 @@ export function WorkbenchRuntime({
       identity,
       decisionPacket,
       decisionPacketError,
+      approvalCase,
+      approvalError,
       isGeneratingDecisionPacket,
+      isStartingApproval,
       isSubmitting,
       requestResult,
       retryableInterruption,
@@ -425,6 +463,7 @@ export function WorkbenchRuntime({
       selectEntitlement,
       submit,
       retryDecisionPacket,
+      startApproval,
       principalDraft,
     ],
   )
