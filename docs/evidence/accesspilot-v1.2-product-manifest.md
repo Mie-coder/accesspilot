@@ -4,7 +4,7 @@
 - 产品代码 revision：`eec27d7`
 - 运行档案：本地 PostgreSQL + FastAPI + React；四个 Mock Login 账号；模拟 IAM
 - 结论：`product_verified=true`
-- 面试准备：`interview_ready=false`（仍需 T25 和用户本人无稿演练）
+- 面试准备：`interview_ready=false/pending_user_verification`（T25 证据产物已完成，仍需用户本人无稿演练与两道迁移题）
 
 ## 质量门禁
 

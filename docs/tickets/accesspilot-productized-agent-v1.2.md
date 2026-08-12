@@ -1,6 +1,6 @@
-# AccessPilot v1.2「上下文意图与可信多角色闭环」Tickets（T18–T24 已完成）
+# AccessPilot v1.2「上下文意图与可信多角色闭环」Tickets（T18–T25 产物已完成）
 
-**状态：** T18–T24 已独立验收，`product_verified=true`；T25 待完成；不推送、合并或部署
+**状态：** T18–T25 产品与证据产物已完成；`product_verified=true`，`interview_ready=pending_user_verification`；不推送、合并或部署
 **更新时间：** 2026-08-12
 **继承基线：** v1.1，HEAD `c683d84`，T01–T17 已完成
 **产品说明书：** `docs/product/accesspilot-product-function-book-v1.2.md`
@@ -12,7 +12,7 @@
 - 用户确认后默认严格串行执行 T18 → T25，一次只实现一张；
 - 每张实现 Ticket 先写失败测试，再写最小实现；
 - 每张完成后进行独立只读验证，通过后才允许本地提交；
-- 当前停止点在 T22 开始前；T18–T21 已独立验收，T22–T25 尚未开始；
+- T18–T25 已按顺序完成产品实现、证据产物、独立验收与本地提交；
 - 本 Ticket 列表不授权推送、合并、部署或修改正式简历；
 - 到期回收、复杂预算/Attempt、Evidence Lab、完整外键 cutover、真实 SSO 和 168 小时门禁不进入任何 Ticket；
 - `product_verified` 只由 T24 判定，`interview_ready` 只由 T25 判定。
@@ -56,7 +56,7 @@
 - T18 实现与 registry：T18 专用测试与 registry 回归 30 passed；固定 T18 评测 11/11；T18 验收当时的历史组合分母为 T17 30 + T18 11 = 41/41；API 全量 373 passed；前端 48 passed，lint/build 通过。该 41 不是 T19 current registry 分母。
 - 质量与迁移：Ruff、MyPy 通过；Alembic `0007` upgrade/downgrade/no-drift 通过；独立 verifier 结论 PASS（P0=0、P1=0）。
 - P2 残余/延期边界：legacy JSON 及 `set_actor`/`reset`/`exit_demo`/submit 的极端并发最后写入者风险；未来真实 Answer Provider 的 canonical `assistant_message` 定义；无 Cursor 数字澄清文案暂固定引用 `111`。这些不扩大 T18 范围，后续 Ticket 再处理。
-- T20 已完成共享 Case/ACL 独立验收；T21–T25 尚未开始；不推送、合并或部署。
+- 后续 Ticket 已完成；本条保留为 T18 时点的历史验收记录。
 
 ## T19 — 独立 Mock 登录页、AuthSession 与 Principal
 
@@ -222,7 +222,7 @@
 
 ## T25 — ADR、Demo 主线与 Interview Evidence Pack
 
-**状态：** 待开始
+**状态：** 证据产物已完成；个人演练门禁待用户验证
 
 **目标：** 把精简版真正转化为候选人能独立解释的作品，而不是继续增加产品功能。
 
@@ -240,6 +240,13 @@
 
 **主要风险：** AI 生成后直接朗读或把 Mock 登录包装成真实认证，都不能证明个人掌握度。
 
-## 2. 当前停止点
+### T25 交付记录（2026-08-12）
 
-用户已确认 AccessPilot v1.2 精简版 T18–T25 按顺序串行实施；T18–T20 已独立验收，当前停止在 T21 开始前，T21–T25 待开始。后续每张 Ticket 仍须测试先行、独立验收并本地提交；不推送、不合并、不部署。
+- 已完成 ADR-0004–0006：数字上下文 Cursor、Session Principal/资源 ACL、模型 advisory/确定性授权边界。
+- 已完成 90 秒介绍、8–10 分钟四角色 Demo、三张决策卡、三个追问点、两道迁移题和 Claim Ledger。
+- DeepSeek 最终交叉评审的 P1/P2 文档问题已回流；未解决 P0/P1=0，主控结论为“可交给用户决定是否发布”。
+- `product_verified=true`；`interview_ready=false/pending_user_verification`。只有用户本人无稿讲解与两道迁移题都通过后，才能改为 true。
+
+## 2. 当前交付点
+
+T18–T25 已按顺序完成产品实现、证据产物、独立验收与本地提交。`product_verified=true`；`interview_ready=pending_user_verification`，只待用户本人无稿讲解和两道迁移题。不推送、不合并、不部署。

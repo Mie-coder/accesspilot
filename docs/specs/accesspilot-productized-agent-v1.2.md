@@ -1,22 +1,23 @@
 # AccessPilot v1.2「上下文意图与可信多角色闭环」Spec（精简版）
 
-**状态：** T18–T24 已独立验收，`product_verified=true`；T25 待完成；不推送、合并或部署
+**状态：** T18–T25 产品与证据产物已完成；`product_verified=true`，`interview_ready=pending_user_verification`；不推送、合并或部署
 **更新时间：** 2026-08-12
 **上游产品定义：** `docs/product/accesspilot-product-function-book-v1.2.md`
 **已验证基线：** AccessPilot v1.1，本地提交 `c683d84`
 **历史交叉评审：** `docs/reviews/accesspilot-v1.2-spec-deepseek-review-2026-08-11.md`，仅适用于精简前草案
+**最终交叉评审：** `docs/reviews/accesspilot-v1.2-final-acceptance-deepseek-review-2026-08-12.md`
 
 ## 0. 确认与开发边界
 
-本 Spec 取代同路径下旧的扩张版 v1.2。用户已确认按 T18 → T25 串行实施；T18–T20 已独立验收，T21–T25 仍待开始。
+本 Spec 取代同路径下旧的扩张版 v1.2。T18–T25 已按确认顺序实施、独立验收并本地提交；用户个人面试门禁仍独立待验证。
 
 当前交付边界：
 
-- 不把 T21–T25 的目标能力声明为已实现；
+- 不把 Mock 边界、未测指标或个人掌握度声明为已验证；
 - 不修改正式简历；
 - 不推送、合并或部署。
 
-此前已接受的 DeepSeek 意见，只在不与本精简范围冲突时继续有效。本 Spec 尚未针对精简范围重新进行外部模型评审。
+此前已接受的 DeepSeek 意见，只在不与本精简范围冲突时继续有效。最终验收的 DeepSeek 评审与主控决策单独留档。
 
 ## 1. 目标与完成定义
 
@@ -411,4 +412,4 @@ P0 不建设风险 Operation、预算预留、Provider 多 Attempt 或崩溃后�
 - T24：集成验收；
 - T25：ADR 与面试证据。
 
-Ticket 列表已由用户确认，按 T18 → T25 串行实施。T18–T20 已独立验收，当前停止在 T21 开始前；T21–T25 尚未开始。后续实现仍须逐 Ticket 测试先行、独立验收，并保持不推送、不合并、不部署。
+Ticket 列表已由用户确认，并按 T18 → T25 完成实施与本地提交。`product_verified=true`；`interview_ready` 只能在用户本人无稿讲解与两道迁移题通过后设为 true。未推送、合并或部署。
