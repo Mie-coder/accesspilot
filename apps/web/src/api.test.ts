@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { bootstrapWorkspace, parseSseEvents } from './api'
+import {
+  bootstrapWorkspace,
+  parseSseEvents,
+  readAccessibleRequests,
+  readMyRequests,
+} from './api'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -61,5 +66,25 @@ describe('bootstrapWorkspace', () => {
       '/api/auth/session',
       expect.objectContaining({ credentials: 'include' }),
     )
+  })
+})
+
+describe('principal-scoped Case lists', () => {
+  it('uses the requester-only list for My Requests and the ACL list for role work', async () => {
+    const fetchMock = vi.fn(async () =>
+      Response.json({ items: [] }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(readMyRequests()).resolves.toEqual({ items: [] })
+    await expect(readAccessibleRequests()).resolves.toEqual({ items: [] })
+
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      '/api/requests/mine',
+      '/api/requests/accessible',
+    ])
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(init).toEqual(expect.objectContaining({ credentials: 'include' }))
+    }
   })
 })

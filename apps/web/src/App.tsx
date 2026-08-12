@@ -270,9 +270,9 @@ function LoadingScreen() {
 
 const MOCK_ACCOUNTS = [
   { id: 'EMP-001', role: '申请人', detail: '发起权限申请并查看自己的 Case' },
-  { id: 'EMP-002', role: '直属经理', detail: '处理当前轮到的经理审批' },
-  { id: 'EMP-003', role: '数据负责人', detail: '处理经理通过后的数据审批' },
-  { id: 'EMP-004', role: '权限管理员', detail: '执行已全部批准的模拟开通' },
+  { id: 'EMP-002', role: '直属经理', detail: '查看当前轮到或已参与的 Case' },
+  { id: 'EMP-003', role: '数据负责人', detail: '查看当前轮到或已参与的 Case' },
+  { id: 'EMP-004', role: '权限管理员', detail: '查看已全部批准的 Case' },
 ] as const
 
 function LoginScreen({ onAuthenticated }: { onAuthenticated: () => Promise<void> }) {

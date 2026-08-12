@@ -1,9 +1,8 @@
 import { AlertCircle, CheckCircle2, Clock3, FileCheck2, History, LoaderCircle, RefreshCw } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
-import { readLatestRequest } from './api'
-import type { RequestDetail, RequestDraft } from './types'
-import { useWorkbench } from './workbench-context'
+import { readMyRequests, readRequestDetail } from './api'
+import type { CaseSummary, RequestDetail, RequestDraft } from './types'
 
 export interface RequestTimelineViewProps {
   detail: RequestDetail | null
@@ -11,6 +10,9 @@ export interface RequestTimelineViewProps {
   loading: boolean
   error: string | null
   onRetry: () => void
+  cases?: CaseSummary[]
+  selectedRequestId?: string | null
+  onSelectRequest?: (requestId: string) => void
 }
 
 interface TimelineEntry {
@@ -40,6 +42,8 @@ const statusLabels: Record<string, string> = {
   cancelled: '已取消',
   canceled: '已取消',
   pending: '待审批',
+  pending_manager: '待经理审批',
+  pending_data_owner: '待数据负责人审批',
   waiting: '等待前序',
   manager_approved: '已通过',
   data_owner_approved: '已通过',
@@ -168,8 +172,10 @@ function eventEntry(event: RequestDetail['audit_events'][number], order = 0): Ti
   }
 }
 
-function buildEntries(detail: RequestDetail | null, draft: RequestDraft | null): TimelineEntry[] {
-  if (!detail && !draft) return []
+function buildEntries(detail: RequestDetail | null): TimelineEntry[] {
+  // A private Workspace draft has no stable relation to an older formal Case.
+  // Only audit facts already attached to this Request may appear in replay.
+  if (!detail) return []
   const entries: TimelineEntry[] = []
   const auditEntries = detail?.audit_events
     .map((event, index) => eventEntry(event, index))
@@ -177,15 +183,10 @@ function buildEntries(detail: RequestDetail | null, draft: RequestDraft | null):
   const eventByType = new Map(detail?.audit_events.map((event) => [event.event_type, event]) ?? [])
 
   const draftEvent = eventByType.get('draft.updated')
-  const currentDraftMatchesDetail = detail !== null && draft !== null
-    && draft.employee_id === detail.request.requester_id
-    && draft.entitlement_id === detail.request.entitlement_code
-    && draft.duration_days === detail.request.duration_days
-    && draft.justification === detail.request.justification
-  const includeDraft = detail === null || draftEvent !== undefined || currentDraftMatchesDetail
+  const includeDraft = draftEvent !== undefined
   const requester = detail?.request.requester_name
     ? `${detail.request.requester_name} · ${detail.request.requester_id}`
-    : draft?.employee_id
+    : detail?.request.requester_id
   if (includeDraft) {
     entries.push({
       id: 'draft',
@@ -398,8 +399,16 @@ function buildEntries(detail: RequestDetail | null, draft: RequestDraft | null):
   })
 }
 
-export function RequestTimelineView({ detail, draft, loading, error, onRetry }: RequestTimelineViewProps) {
-  const entries = useMemo(() => buildEntries(detail, draft), [detail, draft])
+export function RequestTimelineView({
+  detail,
+  loading,
+  error,
+  onRetry,
+  cases,
+  selectedRequestId,
+  onSelectRequest,
+}: RequestTimelineViewProps) {
+  const entries = useMemo(() => buildEntries(detail), [detail])
 
   return (
     <section className="business-card-panel request-timeline-panel" aria-labelledby="request-timeline-title">
@@ -411,6 +420,29 @@ export function RequestTimelineView({ detail, draft, loading, error, onRetry }: 
         </div>
         <History size={19} aria-hidden="true" />
       </div>
+
+      <p className="timeline-note case-source-note">
+        正式共享 Case 来自 PostgreSQL，可跨登录 Session 重读；未提交草稿和聊天仍只属于创建它们的私有 Workspace。
+      </p>
+
+      {cases && cases.length > 0 ? (
+        <ul className="case-summary-list" aria-label="我的正式 Case">
+          {cases.map((item) => (
+            <li key={item.request_id}>
+              <button
+                type="button"
+                className={item.request_id === selectedRequestId ? 'is-selected' : ''}
+                aria-current={item.request_id === selectedRequestId ? 'true' : undefined}
+                onClick={() => onSelectRequest?.(item.request_id)}
+              >
+                <strong>{item.entitlement_name}</strong>
+                <span>{statusLabel(item.approval_status ?? item.request_status)}</span>
+                <small>{formatTime(item.created_at)}</small>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
 
       {detail ? (
         <div className="request-fact-summary">
@@ -455,7 +487,8 @@ export function RequestTimelineView({ detail, draft, loading, error, onRetry }: 
 }
 
 export function RequestTimeline() {
-  const workbench = useWorkbench()
+  const [cases, setCases] = useState<CaseSummary[]>([])
+  const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null)
   const [detail, setDetail] = useState<RequestDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -464,12 +497,32 @@ export function RequestTimeline() {
     setLoading(true)
     setError(null)
     try {
-      setDetail(await readLatestRequest(signal))
+      const nextCases = await readMyRequests(signal)
+      const nextRequestId = nextCases.items[0]?.request_id ?? null
+      const nextDetail = nextRequestId
+        ? await readRequestDetail(nextRequestId, signal)
+        : null
+      setCases(nextCases.items)
+      setSelectedRequestId(nextRequestId)
+      setDetail(nextDetail)
     } catch (loadError) {
       if (loadError instanceof Error && loadError.name === 'AbortError') return
       setError(loadError instanceof Error ? loadError.message : '申请事实暂时不可用，请稍后重试。')
     } finally {
       if (!signal?.aborted) setLoading(false)
+    }
+  }, [])
+
+  const selectRequest = useCallback(async (requestId: string) => {
+    setSelectedRequestId(requestId)
+    setLoading(true)
+    setError(null)
+    try {
+      setDetail(await readRequestDetail(requestId))
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : '申请事实暂时不可用，请稍后重试。')
+    } finally {
+      setLoading(false)
     }
   }, [])
 
@@ -479,5 +532,16 @@ export function RequestTimeline() {
     return () => controller.abort()
   }, [load])
 
-  return <RequestTimelineView detail={detail} draft={workbench.draft} loading={loading} error={error} onRetry={() => void load()} />
+  return (
+    <RequestTimelineView
+      detail={detail}
+      draft={null}
+      loading={loading}
+      error={error}
+      onRetry={() => void load()}
+      cases={cases}
+      selectedRequestId={selectedRequestId}
+      onSelectRequest={(requestId) => void selectRequest(requestId)}
+    />
+  )
 }

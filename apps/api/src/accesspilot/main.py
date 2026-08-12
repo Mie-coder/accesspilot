@@ -96,9 +96,10 @@ from accesspilot.events import (
 )
 from accesspilot.operations import (
     OperationsNotFoundError,
-    get_latest_request_detail,
-    get_request_detail,
+    get_latest_request_detail_for_principal,
+    get_request_detail_for_principal,
     list_approval_inbox,
+    list_requests_for_principal,
 )
 from accesspilot.provisioning import (
     ApprovalRequiredError,
@@ -1758,31 +1759,45 @@ def create_app(
 
     @app.get("/api/approval-inbox")
     def read_approval_inbox(
+        request: Request,
         workspace: Workspace = Depends(require_workspace),  # noqa: B008
     ) -> dict[str, object]:
-        """读取当前演示身份真正轮到处理的审批步骤。"""
+        """读取当前 Principal 真正轮到处理的审批步骤。"""
+
+        context: AuthContext | None = getattr(request.state, "auth_context", None)
+        if context is None:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期")
+        if not {"manager", "data_owner"}.intersection(context.principal.roles):
+            raise HTTPException(status_code=403, detail="当前账号没有审批职责")
 
         with active_session_factory() as session:
             try:
                 return list_approval_inbox(
                     session,
-                    workspace_token=workspace.token,
                     actor_id=workspace.actor_id,
+                    roles=context.principal.roles,
                 )
             except OperationsNotFoundError as error:
                 raise HTTPException(status_code=404, detail=str(error)) from error
 
     @app.get("/api/requests/latest")
     def read_latest_request(
+        request: Request,
         workspace: Workspace = Depends(require_workspace),  # noqa: B008
     ) -> dict[str, object]:
-        """读取当前后端身份最新正式申请，避免被 UUID 动态路由拦截。"""
+        """读取当前 Principal 最新可见正式申请。"""
+
+        context: AuthContext | None = getattr(request.state, "auth_context", None)
+        if context is None:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期")
 
         try:
             with active_session_factory() as session:
-                detail = get_latest_request_detail(
+                detail = get_latest_request_detail_for_principal(
                     session,
-                    workspace_token=workspace.token,
+                    actor_id=workspace.actor_id,
+                    roles=context.principal.roles,
+                    requester_only=True,
                 )
         except OperationsNotFoundError as error:
             raise HTTPException(status_code=404, detail="申请不存在") from error
@@ -1794,19 +1809,62 @@ def create_app(
             ) from error
         return {"request": detail}
 
+    @app.get("/api/requests/mine")
+    def read_my_requests(
+        request: Request,
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> dict[str, object]:
+        """List all formal Cases submitted by the current Principal."""
+
+        context: AuthContext | None = getattr(request.state, "auth_context", None)
+        if context is None:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期")
+        with active_session_factory() as session:
+            items = list_requests_for_principal(
+                session,
+                actor_id=workspace.actor_id,
+                roles=context.principal.roles,
+                requester_only=True,
+            )
+        return {"items": items}
+
+    @app.get("/api/requests/accessible")
+    def read_accessible_requests(
+        request: Request,
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> dict[str, object]:
+        """List all formal Cases related to the current Principal."""
+
+        context: AuthContext | None = getattr(request.state, "auth_context", None)
+        if context is None:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期")
+        with active_session_factory() as session:
+            items = list_requests_for_principal(
+                session,
+                actor_id=workspace.actor_id,
+                roles=context.principal.roles,
+            )
+        return {"items": items}
+
     @app.get("/api/requests/{request_id}")
     def read_request_detail(
+        request: Request,
         request_id: UUID,
         workspace: Workspace = Depends(require_workspace),  # noqa: B008
     ) -> dict[str, object]:
-        """读取申请、审批、开通与只追加审计事实。"""
+        """读取有资源关系的 Case、审批、开通与审计事实。"""
+
+        context: AuthContext | None = getattr(request.state, "auth_context", None)
+        if context is None:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期")
 
         with active_session_factory() as session:
             try:
-                return get_request_detail(
+                return get_request_detail_for_principal(
                     session,
-                    workspace_token=workspace.token,
                     request_id=request_id,
+                    actor_id=workspace.actor_id,
+                    roles=context.principal.roles,
                 )
             except OperationsNotFoundError as error:
                 raise HTTPException(status_code=404, detail="申请不存在") from error

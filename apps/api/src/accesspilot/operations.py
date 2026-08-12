@@ -4,8 +4,10 @@ from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select
+from sqlalchemy import and_, exists, false, or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import Select
+from sqlalchemy.sql.elements import ColumnElement
 
 from accesspilot.db.models import (
     AccessGrantRecord,
@@ -20,6 +22,8 @@ from accesspilot.db.models import (
     WorkspaceRecord,
 )
 from accesspilot.db.workspace_store import hash_workspace_token
+
+_APPROVER_ROLES = frozenset({"manager", "data_owner"})
 
 
 class OperationsNotFoundError(LookupError):
@@ -146,12 +150,11 @@ def _load_workspace(session: Session, token: str) -> WorkspaceRecord:
 def list_approval_inbox(
     session: Session,
     *,
-    workspace_token: str,
     actor_id: str,
+    roles: tuple[str, ...] | list[str] | set[str],
 ) -> dict[str, object]:
-    """只返回当前 Workspace 中真正轮到该演示身份处理的步骤。"""
+    """只返回当前 Principal 真正轮到处理的审批步骤。"""
 
-    workspace = _load_workspace(session, workspace_token)
     actor = session.get(EmployeeRecord, actor_id)
     if actor is None:
         raise OperationsNotFoundError("演示身份不存在")
@@ -181,8 +184,10 @@ def list_approval_inbox(
             EntitlementRecord.code == AccessRequestRecord.entitlement_code,
         )
         .where(
-            ApprovalStepRecord.workspace_id == workspace.id,
-            ApprovalStepRecord.approver_id == actor.employee_id,
+            *_approver_step_identity_predicates(
+                actor_id=actor.employee_id,
+                roles=roles,
+            ),
             # waiting 表示尚未轮到，必须由查询层排除，不能交给 UI 假装不可点。
             ApprovalStepRecord.step_status == "pending",
         )
@@ -270,18 +275,14 @@ def _risk_review_payload(
     }
 
 
-def get_request_detail(
+def _build_request_detail(
     session: Session,
     *,
-    workspace_token: str,
-    request_id: UUID,
+    request: AccessRequestRecord,
 ) -> dict[str, object]:
     """返回一份申请已落库的完整事实，不从审批状态猜测是否已授权。"""
 
-    workspace = _load_workspace(session, workspace_token)
-    request = session.get(AccessRequestRecord, request_id)
-    if request is None or request.workspace_id != workspace.id:
-        raise OperationsNotFoundError("申请不存在")
+    workspace_id = request.workspace_id
     requester = session.get(EmployeeRecord, request.requester_id)
     entitlement = session.get(EntitlementRecord, request.entitlement_code)
     if requester is None or entitlement is None:
@@ -289,7 +290,7 @@ def get_request_detail(
 
     case = session.scalar(
         select(ApprovalCaseRecord).where(
-            ApprovalCaseRecord.workspace_id == workspace.id,
+            ApprovalCaseRecord.workspace_id == workspace_id,
             ApprovalCaseRecord.request_id == request.id,
         )
     )
@@ -298,7 +299,7 @@ def get_request_detail(
             session.scalars(
                 select(ApprovalStepRecord)
                 .where(
-                    ApprovalStepRecord.workspace_id == workspace.id,
+                    ApprovalStepRecord.workspace_id == workspace_id,
                     ApprovalStepRecord.approval_case_id == case.id,
                 )
                 .order_by(ApprovalStepRecord.step_order)
@@ -309,13 +310,13 @@ def get_request_detail(
     )
     attempt = session.scalar(
         select(ProvisioningAttemptRecord).where(
-            ProvisioningAttemptRecord.workspace_id == workspace.id,
+            ProvisioningAttemptRecord.workspace_id == workspace_id,
             ProvisioningAttemptRecord.request_id == request.id,
         )
     )
     grant = session.scalar(
         select(AccessGrantRecord).where(
-            AccessGrantRecord.workspace_id == workspace.id,
+            AccessGrantRecord.workspace_id == workspace_id,
             AccessGrantRecord.request_id == request.id,
         )
     )
@@ -323,7 +324,7 @@ def get_request_detail(
         session.scalars(
             select(AuditEventRecord)
             .where(
-                AuditEventRecord.workspace_id == workspace.id,
+                AuditEventRecord.workspace_id == workspace_id,
                 AuditEventRecord.request_id == request.id,
             )
             .order_by(AuditEventRecord.created_at, AuditEventRecord.id)
@@ -400,6 +401,239 @@ def get_request_detail(
             for event in audit_events
         ],
     }
+
+
+def get_request_detail(
+    session: Session,
+    *,
+    workspace_token: str,
+    request_id: UUID,
+) -> dict[str, object]:
+    """Read a request through the legacy source-Workspace seam.
+
+    T20 uses :func:`get_request_detail_for_principal` for public Case reads;
+    this wrapper remains for domain/evaluation helpers that explicitly need
+    the historical source Workspace binding.
+    """
+
+    workspace = _load_workspace(session, workspace_token)
+    request = session.scalar(
+        select(AccessRequestRecord).where(
+            AccessRequestRecord.id == request_id,
+            AccessRequestRecord.workspace_id == workspace.id,
+        )
+    )
+    if request is None:
+        raise OperationsNotFoundError("申请不存在")
+    return _project_public_request_detail(
+        _build_request_detail(session, request=request)
+    )
+
+
+def _case_acl_request_query(
+    *,
+    request_id: UUID | None,
+    actor_id: str,
+    roles: tuple[str, ...] | list[str] | set[str],
+    requester_only: bool = False,
+) -> Select[tuple[AccessRequestRecord]]:
+    """Build the SQL resource relation for a Case detail read.
+
+    The predicate is intentionally expressed as correlated ``EXISTS`` clauses
+    so an IDOR request is filtered by the database before the detail graph is
+    loaded.  ``workspace_id`` only scopes related facts after the Case has
+    been authorized; it is never itself an authorization grant.
+    """
+
+    predicates = [
+        _case_acl_relation(
+            actor_id=actor_id,
+            roles=roles,
+            requester_only=requester_only,
+        )
+    ]
+    if request_id is not None:
+        predicates.insert(0, AccessRequestRecord.id == request_id)
+    return select(AccessRequestRecord).where(*predicates)
+
+
+def _approver_step_identity_predicates(
+    *,
+    actor_id: str,
+    roles: tuple[str, ...] | list[str] | set[str],
+) -> tuple[ColumnElement[bool], ColumnElement[bool]]:
+    """Bind a workflow assignment to both Principal id and server roles."""
+
+    principal_roles = tuple(sorted(set(roles).intersection(_APPROVER_ROLES)))
+    role_relation: ColumnElement[bool] = false()
+    if principal_roles:
+        role_relation = ApprovalStepRecord.approver_role.in_(principal_roles)
+    return (
+        ApprovalStepRecord.approver_id == actor_id,
+        role_relation,
+    )
+
+
+def _approver_case_relation(
+    *,
+    actor_id: str,
+    roles: tuple[str, ...] | list[str] | set[str],
+) -> ColumnElement[bool]:
+    """Return the correlated SQL relation for a pending or decided own step."""
+
+    return exists(
+        select(ApprovalStepRecord.id)
+        .join(
+            ApprovalCaseRecord,
+            ApprovalCaseRecord.id == ApprovalStepRecord.approval_case_id,
+        )
+        .where(
+            ApprovalCaseRecord.request_id == AccessRequestRecord.id,
+            ApprovalCaseRecord.workspace_id == AccessRequestRecord.workspace_id,
+            ApprovalStepRecord.workspace_id == AccessRequestRecord.workspace_id,
+            *_approver_step_identity_predicates(actor_id=actor_id, roles=roles),
+            or_(
+                ApprovalStepRecord.step_status == "pending",
+                ApprovalStepRecord.decided_at.is_not(None),
+            ),
+        )
+    ).correlate(AccessRequestRecord)
+
+
+def _approved_admin_case_relation(
+    roles: tuple[str, ...] | list[str] | set[str],
+) -> ColumnElement[bool]:
+    if "permissions_admin" not in roles:
+        return false()
+    return exists(
+        select(ApprovalCaseRecord.id).where(
+            ApprovalCaseRecord.request_id == AccessRequestRecord.id,
+            ApprovalCaseRecord.workspace_id == AccessRequestRecord.workspace_id,
+            ApprovalCaseRecord.approval_status == "approved",
+        )
+    ).correlate(AccessRequestRecord)
+
+
+def _case_acl_relation(
+    *,
+    actor_id: str,
+    roles: tuple[str, ...] | list[str] | set[str],
+    requester_only: bool,
+) -> ColumnElement[bool]:
+    requester_relation = AccessRequestRecord.requester_id == actor_id
+    if requester_only:
+        return requester_relation
+    return or_(
+        requester_relation,
+        _approver_case_relation(actor_id=actor_id, roles=roles),
+        _approved_admin_case_relation(roles),
+    )
+
+
+def get_request_detail_for_principal(
+    session: Session,
+    *,
+    request_id: UUID,
+    actor_id: str,
+    roles: tuple[str, ...] | list[str] | set[str],
+) -> dict[str, object]:
+    """Read a shared Case only when the current Principal has a relation."""
+
+    request = session.scalar(
+        _case_acl_request_query(
+            request_id=request_id,
+            actor_id=actor_id,
+            roles=roles,
+        )
+    )
+    if request is None:
+        raise OperationsNotFoundError("申请不存在")
+    return _project_public_request_detail(
+        _build_request_detail(session, request=request)
+    )
+
+
+def list_requests_for_principal(
+    session: Session,
+    *,
+    actor_id: str,
+    roles: tuple[str, ...] | list[str] | set[str],
+    requester_only: bool = False,
+) -> list[dict[str, object]]:
+    """Return all formal requests related to the Principal in SQL."""
+    rows = session.execute(
+        select(
+            AccessRequestRecord,
+            EmployeeRecord,
+            EntitlementRecord,
+            ApprovalCaseRecord,
+        )
+        .join(
+            EmployeeRecord,
+            EmployeeRecord.employee_id == AccessRequestRecord.requester_id,
+        )
+        .join(
+            EntitlementRecord,
+            EntitlementRecord.code == AccessRequestRecord.entitlement_code,
+        )
+        .outerjoin(
+            ApprovalCaseRecord,
+            and_(
+                ApprovalCaseRecord.request_id == AccessRequestRecord.id,
+                ApprovalCaseRecord.workspace_id == AccessRequestRecord.workspace_id,
+            ),
+        )
+        .where(
+            _case_acl_relation(
+                actor_id=actor_id,
+                roles=roles,
+                requester_only=requester_only,
+            ),
+        )
+        .order_by(AccessRequestRecord.created_at.desc(), AccessRequestRecord.id.desc())
+    ).all()
+    return [
+        {
+            "request_id": str(request.id),
+            "requester_id": request.requester_id,
+            "requester_name": requester.name,
+            "entitlement_code": request.entitlement_code,
+            "entitlement_name": entitlement.name,
+            "duration_days": request.duration_days,
+            "justification": request.justification,
+            "request_status": request.request_status,
+            "approval_status": case.approval_status if case is not None else None,
+            "created_at": request.created_at,
+        }
+        for request, requester, entitlement, case in rows
+    ]
+
+
+def get_latest_request_detail_for_principal(
+    session: Session,
+    *,
+    actor_id: str,
+    roles: tuple[str, ...] | list[str] | set[str],
+    requester_only: bool = False,
+) -> dict[str, object] | None:
+    """Read the newest Case visible to a Principal, using SQL ACL filtering."""
+
+    relation_query = _case_acl_request_query(
+        request_id=None,
+        actor_id=actor_id,
+        roles=roles,
+        requester_only=requester_only,
+    )
+    request = session.scalar(
+        relation_query.order_by(
+            AccessRequestRecord.created_at.desc(), AccessRequestRecord.id.desc()
+        ).limit(1)
+    )
+    if request is None:
+        return None
+    return _project_public_request_detail(
+        _build_request_detail(session, request=request)
+    )
 
 
 _PUBLIC_AUDIT_DETAIL_KEYS = ("status", "next_step", "approver_role")

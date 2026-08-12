@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from accesspilot.config import Settings
@@ -404,7 +404,7 @@ def test_older_non_terminal_request_remains_pending_after_newer_cancelled_reques
     assert matching[0]["request_id"] == str(earlier.id)
 
 
-def test_latest_request_projects_only_safe_provisioning_and_audit_fields(
+def test_request_detail_projects_only_safe_provisioning_and_audit_fields(
     database_session_factory: sessionmaker[Session],
 ) -> None:
     client = build_client(database_session_factory)
@@ -453,11 +453,10 @@ def test_latest_request_projects_only_safe_provisioning_and_audit_fields(
         )
         session.commit()
 
-    response = client.get("/api/requests/latest")
+    response = client.get(f"/api/requests/{request.id}")
 
     assert response.status_code == 200
-    payload = response.json()["request"]
-    assert payload is not None
+    payload = response.json()
     assert payload["provisioning"]["last_error"] == (
         "权限开通失败，请稍后重试或联系人工流程。"
     )
@@ -472,7 +471,7 @@ def test_latest_request_projects_only_safe_provisioning_and_audit_fields(
     assert idempotency_value not in serialized
 
 
-def test_latest_request_projects_risk_free_text_without_leaking_model_content(
+def test_request_detail_projects_risk_free_text_without_leaking_model_content(
     database_session_factory: sessionmaker[Session],
 ) -> None:
     client = build_client(database_session_factory)
@@ -516,11 +515,10 @@ def test_latest_request_projects_risk_free_text_without_leaking_model_content(
         )
         session.commit()
 
-    response = client.get("/api/requests/latest")
+    response = client.get(f"/api/requests/{request.id}")
 
     assert response.status_code == 200
-    payload = response.json()["request"]
-    assert payload is not None
+    payload = response.json()
     risk = payload["risk_review"]
     assert risk["summary"] == "风险审查结果已生成，详情按政策事实展示。"
     assert risk["findings"] == []
@@ -642,7 +640,7 @@ def test_selected_entitlement_is_revalidated_and_invalidates_old_confirmation(
     assert payload["can_enter_approval"] is False
 
 
-def test_latest_request_requires_cookie_and_returns_null_for_no_current_actor_request(
+def test_latest_request_requires_session_and_ignores_other_requesters(
     database_session_factory: sessionmaker[Session],
 ) -> None:
     client = build_client(database_session_factory)
@@ -651,10 +649,13 @@ def test_latest_request_requires_cookie_and_returns_null_for_no_current_actor_re
 
     token = create_workspace(client)
     workspace = load_workspace(database_session_factory, token)
+    baseline = client.get("/api/requests/latest")
+    assert baseline.status_code == 200
+    baseline_detail = baseline.json()["request"]
     with database_session_factory() as session:
         persisted_workspace = session.get(WorkspaceRecord, workspace.id)
         assert persisted_workspace is not None
-        add_request(
+        unrelated_request = add_request(
             session,
             workspace=persisted_workspace,
             requester_id="EMP-002",
@@ -665,7 +666,14 @@ def test_latest_request_requires_cookie_and_returns_null_for_no_current_actor_re
     response = client.get("/api/requests/latest")
 
     assert response.status_code == 200
-    assert response.json() == {"request": None}
+    detail = response.json()["request"]
+    # A persistent test database may already contain EMP-001's requests.  The
+    # requester-only latest endpoint must remain stable when an unrelated
+    # EMP-002 case is inserted into the same source workspace.
+    assert detail == baseline_detail
+    if detail is not None:
+        assert detail["request"]["requester_id"] == "EMP-001"
+        assert detail["request"]["request_id"] != str(unrelated_request.id)
 
 
 def test_latest_request_is_scoped_to_current_actor_and_returns_latest_fact(
@@ -679,31 +687,43 @@ def test_latest_request_is_scoped_to_current_actor_and_returns_latest_fact(
     with database_session_factory() as session:
         persisted_workspace = session.get(WorkspaceRecord, workspace.id)
         assert persisted_workspace is not None
+        latest_created_at = session.scalar(select(func.max(AccessRequestRecord.created_at)))
+        assert latest_created_at is not None
         current_request = add_request(
             session,
             workspace=persisted_workspace,
             requester_id="EMP-001",
             entitlement_code="codeforge.repo_read",
-            created_at=now,
+            created_at=latest_created_at + timedelta(microseconds=1),
         )
         other_request = add_request(
             session,
             workspace=persisted_workspace,
             requester_id="EMP-002",
             entitlement_code="insighthub.customer_export",
-            created_at=now + timedelta(minutes=1),
+            created_at=latest_created_at + timedelta(microseconds=2),
         )
         session.commit()
+    try:
+        response = client.get("/api/requests/latest")
 
-    response = client.get("/api/requests/latest")
-
-    assert response.status_code == 200
-    payload = response.json()
-    detail = payload["request"]
-    assert detail is not None
-    request = detail["request"]
-    assert request["request_id"] == str(current_request.id)
-    assert request["requester_id"] == "EMP-001"
-    assert request["request_id"] != str(other_request.id)
-    assert request["entitlement_code"] == "codeforge.repo_read"
-    assert detail["audit_events"] == []
+        assert response.status_code == 200
+        payload = response.json()
+        detail = payload["request"]
+        assert detail is not None
+        request = detail["request"]
+        assert request["request_id"] == str(current_request.id)
+        assert request["requester_id"] == "EMP-001"
+        assert request["request_id"] != str(other_request.id)
+        assert request["entitlement_code"] == "codeforge.repo_read"
+        assert detail["audit_events"] == []
+    finally:
+        # Keep the shared integration database repeatable: the temporary
+        # ordering timestamps must not outrank later tests or future runs.
+        with database_session_factory() as session:
+            stored_current = session.get(AccessRequestRecord, current_request.id)
+            stored_other = session.get(AccessRequestRecord, other_request.id)
+            assert stored_current is not None and stored_other is not None
+            stored_current.created_at = now
+            stored_other.created_at = now
+            session.commit()

@@ -1,9 +1,20 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ComponentProps } from 'react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { RequestTimelineView } from './RequestTimeline'
+import { readLatestRequest, readMyRequests, readRequestDetail } from './api'
+import { RequestTimeline, RequestTimelineView } from './RequestTimeline'
 import type { RequestDetail, RequestDraft } from './types'
+
+vi.mock('./api', () => ({
+  readLatestRequest: vi.fn(),
+  readMyRequests: vi.fn(),
+  readRequestDetail: vi.fn(),
+}))
+
+vi.mock('./workbench-context', () => ({
+  useWorkbench: () => ({ draft }),
+}))
 
 type RequestTimelineProps = ComponentProps<typeof RequestTimelineView>
 
@@ -171,6 +182,10 @@ const baseProps: RequestTimelineProps = {
 }
 
 describe('RequestTimelineView', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
   it('renders the lifecycle in deterministic order with time, owner and next step', () => {
     render(<RequestTimelineView {...baseProps} />)
     const body = document.body.textContent ?? ''
@@ -245,31 +260,27 @@ describe('RequestTimelineView', () => {
     expect(alert).not.toHaveTextContent('Traceback')
   })
 
-  it('keeps a newer workspace draft out of an unrelated formal request timeline', () => {
-    const unrelatedDetail: RequestDetail = {
+  it('never associates a private draft to an older Case by matching business fields', () => {
+    const persistedCaseWithoutDraftAudit: RequestDetail = {
       ...detail,
       audit_events: [],
-      request: {
-        ...detail.request,
-        entitlement_code: 'codeforge.repo_read',
-      },
-      entitlement: {
-        ...detail.entitlement,
-        code: 'codeforge.repo_read',
-        name: '代码仓库只读',
-      },
     }
     render(
       <RequestTimelineView
         {...baseProps}
-        detail={unrelatedDetail}
-        draft={{ ...draft, entitlement_id: 'insighthub.dashboard_view', justification: '刚刚创建的新草稿' }}
+        detail={persistedCaseWithoutDraftAudit}
+        draft={{ ...draft }}
       />,
     )
 
-    expect(screen.getByText('代码仓库只读')).toBeInTheDocument()
-    expect(screen.queryByText('刚刚创建的新草稿')).not.toBeInTheDocument()
+    expect(screen.getByText('脱敏客户数据导出')).toBeInTheDocument()
     expect(screen.queryByText('草稿')).not.toBeInTheDocument()
+  })
+
+  it('explains the shared Case and private Workspace boundary', () => {
+    render(<RequestTimelineView {...baseProps} />)
+    expect(screen.getByText(/PostgreSQL.*跨登录 Session/)).toBeInTheDocument()
+    expect(screen.getByText(/未提交草稿和聊天.*私有 Workspace/)).toBeInTheDocument()
   })
 
   it('renders recovery and terminal tones from timeout and retry audit facts in order', () => {
@@ -343,5 +354,36 @@ describe('RequestTimelineView', () => {
     expect(screen.getByText('状态：已取消')).toBeInTheDocument()
     expect(screen.getByText('申请已驳回')).toBeInTheDocument()
     expect(screen.getByText('前序驳回，本步骤已取消')).toBeInTheDocument()
+  })
+})
+
+describe('RequestTimeline principal-scoped Case loading', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('reloads a requester Case through mine then detail instead of private Workspace latest', async () => {
+    vi.mocked(readMyRequests).mockResolvedValue({
+      items: [{
+        request_id: requestId,
+        requester_id: 'EMP-001',
+        requester_name: '林晓',
+        entitlement_code: 'insighthub.customer_export',
+        entitlement_name: '脱敏客户数据导出',
+        duration_days: 14,
+        justification: '季度客户分析',
+        request_status: 'submitted',
+        approval_status: 'pending_manager',
+        created_at: '2026-08-10T01:01:00Z',
+      }],
+    })
+    vi.mocked(readRequestDetail).mockResolvedValue(detail)
+
+    render(<RequestTimeline />)
+
+    await waitFor(() => expect(readMyRequests).toHaveBeenCalledOnce())
+    expect(readRequestDetail).toHaveBeenCalledWith(requestId, expect.any(AbortSignal))
+    expect(readLatestRequest).not.toHaveBeenCalled()
+    expect((await screen.findAllByText('脱敏客户数据导出')).length).toBeGreaterThan(0)
   })
 })

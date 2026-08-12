@@ -1492,6 +1492,44 @@ a:focus-visible {
 .timeline-note { margin: 6px 0 0; color: #6a766e; font-size: 10px; line-height: 1.55; }
 .timeline-note strong { color: #3a5e49; }
 
+.case-source-note {
+  margin-top: 14px;
+  border-left: 2px solid #8eb09d;
+  background: #f2f7f4;
+  padding: 9px 11px;
+}
+
+.case-summary-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+}
+
+.case-summary-list button {
+  width: 100%;
+  display: grid;
+  gap: 4px;
+  border: 1px solid #d2ddd6;
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px;
+  color: #35483c;
+  text-align: left;
+}
+
+.case-summary-list button:hover,
+.case-summary-list button.is-selected {
+  border-color: #5e8c72;
+  background: #edf6f0;
+}
+
+.case-summary-list strong { font-size: 11px; }
+.case-summary-list span { color: #47705a; font-size: 9px; }
+.case-summary-list small { color: #7b867f; font-size: 8px; }
+
 .operations-grid {
   width: min(1420px, 100%);
   margin: 0 auto;

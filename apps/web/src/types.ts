@@ -186,6 +186,24 @@ export interface ApprovalInbox {
   items: ApprovalInboxItem[]
 }
 
+/** A server-filtered formal Case summary. Workspace identity is never an ACL. */
+export interface CaseSummary {
+  request_id: string
+  requester_id: string
+  requester_name: string
+  entitlement_code: string
+  entitlement_name: string
+  duration_days: number
+  justification: string
+  request_status: string
+  approval_status: string | null
+  created_at: string
+}
+
+export interface CaseList {
+  items: CaseSummary[]
+}
+
 export interface RequestDetail {
   view_mode: 'read_only_replay'
   request: {

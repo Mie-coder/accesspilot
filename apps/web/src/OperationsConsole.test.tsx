@@ -1,41 +1,31 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { readApprovalInbox, readRequestDetail } from './api'
+import { readAccessibleRequests, readRequestDetail } from './api'
 import { OperationsConsole, OperationsView } from './OperationsConsole'
-import type { ApprovalInbox, RequestDetail } from './types'
+import type { CaseList, RequestDetail } from './types'
 
 vi.mock('./api', () => ({
-  decideApproval: vi.fn(),
-  provisionRequest: vi.fn(),
-  readApprovalInbox: vi.fn(),
+  readAccessibleRequests: vi.fn(),
   readRequestDetail: vi.fn(),
-  recoverProvisioning: vi.fn(),
-  startApproval: vi.fn(),
 }))
 
 const requestId = '11111111-1111-4111-8111-111111111111'
 const caseId = '22222222-2222-4222-8222-222222222222'
 
-const inbox: ApprovalInbox = {
-  actor: { employee_id: 'EMP-002', name: '周敏', roles: ['manager'] },
+const cases: CaseList = {
   items: [
     {
       request_id: requestId,
-      approval_case_id: caseId,
-      approval_step_id: '33333333-3333-4333-8333-333333333333',
-      step_order: 1,
-      approver_role: 'manager',
-      step_status: 'pending',
-      approval_status: 'pending_manager',
       requester_id: 'EMP-001',
       requester_name: '林晓',
       entitlement_code: 'insighthub.customer_export',
       entitlement_name: '脱敏客户数据导出',
-      risk_level: 'high',
       duration_days: 14,
       justification: '季度客户分析',
-      submitted_at: '2026-08-05T01:00:00Z',
+      request_status: 'submitted',
+      approval_status: 'pending_manager',
+      created_at: '2026-08-05T01:00:00Z',
     },
   ],
 }
@@ -129,23 +119,15 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
 const callbacks = {
   onRefresh: vi.fn(),
   onSelectRequest: vi.fn(),
-  onStartApproval: vi.fn(),
-  onDecision: vi.fn(),
-  onProvision: vi.fn(),
-  onRecover: vi.fn(),
-  onRetryProvision: vi.fn(),
 }
 
-function renderView(
-  props: Partial<Parameters<typeof OperationsView>[0]> = {},
-) {
+function renderView(props: Partial<Parameters<typeof OperationsView>[0]> = {}) {
   render(
     <OperationsView
       roleLabel="直属经理"
-      inbox={inbox}
+      cases={cases}
       detail={detail()}
       isLoading={false}
-      isBusy={false}
       error={null}
       {...callbacks}
       {...props}
@@ -153,47 +135,86 @@ function renderView(
   )
 }
 
-describe('OperationsView', () => {
-  it('shows a loading state while facts are being fetched', () => {
-    renderView({ isLoading: true, inbox: null, detail: null })
-    expect(screen.getByText('正在读取审批事实')).toBeInTheDocument()
+describe('OperationsView T20 read-only ACL view', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
   })
 
-  it('shows a retryable error without inventing request facts', () => {
-    renderView({ error: 'API 暂时不可用', inbox: null, detail: null })
+  it('shows an accessible loading state while resource facts are fetched', () => {
+    renderView({ isLoading: true, cases: null, detail: null })
+    expect(screen.getByRole('status')).toHaveTextContent('正在读取可访问 Case')
+  })
+
+  it('shows a retryable error without inventing Case facts', () => {
+    renderView({ error: 'API 暂时不可用', cases: null, detail: null })
     expect(screen.getByRole('alert')).toHaveTextContent('API 暂时不可用')
     expect(screen.getByRole('button', { name: '重新读取' })).toBeInTheDocument()
   })
 
-  it('shows an empty inbox and the explicit approval-start boundary', () => {
-    renderView({
-      inbox: { ...inbox, items: [] },
-      detail: detail({ approval: null, risk_review: null }),
-    })
-    expect(screen.getByText('当前没有待处理步骤')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '启动风险审查' })).toBeInTheDocument()
+  it('shows a truthful empty state when SQL ACL returns no related Case', () => {
+    renderView({ cases: { items: [] }, detail: null })
+    expect(screen.getByText('当前没有可访问 Case')).toBeInTheDocument()
+    expect(screen.getByText(/等待中的未轮到步骤.*不会出现/)).toBeInTheDocument()
   })
 
-  it('shows actionable success facts, policy evidence and ordered approval', () => {
+  it('shows current or previously decided Case facts but no T22/T23 action controls', () => {
     renderView()
-    expect(screen.getByRole('button', { name: '批准当前步骤' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /脱敏客户数据导出/ })).toBeInTheDocument()
     expect(screen.getByText('高风险权限双审批')).toBeInTheDocument()
-    expect(screen.getByText(/等待前序/)).toBeInTheDocument()
-    expect(screen.getByText('申请人提交正式申请')).toBeInTheDocument()
+    expect(screen.getByText(/共享 Case 来自 PostgreSQL/)).toBeInTheDocument()
+    for (const action of [
+      '启动风险审查',
+      '批准当前步骤',
+      '驳回',
+      '开始幂等开通',
+      '查询原 IAM 操作',
+      '清除故障并幂等重试',
+    ]) {
+      expect(screen.queryByRole('button', { name: action })).not.toBeInTheDocument()
+    }
   })
 
-  it('lets the approver select and open every pending inbox item', async () => {
+  it('keeps an approved admin Case read-only even when recovery would later be legal', () => {
+    const current = detail()
+    renderView({
+      roleLabel: '权限管理员',
+      cases: {
+        items: [{ ...cases.items[0], approval_status: 'approved' }],
+      },
+      detail: detail({
+        approval: { ...current.approval!, approval_status: 'approved' },
+        provisioning: {
+          ...current.provisioning,
+          provisioning_status: 'unknown',
+          last_error: 'IAM 响应超时，结果未知',
+        },
+      }),
+    })
+
+    expect(screen.getByText('结果未知')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '查询原 IAM 操作' })).not.toBeInTheDocument()
+    expect(
+      screen.getByText(/当前页面只回放已持久化的业务事实.*不在读取过程中执行审批或开通/),
+    ).toBeInTheDocument()
+  })
+})
+
+describe('OperationsConsole principal-scoped Case loading', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('selects details only from the server-filtered accessible list', async () => {
     const anotherRequestId = '77777777-7777-4777-8777-777777777777'
-    const anotherItem = {
-      ...inbox.items[0],
+    const anotherCase = {
+      ...cases.items[0],
       request_id: anotherRequestId,
-      approval_case_id: '88888888-8888-4888-8888-888888888888',
-      approval_step_id: '99999999-9999-4999-8999-999999999999',
       entitlement_code: 'insighthub.dashboard_admin',
       entitlement_name: '经营看板管理',
       justification: '维护经营指标',
+      approval_status: 'approved',
     }
-    vi.mocked(readApprovalInbox).mockResolvedValue({ ...inbox, items: [inbox.items[0], anotherItem] })
+    vi.mocked(readAccessibleRequests).mockResolvedValue({ items: [cases.items[0], anotherCase] })
     vi.mocked(readRequestDetail).mockImplementation(async (id) => {
       if (id === anotherRequestId) {
         const current = detail()
@@ -201,90 +222,38 @@ describe('OperationsView', () => {
           request: {
             ...current.request,
             request_id: anotherRequestId,
-            entitlement_code: anotherItem.entitlement_code,
-            justification: anotherItem.justification,
+            entitlement_code: anotherCase.entitlement_code,
+            justification: anotherCase.justification,
           },
           entitlement: {
             ...current.entitlement,
-            code: anotherItem.entitlement_code,
-            name: anotherItem.entitlement_name,
-          },
-          approval: {
-            ...current.approval!,
-            approval_case_id: anotherItem.approval_case_id,
+            code: anotherCase.entitlement_code,
+            name: anotherCase.entitlement_name,
           },
         })
       }
       return detail()
     })
 
-    render(
-      <OperationsConsole
-        roleLabel="直属经理"
-        requestId={null}
-      />,
-    )
+    render(<OperationsConsole roleLabel="直属经理" requestId={null} />)
 
     await screen.findByRole('button', { name: /经营看板管理/ })
-    fireEvent.click(screen.getByRole('button', { name: /经营看板管理/ }))
+    expect(readAccessibleRequests).toHaveBeenCalledOnce()
+    expect(readRequestDetail).toHaveBeenCalledWith(requestId)
 
+    fireEvent.click(screen.getByRole('button', { name: /经营看板管理/ }))
     await waitFor(() => expect(readRequestDetail).toHaveBeenLastCalledWith(anotherRequestId))
     expect(await screen.findByRole('heading', { name: '经营看板管理' })).toBeInTheDocument()
   })
 
-  it('does not carry an approval comment across actor remounts', () => {
-    const { rerender } = render(
-      <OperationsView
-        key="EMP-002"
-        roleLabel="直属经理"
-        inbox={inbox}
-        detail={detail()}
-        isLoading={false}
-        isBusy={false}
-        error={null}
-        {...callbacks}
-      />,
-    )
-    const comment = screen.getByRole('textbox', { name: '审批意见（可选）' })
-    fireEvent.change(comment, { target: { value: '经理意见' } })
+  it('does not probe a requestId that is absent from the accessible list', async () => {
+    const untrustedRequestId = '99999999-9999-4999-8999-999999999999'
+    vi.mocked(readAccessibleRequests).mockResolvedValue(cases)
+    vi.mocked(readRequestDetail).mockResolvedValue(detail())
 
-    rerender(
-      <OperationsView
-        key="EMP-003"
-        roleLabel="数据负责人"
-        inbox={inbox}
-        detail={detail()}
-        isLoading={false}
-        isBusy={false}
-        error={null}
-        {...callbacks}
-      />,
-    )
-    expect(screen.getByRole('textbox', { name: '审批意见（可选）' })).toHaveValue('')
-  })
+    render(<OperationsConsole roleLabel="直属经理" requestId={untrustedRequestId} />)
 
-  it('offers status recovery only when IAM result is unknown', () => {
-    const current = detail()
-    renderView({
-      detail: detail({
-        approval: { ...current.approval!, approval_status: 'approved' },
-        provisioning: {
-          ...current.provisioning,
-          provisioning_status: 'unknown',
-          provisioning_attempt_id: '66666666-6666-4666-8666-666666666666',
-          attempt_count: 1,
-          last_error: 'IAM 响应超时，结果未知',
-        },
-      }),
-      inbox: { ...inbox, items: [] },
-    })
-    expect(screen.getByRole('button', { name: '查询原 IAM 操作' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '开始幂等开通' })).not.toBeInTheDocument()
-  })
-
-  it('does not expose model budget controls in the product operations view', () => {
-    renderView()
-    expect(screen.queryByText(/模型额度|剩余/)).not.toBeInTheDocument()
-    expect(screen.getByText('只读事实回放')).toBeInTheDocument()
+    await waitFor(() => expect(readRequestDetail).toHaveBeenCalledWith(requestId))
+    expect(readRequestDetail).not.toHaveBeenCalledWith(untrustedRequestId)
   })
 })

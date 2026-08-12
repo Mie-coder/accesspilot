@@ -1,6 +1,6 @@
-# AccessPilot v1.2「上下文意图与可信多角色闭环」Tickets（T18–T19 已完成）
+# AccessPilot v1.2「上下文意图与可信多角色闭环」Tickets（T18–T20 已完成）
 
-**状态：** 用户已确认按 T18 → T25 串行实施；T18、T19 已独立验收，T20–T25 待开始；不推送、合并或部署
+**状态：** 用户已确认按 T18 → T25 串行实施；T18–T20 已独立验收，T21–T25 待开始；不推送、合并或部署
 **更新时间：** 2026-08-12
 **继承基线：** v1.1，HEAD `c683d84`，T01–T17 已完成
 **产品说明书：** `docs/product/accesspilot-product-function-book-v1.2.md`
@@ -12,7 +12,7 @@
 - 用户确认后默认严格串行执行 T18 → T25，一次只实现一张；
 - 每张实现 Ticket 先写失败测试，再写最小实现；
 - 每张完成后进行独立只读验证，通过后才允许本地提交；
-- 当前停止点在 T20 开始前；T18、T19 已独立验收，T20–T25 尚未开始；
+- 当前停止点在 T21 开始前；T18–T20 已独立验收，T21–T25 尚未开始；
 - 本 Ticket 列表不授权推送、合并、部署或修改正式简历；
 - 到期回收、复杂预算/Attempt、Evidence Lab、完整外键 cutover、真实 SSO 和 168 小时门禁不进入任何 Ticket；
 - `product_verified` 只由 T24 判定，`interview_ready` 只由 T25 判定。
@@ -56,7 +56,7 @@
 - T18 实现与 registry：T18 专用测试与 registry 回归 30 passed；固定 T18 评测 11/11；T18 验收当时的历史组合分母为 T17 30 + T18 11 = 41/41；API 全量 373 passed；前端 48 passed，lint/build 通过。该 41 不是 T19 current registry 分母。
 - 质量与迁移：Ruff、MyPy 通过；Alembic `0007` upgrade/downgrade/no-drift 通过；独立 verifier 结论 PASS（P0=0、P1=0）。
 - P2 残余/延期边界：legacy JSON 及 `set_actor`/`reset`/`exit_demo`/submit 的极端并发最后写入者风险；未来真实 Answer Provider 的 canonical `assistant_message` 定义；无 Cursor 数字澄清文案暂固定引用 `111`。这些不扩大 T18 范围，后续 Ticket 再处理。
-- T20–T25（Case/ACL、多角色闭环、集成与面试证据）均尚未开始；T19 已完成独立验收；不推送、合并或部署。
+- T20 已完成共享 Case/ACL 独立验收；T21–T25 尚未开始；不推送、合并或部署。
 
 ## T19 — 独立 Mock 登录页、AuthSession 与 Principal
 
@@ -90,7 +90,7 @@
 
 ## T20 — 共享 Access Case 与资源级 ACL
 
-**状态：** 待开始
+**状态：** 已完成（2026-08-12 独立验收通过）
 
 **目标：** 在固定单 Demo 组织内，让正式申请按资源关系跨 Session 重读，同时保持草稿和聊天私有。
 
@@ -107,6 +107,12 @@
 **依赖：** T19。
 
 **主要风险：** 只在前端隐藏按钮或加载后再过滤，仍会留下真实越权入口。
+
+### T20 验收记录（2026-08-12）
+
+- SQL ACL 按 requester、审批人 ID+可信角色、approved Case 管理员关系过滤；正式 Case 跨 Session 可读，草稿、事件和 Cursor 仍属私有 Workspace。
+- T20 攻击矩阵 14/14、API 全量 396 passed、前端 61 passed；当前产品固定评测 72/72（active T17 24 + T18 11 + T19 23 + T20 14）。
+- 独立 verifier 结论 PASS（P0=0、P1=0）；未引入 Packet、审批成功链、开通动作、组织表或迁移。
 
 ## T21 — 简化 Decision Packet 与受约束风险建议
 
@@ -210,4 +216,4 @@
 
 ## 2. 当前停止点
 
-用户已确认 AccessPilot v1.2 精简版 T18–T25 按顺序串行实施；T18、T19 已独立验收，当前停止在 T20 开始前，T20–T25 待开始。后续每张 Ticket 仍须测试先行、独立验收并本地提交；不推送、不合并、不部署。
+用户已确认 AccessPilot v1.2 精简版 T18–T25 按顺序串行实施；T18–T20 已独立验收，当前停止在 T21 开始前，T21–T25 待开始。后续每张 Ticket 仍须测试先行、独立验收并本地提交；不推送、不合并、不部署。

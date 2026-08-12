@@ -68,7 +68,7 @@ def role_client(client: TestClient, employee_id: str) -> TestClient:
 def test_inbox_is_private_to_each_auth_session(
     operations_client: TestClient,
 ) -> None:
-    _, case_id = submit_and_start(operations_client)
+    request_id, case_id = submit_and_start(operations_client)
 
     manager_client = role_client(operations_client, "EMP-002")
     owner_client = role_client(operations_client, "EMP-003")
@@ -76,15 +76,19 @@ def test_inbox_is_private_to_each_auth_session(
     owner_waiting = owner_client.get("/api/approval-inbox")
 
     assert manager.status_code == 200
-    assert manager.json()["items"] == []
-    assert owner_waiting.json()["items"] == []
+    assert any(
+        item["request_id"] == request_id for item in manager.json()["items"]
+    )
+    assert all(
+        item["request_id"] != request_id for item in owner_waiting.json()["items"]
+    )
 
     decided = manager_client.post(
         f"/api/approval-cases/{case_id}/decisions",
         json={"decision": "approve"},
     )
     assert decided.status_code == 404
-    assert operations_client.get("/api/approval-inbox").json()["items"] == []
+    assert operations_client.get("/api/approval-inbox").status_code == 403
 
 
 def test_detail_returns_policy_steps_and_append_only_audit(
@@ -159,5 +163,8 @@ def test_detail_does_not_cross_workspace_boundary(
     other_browser = TestClient(operations_client.app)
     login_as(other_browser, "EMP-002")
 
-    assert other_browser.get(f"/api/requests/{request_id}").status_code == 404
-    assert other_browser.get("/api/approval-inbox").json()["items"] == []
+    assert other_browser.get(f"/api/requests/{request_id}").status_code == 200
+    assert any(
+        item["request_id"] == request_id
+        for item in other_browser.get("/api/approval-inbox").json()["items"]
+    )

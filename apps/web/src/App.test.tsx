@@ -114,6 +114,9 @@ describe('App authentication state machine', () => {
     for (const accountId of ['EMP-001', 'EMP-002', 'EMP-003', 'EMP-004']) {
       expect(screen.getByText(accountId)).toBeInTheDocument()
     }
+    expect(screen.getAllByText('查看当前轮到或已参与的 Case')).toHaveLength(2)
+    expect(screen.getByText('查看已全部批准的 Case')).toBeInTheDocument()
+    expect(screen.queryByText(/处理当前轮到|执行已全部批准/)).not.toBeInTheDocument()
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/workspaces'))).toBe(false)
   })
 

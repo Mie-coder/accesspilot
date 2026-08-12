@@ -21,6 +21,7 @@ from accesspilot.evaluation import (
     T17_SCENARIOS,
     T18_SCENARIOS,
     T19_SCENARIOS,
+    T20_SCENARIOS,
     EvaluationScenario,
 )
 
@@ -104,6 +105,11 @@ def test_current_registry_preserves_history_without_double_counting_superseded_t
     selectors = "\n".join(T19_SCENARIOS[0].selectors)
     assert "test_t19_auth.py" in selectors
 
+    assert tuple(scenario.scenario_id for scenario in T20_SCENARIOS) == ("T20-01",)
+    assert T20_SCENARIOS[0].category == "case_resource_acl"
+    assert T20_SCENARIOS[0].expected_case_count == 14
+    assert T20_SCENARIOS[0].selectors == ("apps/api/tests/api/test_t20_case_acl.py",)
+
     assert SUPERSEDED_T17_SCENARIO_IDS == frozenset({"T17-01", "T17-09"})
     assert tuple(scenario.scenario_id for scenario in ACTIVE_T17_SCENARIOS) == (
         "T17-02",
@@ -117,9 +123,11 @@ def test_current_registry_preserves_history_without_double_counting_superseded_t
     )
     assert sum(scenario.expected_case_count for scenario in T17_SCENARIOS) == 30
     assert sum(scenario.expected_case_count for scenario in ACTIVE_T17_SCENARIOS) == 24
-    assert PRODUCT_SCENARIOS == ACTIVE_T17_SCENARIOS + T18_SCENARIOS + T19_SCENARIOS
-    assert tuple(scenario.scenario_id for scenario in PRODUCT_SCENARIOS)[-1] == "T19-01"
-    assert sum(scenario.expected_case_count for scenario in PRODUCT_SCENARIOS) == 58
+    assert PRODUCT_SCENARIOS == (
+        ACTIVE_T17_SCENARIOS + T18_SCENARIOS + T19_SCENARIOS + T20_SCENARIOS
+    )
+    assert tuple(scenario.scenario_id for scenario in PRODUCT_SCENARIOS)[-1] == "T20-01"
+    assert sum(scenario.expected_case_count for scenario in PRODUCT_SCENARIOS) == 72
 
     all_selectors = [selector for scenario in PRODUCT_SCENARIOS for selector in scenario.selectors]
     assert len(all_selectors) == len(set(all_selectors))
@@ -130,7 +138,7 @@ def test_current_registry_preserves_history_without_double_counting_superseded_t
     )
 
 
-def test_current_registry_collects_exactly_58_unique_pytest_cases() -> None:
+def test_current_registry_collects_exactly_72_unique_pytest_cases() -> None:
     repo_root = Path(__file__).resolve().parents[4]
     selectors = [selector for scenario in PRODUCT_SCENARIOS for selector in scenario.selectors]
 
@@ -144,7 +152,7 @@ def test_current_registry_collects_exactly_58_unique_pytest_cases() -> None:
 
     assert completed.returncode == 0, completed.stderr
     node_ids = tuple(line for line in completed.stdout.splitlines() if "::" in line)
-    assert len(node_ids) == 58
+    assert len(node_ids) == 72
     assert len(node_ids) == len(set(node_ids))
 
 

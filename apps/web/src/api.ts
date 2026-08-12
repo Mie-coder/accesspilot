@@ -1,5 +1,6 @@
 import type {
   ApprovalInbox,
+  CaseList,
   ChatTurn,
   RequestDraft,
   RequestResult,
@@ -511,6 +512,16 @@ export async function readLatestRequest(signal?: AbortSignal): Promise<RequestDe
   return payload.request ?? null
 }
 
+/** List only formal Cases submitted by the authenticated Principal. */
+export async function readMyRequests(signal?: AbortSignal): Promise<CaseList> {
+  return requestJson<CaseList>('/api/requests/mine', { signal })
+}
+
+/** List formal Cases related to the current approver/admin through SQL ACLs. */
+export async function readAccessibleRequests(signal?: AbortSignal): Promise<CaseList> {
+  return requestJson<CaseList>('/api/requests/accessible', { signal })
+}
+
 export async function submitRequest(signal?: AbortSignal): Promise<RequestResult> {
   return requestJson<RequestResult>('/api/requests', { method: 'POST', signal })
 }
@@ -519,8 +530,11 @@ export async function readApprovalInbox(): Promise<ApprovalInbox> {
   return requestJson<ApprovalInbox>('/api/approval-inbox')
 }
 
-export async function readRequestDetail(requestId: string): Promise<RequestDetail> {
-  return requestJson<RequestDetail>(`/api/requests/${encodeURIComponent(requestId)}`)
+export async function readRequestDetail(
+  requestId: string,
+  signal?: AbortSignal,
+): Promise<RequestDetail> {
+  return requestJson<RequestDetail>(`/api/requests/${encodeURIComponent(requestId)}`, { signal })
 }
 
 export async function startApproval(requestId: string): Promise<void> {
