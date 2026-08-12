@@ -259,6 +259,30 @@ export interface CaseList {
   items: CaseSummary[]
 }
 
+/** Server-derived actions for the fixed permissions administrator. */
+export interface ProvisioningTask {
+  request_id: string
+  approval_case_id: string
+  requester_id: string
+  requester_name: string
+  entitlement_code: string
+  entitlement_name: string
+  duration_days: number
+  provisioning_status: string
+  attempt_count: number
+  can_provision: boolean
+  can_recover: boolean
+}
+
+export interface ProvisioningTaskList {
+  actor: {
+    employee_id: string
+    name: string
+    roles: string[]
+  }
+  items: ProvisioningTask[]
+}
+
 export interface RequestDetail {
   view_mode: 'read_only_replay'
   request: {

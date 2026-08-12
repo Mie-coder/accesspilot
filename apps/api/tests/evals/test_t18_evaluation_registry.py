@@ -24,6 +24,7 @@ from accesspilot.evaluation import (
     T20_SCENARIOS,
     T21_SCENARIOS,
     T22_SCENARIOS,
+    T23_SCENARIOS,
     EvaluationScenario,
 )
 
@@ -128,6 +129,13 @@ def test_current_registry_preserves_history_without_double_counting_superseded_t
         "apps/api/tests/api/test_t22_approval_lifecycle.py",
     )
 
+    assert tuple(scenario.scenario_id for scenario in T23_SCENARIOS) == ("T23-01",)
+    assert T23_SCENARIOS[0].category == "admin_provisioning"
+    assert T23_SCENARIOS[0].expected_case_count == 5
+    assert T23_SCENARIOS[0].selectors == (
+        "apps/api/tests/api/test_t23_admin_provisioning.py",
+    )
+
     assert SUPERSEDED_T17_SCENARIO_IDS == frozenset({"T17-01", "T17-09"})
     assert tuple(scenario.scenario_id for scenario in ACTIVE_T17_SCENARIOS) == (
         "T17-02",
@@ -148,9 +156,10 @@ def test_current_registry_preserves_history_without_double_counting_superseded_t
         + T20_SCENARIOS
         + T21_SCENARIOS
         + T22_SCENARIOS
+        + T23_SCENARIOS
     )
-    assert tuple(scenario.scenario_id for scenario in PRODUCT_SCENARIOS)[-1] == "T22-01"
-    assert sum(scenario.expected_case_count for scenario in PRODUCT_SCENARIOS) == 93
+    assert tuple(scenario.scenario_id for scenario in PRODUCT_SCENARIOS)[-1] == "T23-01"
+    assert sum(scenario.expected_case_count for scenario in PRODUCT_SCENARIOS) == 98
 
     all_selectors = [selector for scenario in PRODUCT_SCENARIOS for selector in scenario.selectors]
     assert len(all_selectors) == len(set(all_selectors))
@@ -161,7 +170,7 @@ def test_current_registry_preserves_history_without_double_counting_superseded_t
     )
 
 
-def test_current_registry_collects_exactly_93_unique_pytest_cases() -> None:
+def test_current_registry_collects_exactly_98_unique_pytest_cases() -> None:
     repo_root = Path(__file__).resolve().parents[4]
     selectors = [selector for scenario in PRODUCT_SCENARIOS for selector in scenario.selectors]
 
@@ -175,7 +184,7 @@ def test_current_registry_collects_exactly_93_unique_pytest_cases() -> None:
 
     assert completed.returncode == 0, completed.stderr
     node_ids = tuple(line for line in completed.stdout.splitlines() if "::" in line)
-    assert len(node_ids) == 93
+    assert len(node_ids) == 98
     assert len(node_ids) == len(set(node_ids))
 
 

@@ -226,6 +226,79 @@ def list_approval_inbox(
     }
 
 
+def list_provisioning_tasks(
+    session: Session,
+    *,
+    actor_id: str,
+    roles: tuple[str, ...] | list[str] | set[str],
+) -> dict[str, object]:
+    """List approved Cases and server-derived actions for the fixed admin."""
+
+    actor = session.get(EmployeeRecord, actor_id)
+    if (
+        actor is None
+        or actor.employee_id != "EMP-004"
+        or "permissions_admin" not in roles
+    ):
+        raise OperationsNotFoundError("开通任务不存在")
+    rows = session.execute(
+        select(
+            AccessRequestRecord,
+            ApprovalCaseRecord,
+            EmployeeRecord,
+            EntitlementRecord,
+            ProvisioningAttemptRecord,
+        )
+        .join(
+            ApprovalCaseRecord,
+            and_(
+                ApprovalCaseRecord.request_id == AccessRequestRecord.id,
+                ApprovalCaseRecord.workspace_id == AccessRequestRecord.workspace_id,
+            ),
+        )
+        .join(
+            EmployeeRecord,
+            EmployeeRecord.employee_id == AccessRequestRecord.requester_id,
+        )
+        .join(
+            EntitlementRecord,
+            EntitlementRecord.code == AccessRequestRecord.entitlement_code,
+        )
+        .outerjoin(
+            ProvisioningAttemptRecord,
+            ProvisioningAttemptRecord.request_id == AccessRequestRecord.id,
+        )
+        .where(ApprovalCaseRecord.approval_status == "approved")
+        .order_by(AccessRequestRecord.created_at, AccessRequestRecord.id)
+    ).all()
+    items: list[dict[str, object]] = []
+    for request, case, requester, entitlement, attempt in rows:
+        status = attempt.provisioning_status if attempt is not None else "not_started"
+        items.append(
+            {
+                "request_id": str(request.id),
+                "approval_case_id": str(case.id),
+                "requester_id": request.requester_id,
+                "requester_name": requester.name,
+                "entitlement_code": request.entitlement_code,
+                "entitlement_name": entitlement.name,
+                "duration_days": request.duration_days,
+                "provisioning_status": status,
+                "attempt_count": attempt.attempt_count if attempt is not None else 0,
+                "can_provision": status in {"not_started", "failed"},
+                "can_recover": status == "unknown",
+            }
+        )
+    return {
+        "actor": {
+            "employee_id": actor.employee_id,
+            "name": actor.name,
+            "roles": actor.roles,
+        },
+        "items": items,
+    }
+
+
 def _risk_review_payload(
     session: Session,
     audit_events: list[AuditEventRecord],

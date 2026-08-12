@@ -159,6 +159,8 @@ def submit_request(client: TestClient, *, confirmed: bool = True) -> str:
 
 
 def start_case(client: TestClient, request_id: str) -> str:
+    packet = client.post(f"/api/requests/{request_id}/decision-packet")
+    assert packet.status_code in {200, 201}
     response = client.post(f"/api/requests/{request_id}/approval-case")
     assert response.status_code == 201
     return response.json()["approval_case_id"]
@@ -246,11 +248,11 @@ def test_eval_04_policy_failure_is_recoverable_without_approval(
     )
     request_id = submit_request(client)
 
-    response = client.post(f"/api/requests/{request_id}/approval-case")
+    response = client.post(f"/api/requests/{request_id}/decision-packet")
     detail = client.get(f"/api/requests/{request_id}")
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "风险审查暂时不可用，请稍后重试"}
+    assert response.json() == {"detail": "决策材料暂时无法生成，请重试"}
     assert detail.json()["approval"] is None
 
 
@@ -279,18 +281,14 @@ def test_eval_07_timeout_recovers_by_querying_original_operation(
     request_id = submit_request(client)
     start_case(client, request_id)
     preset_approved_case(database_session_factory, request_id)
-    key = f"eval-timeout-{request_id}"
+    key = f"accesspilot:{request_id}"
+    admin = TestClient(client.app)
+    login_as(admin, "EMP-004")
 
-    unknown = client.post(
-        f"/api/requests/{request_id}/provision",
-        json={"idempotency_key": key},
-    )
-    replay = client.post(
-        f"/api/requests/{request_id}/provision",
-        json={"idempotency_key": key},
-    )
-    recovered = client.post(f"/api/requests/{request_id}/provision/recover")
-    recovered_again = client.post(f"/api/requests/{request_id}/provision/recover")
+    unknown = admin.post(f"/api/requests/{request_id}/provision")
+    replay = admin.post(f"/api/requests/{request_id}/provision")
+    recovered = admin.post(f"/api/requests/{request_id}/provision/recover")
+    recovered_again = admin.post(f"/api/requests/{request_id}/provision/recover")
 
     assert unknown.status_code == 200
     assert unknown.json()["provisioning_status"] == "unknown"
@@ -315,16 +313,11 @@ def test_eval_08_duplicate_retry_reuses_one_attempt_and_grant(
     request_id = submit_request(eval_client)
     start_case(eval_client, request_id)
     preset_approved_case(database_session_factory, request_id)
-    key = f"eval-idempotent-{request_id}"
+    admin = TestClient(eval_client.app)
+    login_as(admin, "EMP-004")
 
-    first = eval_client.post(
-        f"/api/requests/{request_id}/provision",
-        json={"idempotency_key": key},
-    )
-    second = eval_client.post(
-        f"/api/requests/{request_id}/provision",
-        json={"idempotency_key": key},
-    )
+    first = admin.post(f"/api/requests/{request_id}/provision")
+    second = admin.post(f"/api/requests/{request_id}/provision")
 
     assert first.status_code == 200
     assert first.json()["provisioning_status"] == "succeeded"

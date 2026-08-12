@@ -148,18 +148,15 @@ def test_legacy_demo_fault_control_is_closed_before_provisioning(
         json={"fault_mode": "iam_timeout"},
     ).status_code == 404
 
-    provisioned = operations_client.post(
-        f"/api/requests/{request_id}/provision",
-        json={"idempotency_key": f"accesspilot-{request_id}"},
-    )
+    provisioned = operations_client.post(f"/api/requests/{request_id}/provision")
     detail = operations_client.get(f"/api/requests/{request_id}")
 
-    assert provisioned.status_code == 409
+    assert provisioned.status_code == 403
     assert detail.status_code == 200
     assert detail.json()["provisioning"]["access_granted"] is False
 
     recovered = operations_client.post(f"/api/requests/{request_id}/provision/recover")
-    assert recovered.status_code == 409
+    assert recovered.status_code == 403
 
 
 def test_detail_does_not_cross_workspace_boundary(

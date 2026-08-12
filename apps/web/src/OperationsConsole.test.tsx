@@ -3,18 +3,24 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   decideApproval,
+  provisionRequest,
   readAccessibleRequests,
   readApprovalInbox,
+  readProvisioningTasks,
   readRequestDetail,
+  recoverProvisioning,
 } from './api'
 import { OperationsConsole, OperationsView } from './OperationsConsole'
-import type { CaseList, RequestDetail } from './types'
+import type { CaseList, ProvisioningTaskList, RequestDetail } from './types'
 
 vi.mock('./api', () => ({
   decideApproval: vi.fn(),
+  provisionRequest: vi.fn(),
   readAccessibleRequests: vi.fn(),
   readApprovalInbox: vi.fn(),
+  readProvisioningTasks: vi.fn(),
   readRequestDetail: vi.fn(),
+  recoverProvisioning: vi.fn(),
 }))
 
 const requestId = '11111111-1111-4111-8111-111111111111'
@@ -59,6 +65,27 @@ const approvalInbox = {
     duration_days: 14,
     justification: '季度客户分析',
     submitted_at: '2026-08-05T01:00:00Z',
+  }],
+}
+
+const provisioningTasks: ProvisioningTaskList = {
+  actor: {
+    employee_id: 'EMP-004',
+    name: '吴越',
+    roles: ['permissions_admin'],
+  },
+  items: [{
+    request_id: requestId,
+    approval_case_id: caseId,
+    requester_id: 'EMP-001',
+    requester_name: '林晓',
+    entitlement_code: 'insighthub.customer_export',
+    entitlement_name: '脱敏客户数据导出',
+    duration_days: 14,
+    provisioning_status: 'not_started',
+    attempt_count: 0,
+    can_provision: true,
+    can_recover: false,
   }],
 }
 
@@ -151,6 +178,8 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
 
 const callbacks = {
   onDecide: vi.fn(),
+  onProvision: vi.fn(),
+  onRecover: vi.fn(),
   onRefresh: vi.fn(),
   onSelectRequest: vi.fn(),
 }
@@ -162,10 +191,13 @@ function renderView(props: Partial<Parameters<typeof OperationsView>[0]> = {}) {
       cases={cases}
       detail={detail()}
       approvalInbox={null}
+      provisioningTasks={null}
       isLoading={false}
       isDeciding={false}
+      isProvisioning={false}
       error={null}
       decisionError={null}
+      provisioningError={null}
       {...callbacks}
       {...props}
     />,
@@ -233,6 +265,106 @@ describe('OperationsView T20 read-only ACL view', () => {
     expect(
       screen.getByText(/当前页面只回放已持久化的业务事实.*不在读取过程中执行审批或开通/),
     ).toBeInTheDocument()
+  })
+})
+
+describe('OperationsView T23 admin provisioning controls', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('shows provision only for a matching server task marked can_provision', () => {
+    const current = detail()
+    const onProvision = vi.fn()
+    renderView({
+      roleLabel: '权限管理员',
+      provisioningTasks,
+      detail: detail({ approval: { ...current.approval!, approval_status: 'approved' } }),
+      onProvision,
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: '执行权限开通' }))
+    expect(onProvision).toHaveBeenCalledWith(requestId)
+    expect(screen.queryByRole('button', { name: '查询原 IAM 操作' })).not.toBeInTheDocument()
+    expect(screen.getByText(/v1\.2 不包含到期回收或撤销/)).toBeInTheDocument()
+  })
+
+  it('shows recover only for unknown and hides actions for wrong role or terminal tasks', () => {
+    const current = detail()
+    const unknownTasks: ProvisioningTaskList = {
+      ...provisioningTasks,
+      items: [{
+        ...provisioningTasks.items[0],
+        provisioning_status: 'unknown',
+        can_provision: false,
+        can_recover: true,
+      }],
+    }
+    const onRecover = vi.fn()
+    const { rerender } = render(
+      <OperationsView
+        roleLabel="权限管理员"
+        cases={cases}
+        detail={detail({
+          approval: { ...current.approval!, approval_status: 'approved' },
+          provisioning: { ...current.provisioning, provisioning_status: 'unknown' },
+        })}
+        approvalInbox={null}
+        provisioningTasks={unknownTasks}
+        isLoading={false}
+        isDeciding={false}
+        isProvisioning={false}
+        error={null}
+        decisionError={null}
+        provisioningError={null}
+        {...callbacks}
+        onRecover={onRecover}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: '查询原 IAM 操作' }))
+    expect(onRecover).toHaveBeenCalledWith(requestId)
+
+    rerender(
+      <OperationsView
+        roleLabel="直属经理"
+        cases={cases}
+        detail={detail({ approval: { ...current.approval!, approval_status: 'approved' } })}
+        approvalInbox={null}
+        provisioningTasks={unknownTasks}
+        isLoading={false}
+        isDeciding={false}
+        isProvisioning={false}
+        error={null}
+        decisionError={null}
+        provisioningError={null}
+        {...callbacks}
+      />,
+    )
+    expect(screen.queryByRole('button', { name: '查询原 IAM 操作' })).not.toBeInTheDocument()
+
+    rerender(
+      <OperationsView
+        roleLabel="权限管理员"
+        cases={cases}
+        detail={detail({
+          approval: { ...current.approval!, approval_status: 'approved' },
+          provisioning: { ...current.provisioning, provisioning_status: 'succeeded', access_granted: true },
+        })}
+        approvalInbox={null}
+        provisioningTasks={{
+          ...unknownTasks,
+          items: [{ ...unknownTasks.items[0], provisioning_status: 'succeeded', can_recover: false }],
+        }}
+        isLoading={false}
+        isDeciding={false}
+        isProvisioning={false}
+        error={null}
+        decisionError={null}
+        provisioningError={null}
+        {...callbacks}
+      />,
+    )
+    expect(screen.queryByRole('button', { name: /IAM|开通/ })).not.toBeInTheDocument()
   })
 })
 
@@ -424,5 +556,70 @@ describe('OperationsConsole principal-scoped Case loading', () => {
     expect(readRequestDetail).toHaveBeenLastCalledWith(requestId)
     expect(readApprovalInbox).toHaveBeenCalledTimes(2)
     expect(await screen.findByText('待数据负责人审批')).toBeInTheDocument()
+  })
+})
+
+describe('OperationsConsole T23 admin actions', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(readAccessibleRequests).mockResolvedValue({
+      items: [{ ...cases.items[0], approval_status: 'approved' }],
+    })
+    vi.mocked(readApprovalInbox).mockResolvedValue(approvalInbox)
+    vi.mocked(readProvisioningTasks).mockResolvedValue(provisioningTasks)
+    const current = detail()
+    vi.mocked(readRequestDetail).mockResolvedValue(
+      detail({ approval: { ...current.approval!, approval_status: 'approved' } }),
+    )
+  })
+
+  it('provisions without client facts then reloads tasks, list, and detail', async () => {
+    vi.mocked(provisionRequest).mockResolvedValue(undefined)
+    render(<OperationsConsole roleLabel="权限管理员" requestId={null} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '执行权限开通' }))
+
+    await waitFor(() => expect(provisionRequest).toHaveBeenCalledWith(requestId))
+    await waitFor(() => expect(readProvisioningTasks).toHaveBeenCalledTimes(2))
+    expect(readAccessibleRequests).toHaveBeenCalledTimes(2)
+    expect(readRequestDetail).toHaveBeenCalledTimes(2)
+  })
+
+  it('recovers an unknown task through the original IAM operation then reloads facts', async () => {
+    const unknownTasks: ProvisioningTaskList = {
+      ...provisioningTasks,
+      items: [{
+        ...provisioningTasks.items[0],
+        provisioning_status: 'unknown',
+        can_provision: false,
+        can_recover: true,
+      }],
+    }
+    vi.mocked(readProvisioningTasks).mockResolvedValue(unknownTasks)
+    const current = detail()
+    vi.mocked(readRequestDetail).mockResolvedValue(detail({
+      approval: { ...current.approval!, approval_status: 'approved' },
+      provisioning: { ...current.provisioning, provisioning_status: 'unknown' },
+    }))
+    vi.mocked(recoverProvisioning).mockResolvedValue(undefined)
+    render(<OperationsConsole roleLabel="权限管理员" requestId={null} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '查询原 IAM 操作' }))
+
+    await waitFor(() => expect(recoverProvisioning).toHaveBeenCalledWith(requestId))
+    await waitFor(() => expect(readProvisioningTasks).toHaveBeenCalledTimes(2))
+    expect(readAccessibleRequests).toHaveBeenCalledTimes(2)
+    expect(readRequestDetail).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps a failed action visible and retryable', async () => {
+    vi.mocked(provisionRequest).mockRejectedValueOnce(new Error('IAM 暂时不可用'))
+    render(<OperationsConsole roleLabel="权限管理员" requestId={null} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '执行权限开通' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('IAM 暂时不可用')
+    expect(screen.getByRole('button', { name: '执行权限开通' })).toBeEnabled()
+    expect(readProvisioningTasks).toHaveBeenCalledOnce()
   })
 })

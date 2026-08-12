@@ -187,6 +187,22 @@ describe('RequestTimelineView', () => {
     vi.clearAllMocks()
   })
 
+  it('shows the persisted Grant fact after requester relogin and states the v1.2 revocation boundary', () => {
+    render(
+      <RequestTimelineView
+        detail={detail}
+        draft={null}
+        loading={false}
+        error={null}
+        onRetry={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('Grant 授权事实')).toBeInTheDocument()
+    expect(screen.getByText(detail.provisioning.grant_id!)).toBeInTheDocument()
+    expect(screen.getByText(/v1\.2 不包含到期回收或撤销/)).toBeInTheDocument()
+  })
+
   it('renders the lifecycle in deterministic order with time, owner and next step', () => {
     render(<RequestTimelineView {...baseProps} />)
     const body = document.body.textContent ?? ''

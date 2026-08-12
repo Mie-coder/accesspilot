@@ -108,6 +108,7 @@ from accesspilot.operations import (
     get_latest_request_detail_for_principal,
     get_request_detail_for_principal,
     list_approval_inbox,
+    list_provisioning_tasks,
     list_requests_for_principal,
 )
 from accesspilot.provisioning import (
@@ -115,8 +116,8 @@ from accesspilot.provisioning import (
     IamProvisioner,
     IdempotencyConflictError,
     ProvisioningAttemptNotFoundError,
+    ProvisioningForbiddenError,
     ProvisioningNotFoundError,
-    ProvisioningWorkspaceMismatchError,
     SimulatedIamProvisioner,
     provision_access,
     recover_provisioning,
@@ -1834,6 +1835,33 @@ def create_app(
             except OperationsNotFoundError as error:
                 raise HTTPException(status_code=404, detail=str(error)) from error
 
+    @app.get("/api/provisioning-tasks")
+    def read_provisioning_tasks(
+        request: Request,
+        workspace: Workspace = Depends(require_workspace),  # noqa: B008
+    ) -> dict[str, object]:
+        """返回固定权限管理员可执行的已批准 Case 任务。"""
+
+        context: AuthContext | None = getattr(request.state, "auth_context", None)
+        if context is None:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期")
+        if (
+            context.principal.employee_id != "EMP-004"
+            or "permissions_admin" not in context.principal.roles
+        ):
+            raise HTTPException(status_code=403, detail="当前账号没有权限开通职责")
+        with active_session_factory() as session:
+            try:
+                payload = list_provisioning_tasks(
+                    session,
+                    actor_id=context.principal.employee_id,
+                    roles=context.principal.roles,
+                )
+            except OperationsNotFoundError as error:
+                raise HTTPException(status_code=403, detail=str(error)) from error
+        del workspace
+        return payload
+
     @app.get("/api/requests/latest")
     def read_latest_request(
         request: Request,
@@ -1964,25 +1992,32 @@ def create_app(
             return approval_payload(session, case)
 
     @app.post("/api/requests/{request_id}/provision")
-    def provision_request(
+    async def provision_request(
+        request: Request,
         request_id: UUID,
-        body: ProvisionAccessBody,
         workspace: Workspace = Depends(require_workspace),  # noqa: B008
     ) -> dict[str, object]:
-        """用稳定幂等键开通已完成审批的权限。"""
+        """由固定权限管理员使用服务端幂等键执行开通。"""
 
+        if await request.body():
+            raise HTTPException(status_code=422, detail="开通接口不接受业务输入")
+        context: AuthContext | None = getattr(request.state, "auth_context", None)
+        if context is None:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期")
         with active_session_factory() as session:
             try:
                 attempt = provision_access(
                     session,
-                    workspace_token=workspace.token,
                     request_id=request_id,
-                    idempotency_key=body.idempotency_key,
-                    fault_mode=workspace.effective_fault_mode(active_settings.demo_mode_enabled),
+                    actor_id=context.principal.employee_id,
+                    roles=context.principal.roles,
+                    fault_mode=None,
                     iam=iam_provisioner,
                 )
-            except (ProvisioningNotFoundError, ProvisioningWorkspaceMismatchError) as error:
+            except ProvisioningNotFoundError as error:
                 raise HTTPException(status_code=404, detail="申请不存在") from error
+            except ProvisioningForbiddenError as error:
+                raise HTTPException(status_code=403, detail=str(error)) from error
             except ApprovalRequiredError as error:
                 raise HTTPException(
                     status_code=409,
@@ -1990,25 +2025,35 @@ def create_app(
                 ) from error
             except IdempotencyConflictError as error:
                 raise HTTPException(status_code=409, detail=str(error)) from error
+            del workspace
             return provisioning_payload(session, attempt)
 
     @app.post("/api/requests/{request_id}/provision/recover")
-    def recover_request_provisioning(
+    async def recover_request_provisioning(
+        request: Request,
         request_id: UUID,
         workspace: Workspace = Depends(require_workspace),  # noqa: B008
     ) -> dict[str, object]:
         """查询原幂等操作并恢复未知开通结果。"""
 
+        if await request.body():
+            raise HTTPException(status_code=422, detail="开通恢复接口不接受业务输入")
+        context: AuthContext | None = getattr(request.state, "auth_context", None)
+        if context is None:
+            raise HTTPException(status_code=401, detail="登录会话无效或已过期")
         with active_session_factory() as session:
             try:
                 attempt = recover_provisioning(
                     session,
-                    workspace_token=workspace.token,
                     request_id=request_id,
+                    actor_id=context.principal.employee_id,
+                    roles=context.principal.roles,
                     iam=iam_provisioner,
                 )
-            except (ProvisioningNotFoundError, ProvisioningWorkspaceMismatchError) as error:
+            except ProvisioningNotFoundError as error:
                 raise HTTPException(status_code=404, detail="申请不存在") from error
+            except ProvisioningForbiddenError as error:
+                raise HTTPException(status_code=403, detail=str(error)) from error
             except ApprovalRequiredError as error:
                 raise HTTPException(
                     status_code=409,
@@ -2019,6 +2064,7 @@ def create_app(
                     status_code=409,
                     detail="还没有可恢复的开通尝试",
                 ) from error
+            del workspace
             return provisioning_payload(session, attempt)
 
     return app

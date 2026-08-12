@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
@@ -69,6 +69,7 @@ def build_approved_request(
         )
         session.commit()
         request_id = request.id
+    login_as(client, "EMP-004")
     return client, request_id
 
 
@@ -88,16 +89,8 @@ def test_api_success_replay_creates_one_grant(
     database_session_factory: sessionmaker[Session],
 ) -> None:
     client, request_id = build_approved_request(database_session_factory)
-    key = f"api-success-{uuid4()}"
-
-    first = client.post(
-        f"/api/requests/{request_id}/provision",
-        json={"idempotency_key": key},
-    )
-    second = client.post(
-        f"/api/requests/{request_id}/provision",
-        json={"idempotency_key": key},
-    )
+    first = client.post(f"/api/requests/{request_id}/provision")
+    second = client.post(f"/api/requests/{request_id}/provision")
 
     assert first.status_code == 200
     assert first.json()["provisioning_status"] == "succeeded"

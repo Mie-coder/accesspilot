@@ -452,6 +452,25 @@ export function RequestTimelineView({
         </div>
       ) : null}
 
+      {detail?.provisioning.access_granted && detail.provisioning.grant_id ? (
+        <section className="grant-fact" aria-labelledby="grant-fact-title">
+          <div>
+            <p className="eyebrow">PERSISTED GRANT</p>
+            <h3 id="grant-fact-title">Grant 授权事实</h3>
+          </div>
+          <strong>{detail.provisioning.grant_id}</strong>
+          <p>
+            生效 {formatTime(detail.provisioning.starts_at)}，到期 {formatTime(detail.provisioning.expires_at)}
+          </p>
+        </section>
+      ) : null}
+
+      {detail ? (
+        <p className="timeline-note">
+          边界：v1.2 不包含到期回收或撤销；这里只读展示服务端持久化的 Grant 事实。
+        </p>
+      ) : null}
+
       {detail?.decision_packet ? (
         <DecisionPacketPanel packet={detail.decision_packet} />
       ) : null}

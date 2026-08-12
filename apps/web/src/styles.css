@@ -1496,6 +1496,34 @@ a:focus-visible {
 .request-fact-summary strong { overflow-wrap: anywhere; color: #293a30; font-size: 12px; }
 .request-fact-summary small { overflow-wrap: anywhere; color: #718077; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; }
 
+.grant-fact {
+  margin: 0 0 12px;
+  border: 1px solid #afd0bd;
+  border-radius: 12px;
+  background: #eff8f2;
+  padding: 13px;
+}
+
+.grant-fact h3 {
+  margin: 2px 0 9px;
+  color: #275f45;
+  font-size: 13px;
+}
+
+.grant-fact > strong {
+  display: block;
+  overflow-wrap: anywhere;
+  color: #2e4939;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+
+.grant-fact > p:last-child {
+  margin: 7px 0 0;
+  color: #62736a;
+  font-size: 9px;
+}
+
 .decision-packet-panel {
   margin-top: 22px;
   border: 1px solid #d5ded8;

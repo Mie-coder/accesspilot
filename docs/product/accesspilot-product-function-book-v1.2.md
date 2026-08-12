@@ -1,6 +1,6 @@
 # AccessPilot v1.2 产品说明书（精简版）
 
-**状态：** 用户已确认按 T18 → T25 串行实施；T18–T22 已独立验收，T23–T25 待开始；不推送、合并或部署
+**状态：** 用户已确认按 T18 → T25 串行实施；T18–T23 已独立验收，T24–T25 待开始；不推送、合并或部署
 **更新时间：** 2026-08-12
 **已验证基线：** AccessPilot v1.1，本地提交 `c683d84`
 **Canonical Spec：** `docs/specs/accesspilot-productized-agent-v1.2.md`

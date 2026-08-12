@@ -5,22 +5,18 @@ from typing import Literal, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select
+from sqlalchemy import exists, or_, select
 from sqlalchemy.orm import Session
 
 from accesspilot.db.models import (
     AccessGrantRecord,
     AccessRequestRecord,
     ApprovalCaseRecord,
+    ApprovalStepRecord,
     AuditEventRecord,
     ProvisioningAttemptRecord,
-    WorkspaceRecord,
     utc_now,
 )
-from accesspilot.db.workspace_store import hash_workspace_token
-
-_UNSET_FAULT_MODE = object()
-
 
 
 class ProvisioningError(RuntimeError):
@@ -33,6 +29,10 @@ class ProvisioningNotFoundError(ProvisioningError):
 
 class ProvisioningWorkspaceMismatchError(ProvisioningError):
     """目标申请不属于当前 Workspace。"""
+
+
+class ProvisioningForbiddenError(ProvisioningError):
+    """当前 Principal 与 Case 有关系，但不承担开通职责。"""
 
 
 class ApprovalRequiredError(ProvisioningError):
@@ -102,39 +102,88 @@ class SimulatedIamProvisioner:
         return IamOutcome(status=status)
 
 
+def _has_case_relation(
+    session: Session,
+    *,
+    actor_id: str,
+    roles: tuple[str, ...] | list[str] | set[str],
+    request_id: UUID,
+) -> bool:
+    approver_roles = tuple(sorted(set(roles).intersection({"manager", "data_owner"})))
+    approver_relation = exists(
+        select(ApprovalStepRecord.id)
+        .join(
+            ApprovalCaseRecord,
+            ApprovalCaseRecord.id == ApprovalStepRecord.approval_case_id,
+        )
+        .where(
+            ApprovalCaseRecord.request_id == AccessRequestRecord.id,
+            ApprovalStepRecord.approver_id == actor_id,
+            ApprovalStepRecord.approver_role.in_(approver_roles),
+            or_(
+                ApprovalStepRecord.step_status == "pending",
+                ApprovalStepRecord.decided_at.is_not(None),
+            ),
+        )
+    ).correlate(AccessRequestRecord)
+    return session.scalar(
+        select(AccessRequestRecord.id).where(
+            AccessRequestRecord.id == request_id,
+            or_(AccessRequestRecord.requester_id == actor_id, approver_relation),
+        )
+    ) is not None
+
+
 def _load_context(
     session: Session,
     *,
-    workspace_token: str,
+    actor_id: str,
+    roles: tuple[str, ...] | list[str] | set[str],
     request_id: UUID,
-) -> tuple[WorkspaceRecord, AccessRequestRecord, ApprovalCaseRecord]:
-    workspace = session.scalar(
-        select(WorkspaceRecord).where(
-            WorkspaceRecord.token_hash == hash_workspace_token(workspace_token)
+) -> tuple[AccessRequestRecord, ApprovalCaseRecord]:
+    """Authorize the Principal before exposing Case state, then lock its root."""
+
+    is_permissions_admin = actor_id == "EMP-004" and "permissions_admin" in roles
+    if is_permissions_admin:
+        request = session.scalar(
+            select(AccessRequestRecord)
+            .where(
+                AccessRequestRecord.id == request_id,
+                exists(
+                    select(ApprovalCaseRecord.id).where(
+                        ApprovalCaseRecord.request_id == AccessRequestRecord.id,
+                        ApprovalCaseRecord.workspace_id
+                        == AccessRequestRecord.workspace_id,
+                        ApprovalCaseRecord.approval_status == "approved",
+                    )
+                ).correlate(AccessRequestRecord),
+            )
+            .with_for_update()
         )
-    )
-    if workspace is None:
-        raise ProvisioningNotFoundError("Workspace 不存在")
-    request = session.get(AccessRequestRecord, request_id)
-    if request is None:
-        raise ProvisioningNotFoundError("申请不存在")
-    if request.workspace_id != workspace.id:
-        raise ProvisioningWorkspaceMismatchError("申请不属于当前 Workspace")
+        if request is None:
+            raise ProvisioningNotFoundError("申请不存在")
+    else:
+        if not _has_case_relation(
+            session,
+            actor_id=actor_id,
+            roles=roles,
+            request_id=request_id,
+        ):
+            raise ProvisioningNotFoundError("申请不存在")
+        raise ProvisioningForbiddenError("当前账号没有权限开通职责")
     case = session.scalar(
         select(ApprovalCaseRecord).where(
-            ApprovalCaseRecord.request_id == request_id
+            ApprovalCaseRecord.request_id == request_id,
+            ApprovalCaseRecord.workspace_id == request.workspace_id,
         )
     )
     if case is None or case.approval_status != "approved":
         raise ApprovalRequiredError("人工审批尚未全部通过")
-    return workspace, request, case
+    return request, case
 
 
-def _validate_idempotency_key(idempotency_key: str) -> str:
-    normalized = idempotency_key.strip()
-    if not normalized or len(normalized) > 100:
-        raise IdempotencyConflictError("幂等键长度必须在 1 到 100 之间")
-    return normalized
+def _server_idempotency_key(request_id: UUID) -> str:
+    return f"accesspilot:{request_id}"
 
 
 def _apply_outcome(
@@ -204,24 +253,25 @@ def _apply_outcome(
 def provision_access(
     session: Session,
     *,
-    workspace_token: str,
     request_id: UUID,
-    idempotency_key: str,
+    actor_id: str,
+    roles: tuple[str, ...] | list[str] | set[str],
     iam: IamProvisioner,
-    fault_mode: str | None | object = _UNSET_FAULT_MODE,
+    fault_mode: str | None = None,
 ) -> ProvisioningAttemptRecord:
     """安全启动或重放同一 IAM 操作，成功时最多创建一条授权。"""
 
-    normalized_key = _validate_idempotency_key(idempotency_key)
-    workspace, request, _ = _load_context(
+    request, _ = _load_context(
         session,
-        workspace_token=workspace_token,
+        actor_id=actor_id,
+        roles=roles,
         request_id=request_id,
     )
+    normalized_key = _server_idempotency_key(request.id)
     existing = session.scalar(
-        select(ProvisioningAttemptRecord)
-        .where(ProvisioningAttemptRecord.request_id == request_id)
-        .with_for_update()
+        select(ProvisioningAttemptRecord).where(
+            ProvisioningAttemptRecord.request_id == request_id
+        )
     )
     key_owner = session.scalar(
         select(ProvisioningAttemptRecord).where(
@@ -256,7 +306,7 @@ def provision_access(
             return existing
         try:
             reconciled = ProvisioningAttemptRecord(
-                workspace_id=workspace.id,
+                workspace_id=request.workspace_id,
                 request_id=request.id,
                 idempotency_key=normalized_key,
                 provisioning_status="succeeded",
@@ -267,7 +317,7 @@ def provision_access(
             session.flush()
             session.add(
                 AuditEventRecord(
-                    workspace_id=workspace.id,
+                    workspace_id=request.workspace_id,
                     request_id=request.id,
                     actor_type="system",
                     actor_id="accesspilot",
@@ -294,7 +344,7 @@ def provision_access(
     try:
         if existing is None:
             attempt = ProvisioningAttemptRecord(
-                workspace_id=workspace.id,
+                workspace_id=request.workspace_id,
                 request_id=request.id,
                 idempotency_key=normalized_key,
                 provisioning_status="in_progress",
@@ -313,10 +363,10 @@ def provision_access(
         session.flush()
         session.add(
             AuditEventRecord(
-                workspace_id=workspace.id,
+                workspace_id=request.workspace_id,
                 request_id=request.id,
-                actor_type="system",
-                actor_id="accesspilot",
+                actor_type="employee",
+                actor_id=actor_id,
                 event_type=event_type,
                 details={
                     "provisioning_attempt_id": str(attempt.id),
@@ -332,11 +382,10 @@ def provision_access(
         raise
 
     try:
-        active_fault_mode = workspace.fault_mode if fault_mode is _UNSET_FAULT_MODE else fault_mode
         outcome = iam.provision(
             request_id=request.id,
             idempotency_key=normalized_key,
-            fault_mode=active_fault_mode if isinstance(active_fault_mode, str) else None,
+            fault_mode=fault_mode,
         )
     except Exception:
         outcome = IamOutcome(status="unknown", message="IAM 响应无法确认")
@@ -351,15 +400,17 @@ def provision_access(
 def recover_provisioning(
     session: Session,
     *,
-    workspace_token: str,
     request_id: UUID,
+    actor_id: str,
+    roles: tuple[str, ...] | list[str] | set[str],
     iam: IamProvisioner,
 ) -> ProvisioningAttemptRecord:
     """按原幂等键查询未知操作；已成功时直接返回且不重复授权。"""
 
-    _, request, _ = _load_context(
+    request, _ = _load_context(
         session,
-        workspace_token=workspace_token,
+        actor_id=actor_id,
+        roles=roles,
         request_id=request_id,
     )
     attempt = session.scalar(
@@ -372,10 +423,10 @@ def recover_provisioning(
     if attempt.provisioning_status == "succeeded":
         return attempt
 
-    # 查询外部状态前释放数据库行锁，避免网络等待阻塞其他只读请求。
+    # 保持 request/attempt 行锁直到外部查询和结果落库完成：并发恢复
+    # 必须在首次恢复提交后重读状态，不能重复查询 IAM。
     attempt_id = attempt.id
     idempotency_key = attempt.idempotency_key
-    session.commit()
     try:
         outcome = iam.query_status(idempotency_key=idempotency_key)
     except Exception:

@@ -26,6 +26,7 @@ EvaluationCategory = Literal[
     "case_resource_acl",
     "decision_packet",
     "ordered_approval",
+    "admin_provisioning",
 ]
 JsonScalar: TypeAlias = str | int | float | bool | None
 TerminalEvent = Literal[
@@ -276,6 +277,16 @@ T22_SCENARIOS: tuple[EvaluationScenario, ...] = (
 )
 
 
+T23_SCENARIOS: tuple[EvaluationScenario, ...] = (
+    _scenario(
+        "T23-01",
+        "admin_provisioning",
+        5,
+        "apps/api/tests/api/test_t23_admin_provisioning.py",
+    ),
+)
+
+
 # PRODUCT_SCENARIOS is current compatible/new proof.  The full T17_SCENARIOS
 # tuple above is historical v1.1 metadata and therefore has a different
 # denominator; T19 evidence is counted only in T19_SCENARIOS.
@@ -286,6 +297,7 @@ PRODUCT_SCENARIOS: tuple[EvaluationScenario, ...] = (
     + T20_SCENARIOS
     + T21_SCENARIOS
     + T22_SCENARIOS
+    + T23_SCENARIOS
 )
 
 

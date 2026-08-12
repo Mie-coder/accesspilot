@@ -5,8 +5,11 @@ import {
   createDecisionPacket,
   decideApproval,
   parseSseEvents,
+  provisionRequest,
   readAccessibleRequests,
   readMyRequests,
+  readProvisioningTasks,
+  recoverProvisioning,
 } from './api'
 
 afterEach(() => {
@@ -129,5 +132,31 @@ describe('approval decision write boundary', () => {
         }),
       }),
     )
+  })
+})
+
+describe('T23 provisioning write boundary', () => {
+  it('reads server-derived tasks and posts provision/recover without a client body', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === '/api/provisioning-tasks') {
+        return Response.json({ actor: { employee_id: 'EMP-004', name: '吴越', roles: ['permissions_admin'] }, items: [] })
+      }
+      return Response.json({ provisioning_status: 'succeeded' })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(readProvisioningTasks()).resolves.toMatchObject({ items: [] })
+    await provisionRequest('request/1')
+    await recoverProvisioning('request/1')
+
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      '/api/provisioning-tasks',
+      '/api/requests/request%2F1/provision',
+      '/api/requests/request%2F1/provision/recover',
+    ])
+    for (const call of fetchMock.mock.calls.slice(1)) {
+      expect(call[1]).toEqual(expect.objectContaining({ method: 'POST', credentials: 'include' }))
+      expect(call[1]?.body).toBeUndefined()
+    }
   })
 })

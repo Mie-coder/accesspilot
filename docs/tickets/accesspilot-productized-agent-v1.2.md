@@ -1,6 +1,6 @@
-# AccessPilot v1.2「上下文意图与可信多角色闭环」Tickets（T18–T22 已完成）
+# AccessPilot v1.2「上下文意图与可信多角色闭环」Tickets（T18–T23 已完成）
 
-**状态：** 用户已确认按 T18 → T25 串行实施；T18–T22 已独立验收，T23–T25 待开始；不推送、合并或部署
+**状态：** 用户已确认按 T18 → T25 串行实施；T18–T23 已独立验收，T24–T25 待开始；不推送、合并或部署
 **更新时间：** 2026-08-12
 **继承基线：** v1.1，HEAD `c683d84`，T01–T17 已完成
 **产品说明书：** `docs/product/accesspilot-product-function-book-v1.2.md`
@@ -168,7 +168,7 @@
 
 ## T23 — 权限管理员显式开通与申请人重读
 
-**状态：** 待开始
+**状态：** 已完成并独立验收
 
 **目标：** 复用 v1.1 已有幂等能力，但把开通职责收紧到 EMP-004，并让申请人跨登录看到唯一 Grant。
 
@@ -185,6 +185,13 @@
 **依赖：** T22。
 
 **主要风险：** v1.1 开通主要依赖 Workspace 且接受客户端幂等键，若只改按钮不改服务端仍可越权。
+
+### T23 验收记录（2026-08-12）
+
+- 只有 EMP-004 `permissions_admin` 可对 approved Case 开通；waiting/无关系/未批准资源统一 404，有关系但无职责返回 403。
+- 服务端生成 `accesspilot:{request_id}` 稳定幂等键；repeat/concurrent/unknown recover 复用原 Attempt，最多一次 IAM 副作用与一条 Grant。
+- 后端联合 31/31、前端 83/83；T23 固定评测 5 项，当前产品 registry 98 项。v1.2 明确不包含到期回收/撤销。
+- 独立 verifier 结论 PASS（P0=0、P1=0）；未进入 T24。
 
 ## T24 — 四浏览器闭环、攻击矩阵与 Product Verification
 

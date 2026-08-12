@@ -16,10 +16,9 @@ from accesspilot.db.models import (
 )
 from accesspilot.db.seed import seed_catalog
 from accesspilot.provisioning import (
-    ApprovalRequiredError,
     IamOutcome,
-    IdempotencyConflictError,
     ProvisioningAttemptNotFoundError,
+    ProvisioningNotFoundError,
     provision_access,
     recover_provisioning,
 )
@@ -105,7 +104,7 @@ def event_types(session: Session, request_id: UUID) -> list[str]:
 def test_unapproved_request_cannot_start_provisioning(
     database_session: Session,
 ) -> None:
-    token, request_id = create_request(
+    _token, request_id = create_request(
         database_session,
         approval_status="pending_manager",
     )
@@ -113,12 +112,12 @@ def test_unapproved_request_cannot_start_provisioning(
         provision_outcomes=[IamOutcome(status="succeeded")]
     )
 
-    with pytest.raises(ApprovalRequiredError):
+    with pytest.raises(ProvisioningNotFoundError):
         provision_access(
             database_session,
-            workspace_token=token,
             request_id=request_id,
-            idempotency_key="grant-not-approved",
+            actor_id="EMP-004",
+            roles=("permissions_admin",),
             iam=client,
         )
 
@@ -130,24 +129,24 @@ def test_unapproved_request_cannot_start_provisioning(
 def test_success_is_idempotent_and_creates_exactly_one_grant(
     database_session: Session,
 ) -> None:
-    token, request_id = create_request(database_session)
-    idempotency_key = f"grant-success-{uuid4()}"
+    _token, request_id = create_request(database_session)
+    idempotency_key = f"accesspilot:{request_id}"
     client = SequencedIamProvisioner(
         provision_outcomes=[IamOutcome(status="succeeded")]
     )
 
     first = provision_access(
         database_session,
-        workspace_token=token,
         request_id=request_id,
-        idempotency_key=idempotency_key,
+        actor_id="EMP-004",
+        roles=("permissions_admin",),
         iam=client,
     )
     second = provision_access(
         database_session,
-        workspace_token=token,
         request_id=request_id,
-        idempotency_key=idempotency_key,
+        actor_id="EMP-004",
+        roles=("permissions_admin",),
         iam=client,
     )
 
@@ -159,21 +158,12 @@ def test_success_is_idempotent_and_creates_exactly_one_grant(
     assert "provisioning.started" in event_types(database_session, request_id)
     assert "provisioning.succeeded" in event_types(database_session, request_id)
 
-    with pytest.raises(IdempotencyConflictError):
-        provision_access(
-            database_session,
-            workspace_token=token,
-            request_id=request_id,
-            idempotency_key=f"different-key-{uuid4()}",
-            iam=client,
-        )
-
 
 def test_timeout_stays_unknown_until_query_recovers_same_operation(
     database_session: Session,
 ) -> None:
-    token, request_id = create_request(database_session)
-    idempotency_key = f"grant-timeout-{uuid4()}"
+    _token, request_id = create_request(database_session)
+    idempotency_key = f"accesspilot:{request_id}"
     client = SequencedIamProvisioner(
         provision_outcomes=[IamOutcome(status="unknown", message="响应超时")],
         query_outcomes=[IamOutcome(status="succeeded")],
@@ -181,16 +171,16 @@ def test_timeout_stays_unknown_until_query_recovers_same_operation(
 
     unknown = provision_access(
         database_session,
-        workspace_token=token,
         request_id=request_id,
-        idempotency_key=idempotency_key,
+        actor_id="EMP-004",
+        roles=("permissions_admin",),
         iam=client,
     )
     replay = provision_access(
         database_session,
-        workspace_token=token,
         request_id=request_id,
-        idempotency_key=idempotency_key,
+        actor_id="EMP-004",
+        roles=("permissions_admin",),
         iam=client,
     )
 
@@ -201,14 +191,16 @@ def test_timeout_stays_unknown_until_query_recovers_same_operation(
 
     recovered = recover_provisioning(
         database_session,
-        workspace_token=token,
         request_id=request_id,
+        actor_id="EMP-004",
+        roles=("permissions_admin",),
         iam=client,
     )
     recovered_again = recover_provisioning(
         database_session,
-        workspace_token=token,
         request_id=request_id,
+        actor_id="EMP-004",
+        roles=("permissions_admin",),
         iam=client,
     )
 
@@ -223,8 +215,8 @@ def test_timeout_stays_unknown_until_query_recovers_same_operation(
 def test_failed_attempt_retries_with_same_key_and_can_recover(
     database_session: Session,
 ) -> None:
-    token, request_id = create_request(database_session)
-    idempotency_key = f"grant-retry-{uuid4()}"
+    _token, request_id = create_request(database_session)
+    idempotency_key = f"accesspilot:{request_id}"
     client = SequencedIamProvisioner(
         provision_outcomes=[
             IamOutcome(status="failed", message="IAM 暂时失败"),
@@ -234,17 +226,17 @@ def test_failed_attempt_retries_with_same_key_and_can_recover(
 
     failed = provision_access(
         database_session,
-        workspace_token=token,
         request_id=request_id,
-        idempotency_key=idempotency_key,
+        actor_id="EMP-004",
+        roles=("permissions_admin",),
         iam=client,
     )
     assert failed.provisioning_status == "failed"
     recovered = provision_access(
         database_session,
-        workspace_token=token,
         request_id=request_id,
-        idempotency_key=idempotency_key,
+        actor_id="EMP-004",
+        roles=("permissions_admin",),
         iam=client,
     )
 
@@ -256,14 +248,15 @@ def test_failed_attempt_retries_with_same_key_and_can_recover(
 
 
 def test_recover_requires_an_existing_attempt(database_session: Session) -> None:
-    token, request_id = create_request(database_session)
+    _token, request_id = create_request(database_session)
     client = SequencedIamProvisioner(provision_outcomes=[])
 
     with pytest.raises(ProvisioningAttemptNotFoundError):
         recover_provisioning(
             database_session,
-            workspace_token=token,
             request_id=request_id,
+            actor_id="EMP-004",
+            roles=("permissions_admin",),
             iam=client,
         )
 
@@ -271,8 +264,8 @@ def test_recover_requires_an_existing_attempt(database_session: Session) -> None
 def test_existing_legacy_grant_is_reconciled_without_calling_iam(
     database_session: Session,
 ) -> None:
-    token, request_id = create_request(database_session)
-    key = f"legacy-grant-{uuid4()}"
+    _token, request_id = create_request(database_session)
+    key = f"accesspilot:{request_id}"
     request = database_session.get(AccessRequestRecord, request_id)
     assert request is not None
     now = datetime.now(UTC)
@@ -292,9 +285,9 @@ def test_existing_legacy_grant_is_reconciled_without_calling_iam(
 
     attempt = provision_access(
         database_session,
-        workspace_token=token,
         request_id=request_id,
-        idempotency_key=key,
+        actor_id="EMP-004",
+        roles=("permissions_admin",),
         iam=client,
     )
 

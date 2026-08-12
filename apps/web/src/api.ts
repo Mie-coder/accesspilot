@@ -14,6 +14,7 @@ import type {
   EntitlementResolution,
   PolicyAnswer,
   PolicyCatalogItem,
+  ProvisioningTaskList,
 } from './types'
 
 export interface AuthSessionPayload {
@@ -523,6 +524,11 @@ export async function readAccessibleRequests(signal?: AbortSignal): Promise<Case
   return requestJson<CaseList>('/api/requests/accessible', { signal })
 }
 
+/** Read only actions derived by the server for the fixed permissions administrator. */
+export async function readProvisioningTasks(signal?: AbortSignal): Promise<ProvisioningTaskList> {
+  return requestJson<ProvisioningTaskList>('/api/provisioning-tasks', { signal })
+}
+
 export async function submitRequest(signal?: AbortSignal): Promise<RequestResult> {
   return requestJson<RequestResult>('/api/requests', { method: 'POST', signal })
 }
@@ -571,8 +577,6 @@ export async function decideApproval(
 export async function provisionRequest(requestId: string): Promise<void> {
   await requestJson(`/api/requests/${encodeURIComponent(requestId)}/provision`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ idempotency_key: `accesspilot-${requestId}` }),
   })
 }
 

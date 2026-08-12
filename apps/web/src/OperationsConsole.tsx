@@ -14,12 +14,15 @@ import { useCallback, useEffect, useState } from 'react'
 
 import {
   decideApproval,
+  provisionRequest,
   readAccessibleRequests,
   readApprovalInbox,
+  readProvisioningTasks,
   readRequestDetail,
+  recoverProvisioning,
 } from './api'
 import { DecisionPacketPanel } from './DecisionPacketPanel'
-import type { ApprovalInbox, CaseList, RequestDetail } from './types'
+import type { ApprovalInbox, CaseList, ProvisioningTaskList, RequestDetail } from './types'
 
 type ApprovalDecision = 'approve' | 'reject'
 
@@ -28,10 +31,13 @@ interface OperationsViewProps {
   cases: CaseList | null
   detail: RequestDetail | null
   approvalInbox: ApprovalInbox | null
+  provisioningTasks?: ProvisioningTaskList | null
   isLoading: boolean
   isDeciding: boolean
+  isProvisioning?: boolean
   error: string | null
   decisionError: string | null
+  provisioningError?: string | null
   onRefresh: () => void
   onSelectRequest: (requestId: string) => void
   onDecide: (
@@ -40,6 +46,8 @@ interface OperationsViewProps {
     decision: ApprovalDecision,
     comment: string | null,
   ) => void
+  onProvision?: (requestId: string) => void
+  onRecover?: (requestId: string) => void
 }
 
 const statusLabels: Record<string, string> = {
@@ -214,15 +222,25 @@ export function OperationsView({
   cases,
   detail,
   approvalInbox,
+  provisioningTasks = null,
   isLoading,
   isDeciding,
+  isProvisioning = false,
   error,
   decisionError,
+  provisioningError = null,
   onRefresh,
   onSelectRequest,
   onDecide,
+  onProvision,
+  onRecover,
 }: OperationsViewProps) {
   const decisionTarget = currentDecisionTarget(detail, approvalInbox)
+  const provisioningTask = roleLabel === '权限管理员'
+    && provisioningTasks?.actor.employee_id === 'EMP-004'
+    && provisioningTasks.actor.roles.includes('permissions_admin')
+    ? provisioningTasks.items.find((item) => item.request_id === detail?.request.request_id) ?? null
+    : null
   if (isLoading) return <LoadingState />
   if (error && detail === null) return <ErrorState message={error} onRetry={onRefresh} />
 
@@ -403,6 +421,51 @@ export function OperationsView({
               <span>尝试 {detail.provisioning.attempt_count} 次</span>
             </div>
 
+            <p className="timeline-note">
+              边界：v1.2 不包含到期回收或撤销；页面只显示已持久化开通与 Grant 事实。
+            </p>
+
+            {provisioningError ? (
+              <div className="decision-error" role="alert">
+                <AlertCircle size={15} />
+                <span>{safeErrorMessage(provisioningError)}</span>
+              </div>
+            ) : null}
+
+            {provisioningTask?.can_provision && onProvision ? (
+              <div className="action-card" aria-label="权限开通操作">
+                <ShieldCheck size={17} />
+                <div>
+                  <strong>已通过两级审批</strong>
+                  <p>服务端生成稳定幂等键，客户端不提供身份或幂等字段。</p>
+                </div>
+                <button
+                  type="button"
+                  disabled={isProvisioning}
+                  onClick={() => onProvision(detail.request.request_id)}
+                >
+                  {isProvisioning ? <><LoaderCircle className="spin" size={15} />正在执行开通…</> : '执行权限开通'}
+                </button>
+              </div>
+            ) : null}
+
+            {provisioningTask?.can_recover && onRecover ? (
+              <div className="action-card" aria-label="开通结果恢复操作">
+                <RefreshCw size={17} />
+                <div>
+                  <strong>IAM 结果未知</strong>
+                  <p>查询原操作，不创建新幂等键或重复 Grant。</p>
+                </div>
+                <button
+                  type="button"
+                  disabled={isProvisioning}
+                  onClick={() => onRecover(detail.request.request_id)}
+                >
+                  {isProvisioning ? <><LoaderCircle className="spin" size={15} />正在查询原操作…</> : '查询原 IAM 操作'}
+                </button>
+              </div>
+            ) : null}
+
           </section>
 
           <section className="detail-section" aria-labelledby="audit-title">
@@ -436,36 +499,43 @@ export function OperationsConsole({
   const [cases, setCases] = useState<CaseList | null>(null)
   const [detail, setDetail] = useState<RequestDetail | null>(null)
   const [approvalInbox, setApprovalInbox] = useState<ApprovalInbox | null>(null)
+  const [provisioningTasks, setProvisioningTasks] = useState<ProvisioningTaskList | null>(null)
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(requestId)
   const [isLoading, setIsLoading] = useState(true)
   const [isDeciding, setIsDeciding] = useState(false)
+  const [isProvisioning, setIsProvisioning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [decisionError, setDecisionError] = useState<string | null>(null)
+  const [provisioningError, setProvisioningError] = useState<string | null>(null)
   const canDecide = roleLabel === '直属经理' || roleLabel === '数据负责人'
+  const canProvision = roleLabel === '权限管理员'
 
   const fetchFacts = useCallback(async () => {
-    const [nextCases, nextApprovalInbox] = await Promise.all([
+    const [nextCases, nextApprovalInbox, nextProvisioningTasks] = await Promise.all([
       readAccessibleRequests(),
       canDecide ? readApprovalInbox() : Promise.resolve(null),
+      canProvision ? readProvisioningTasks() : Promise.resolve(null),
     ])
     const preferredRequestId = selectedRequestId ?? requestId
     const nextRequestId = nextCases.items.some((item) => item.request_id === preferredRequestId)
       ? preferredRequestId
       : nextCases.items[0]?.request_id ?? null
     const nextDetail = nextRequestId ? await readRequestDetail(nextRequestId) : null
-    return { nextCases, nextDetail, nextApprovalInbox }
-  }, [canDecide, requestId, selectedRequestId])
+    return { nextCases, nextDetail, nextApprovalInbox, nextProvisioningTasks }
+  }, [canDecide, canProvision, requestId, selectedRequestId])
 
   const applyFacts = useCallback((facts: Awaited<ReturnType<typeof fetchFacts>>) => {
     setCases(facts.nextCases)
     setDetail(facts.nextDetail)
     setApprovalInbox(facts.nextApprovalInbox)
+    setProvisioningTasks(facts.nextProvisioningTasks)
   }, [])
 
   const refresh = useCallback(async () => {
     setIsLoading(true)
     setError(null)
     setDecisionError(null)
+    setProvisioningError(null)
     try {
       const facts = await fetchFacts()
       applyFacts(facts)
@@ -473,6 +543,31 @@ export function OperationsConsole({
       setError(loadError instanceof Error ? loadError.message : '审批事实读取失败')
     } finally {
       setIsLoading(false)
+    }
+  }, [applyFacts, fetchFacts])
+
+  const handleProvisioning = useCallback(async (
+    requestIdToAct: string,
+    action: 'provision' | 'recover',
+  ) => {
+    setIsProvisioning(true)
+    setProvisioningError(null)
+    try {
+      if (action === 'provision') await provisionRequest(requestIdToAct)
+      else await recoverProvisioning(requestIdToAct)
+    } catch (provisionFailure) {
+      setProvisioningError(
+        provisionFailure instanceof Error ? provisionFailure.message : '开通操作失败，请重试。',
+      )
+      setIsProvisioning(false)
+      return
+    }
+    try {
+      applyFacts(await fetchFacts())
+    } catch {
+      setProvisioningError('开通操作已提交，但最新事实刷新失败；请手动刷新。')
+    } finally {
+      setIsProvisioning(false)
     }
   }, [applyFacts, fetchFacts])
 
@@ -512,13 +607,18 @@ export function OperationsConsole({
       cases={cases}
       detail={detail}
       approvalInbox={approvalInbox}
+      provisioningTasks={provisioningTasks}
       isLoading={isLoading}
       isDeciding={isDeciding}
+      isProvisioning={isProvisioning}
       error={error}
       decisionError={decisionError}
+      provisioningError={provisioningError}
       onRefresh={() => void refresh()}
       onSelectRequest={setSelectedRequestId}
       onDecide={(...args) => void handleDecision(...args)}
+      onProvision={(nextRequestId) => void handleProvisioning(nextRequestId, 'provision')}
+      onRecover={(nextRequestId) => void handleProvisioning(nextRequestId, 'recover')}
     />
   )
 }
