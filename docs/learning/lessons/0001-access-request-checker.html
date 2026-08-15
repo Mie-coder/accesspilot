@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="AccessPilot 第一课：权限申请检查器">
+  <title>第一课：让权限申请数据跑起来</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">AccessPilot · Python Reset</p>
+  <h1>先让三个业务值跑起来</h1>
+  <p class="meta">目标：十分钟内看懂变量、值和 <code>None</code>，并在终端看到自己的程序输出。</p>
+
+  <h2>为什么从这里重新开始</h2>
+  <p>AccessPilot 最终会使用 DeepSeek 和 LangGraph，但所有复杂流程都建立在最简单的事实之上：程序需要知道申请什么、申请几天、为什么申请。第一课只保存并显示这三个值。</p>
+
+  <h2>今天唯一的新语法</h2>
+  <pre><code>duration_days = 14</code></pre>
+  <p><code>=</code> 不是数学等式，而是“把右边的值交给左边的名字”。Python 官方教程也从这种变量赋值开始。</p>
+
+  <div class="card">
+    <strong>检索练习</strong>
+    <p>如果用户没有说申请什么权限，<code>entitlement_id</code> 应该保存什么？先在脑中回答，再展开。</p>
+    <details><summary>查看答案</summary><p><code>None</code>，因为程序不能替用户猜测权限。</p></details>
+  </div>
+
+  <h2>继续学习</h2>
+  <p>随手参考：<a href="../reference/python-basics.html">Python 最小语法参考</a>。</p>
+  <p>主要来源：<a href="https://docs.python.org/3/tutorial/introduction.html">Python 官方教程：入门介绍</a>。</p>
+
+  <footer>任何一行看不懂，都可以直接问教学 Agent。问题越具体，下一步越容易缩小。</footer>
+</main>
+</body>
+</html>

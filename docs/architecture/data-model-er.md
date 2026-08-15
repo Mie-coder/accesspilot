@@ -1,0 +1,188 @@
+# AccessPilot 数据库 ER 图
+
+## 如何阅读
+
+ER 图用来表示“数据库有哪些表、每张表保存什么、表之间如何关联”。
+
+- `PK`：主键，唯一识别一条记录。
+- `FK`：外键，指向另一张表的记录。
+- `UK`：唯一约束，防止重复数据。
+- `||--o{`：一对零个或多个。
+- `||--o|`：一对零个或一个。
+
+## 可放大高清图片
+
+> 点击下图打开 `6000 × 7000` 原图，再使用浏览器放大查看字段。
+
+[![AccessPilot 数据库 ER 图](accesspilot-data-model-er.png)](accesspilot-data-model-er.png)
+
+## 可编辑 Mermaid 源图
+
+下面保留同一张图的 Mermaid 源码，数据库表发生变化时可以继续维护。
+
+```mermaid
+erDiagram
+    WORKSPACES {
+        uuid id PK "工作区主键"
+        string token_hash UK "Cookie Token 哈希"
+        jsonb draft "未提交申请草稿"
+        string fault_mode "故障注入模式"
+        int model_call_limit "模型调用上限"
+        int model_calls_used "已用模型调用数"
+        timestamptz created_at "创建时间"
+    }
+
+    EMPLOYEES {
+        string employee_id PK "虚构员工编号"
+        string name "姓名"
+        string department "部门"
+        string manager_id FK "直属上级"
+        array roles "角色列表"
+    }
+
+    SYSTEMS {
+        string code PK "系统编码"
+        string name UK "系统名称"
+    }
+
+    ENTITLEMENTS {
+        string code PK "权限编码"
+        string system_code FK "所属系统"
+        string name "权限名称"
+        string risk_level "风险等级"
+        string approval_policy "审批策略"
+        string owner_id FK "数据所有者"
+        boolean self_service_allowed "是否允许自助申请"
+        array eligible_departments "允许部门"
+        array eligible_roles "允许角色"
+        int max_duration_days "最长天数"
+    }
+
+    ACCESS_REQUESTS {
+        uuid id PK "正式申请主键"
+        uuid workspace_id FK "所属工作区"
+        string requester_id FK "申请人"
+        string entitlement_code FK "目标权限"
+        int duration_days "期限天数"
+        text justification "申请理由"
+        string request_status "申请状态"
+        timestamptz confirmed_at "用户确认时间"
+        timestamptz created_at "记录创建时间"
+    }
+
+    APPROVAL_CASES {
+        uuid id PK "审批流程主键"
+        uuid workspace_id FK "所属工作区"
+        uuid request_id FK,UK "一份申请最多一份审批流"
+        string approval_status "整体审批状态"
+        timestamptz created_at "创建时间"
+    }
+
+    APPROVAL_STEPS {
+        uuid id PK "审批节点主键"
+        uuid workspace_id FK "所属工作区"
+        uuid approval_case_id FK "所属审批流"
+        int step_order "执行顺序"
+        string approver_id FK "明确审批人"
+        string approver_role "审批角色"
+        string step_status "节点状态"
+        text comment "审批意见"
+        timestamptz decided_at "决策时间"
+        timestamptz created_at "创建时间"
+    }
+
+    ACCESS_GRANTS {
+        uuid id PK "实际授权主键"
+        uuid workspace_id FK "所属工作区"
+        uuid request_id FK,UK "一份申请最多一条授权"
+        string idempotency_key UK "幂等键"
+        timestamptz starts_at "生效时间"
+        timestamptz expires_at "失效时间"
+        timestamptz created_at "创建时间"
+    }
+
+    PROVISIONING_ATTEMPTS {
+        uuid id PK "开通尝试主键"
+        uuid workspace_id FK "所属工作区"
+        uuid request_id FK,UK "一份申请一个稳定操作"
+        string idempotency_key UK "幂等键"
+        string provisioning_status "开通状态"
+        int attempt_count "尝试次数"
+        text last_error "最后错误或未知原因"
+        timestamptz created_at "创建时间"
+        timestamptz updated_at "更新时间"
+    }
+
+    AUDIT_EVENTS {
+        uuid id PK "审计事件主键"
+        uuid workspace_id FK "所属工作区"
+        uuid request_id FK "可选关联申请"
+        string actor_type "employee agent system"
+        string actor_id "操作者标识"
+        string event_type "事件类型"
+        jsonb details "结构化详情"
+        timestamptz created_at "发生时间"
+    }
+
+    WORKSPACE_EVENTS {
+        bigint id PK "SSE Last-Event-ID"
+        uuid workspace_id FK "所属工作区"
+        string event_type "安全事件白名单类型"
+        jsonb payload "前端可见结构化内容"
+        timestamptz created_at "发生时间"
+    }
+
+    POLICY_CHUNKS {
+        uuid id PK "政策分块主键"
+        string policy_code "政策编号"
+        string title "政策标题"
+        int chunk_index "分块顺序"
+        text content "政策正文"
+        jsonb metadata "来源元数据"
+        vector_512 embedding "512 维向量，允许为空"
+        timestamptz created_at "创建时间"
+    }
+
+    WORKSPACES ||--o{ ACCESS_REQUESTS : "隔离申请"
+    WORKSPACES ||--o{ APPROVAL_CASES : "隔离审批流"
+    WORKSPACES ||--o{ APPROVAL_STEPS : "隔离审批节点"
+    WORKSPACES ||--o{ ACCESS_GRANTS : "隔离授权"
+    WORKSPACES ||--o{ PROVISIONING_ATTEMPTS : "隔离开通操作"
+    WORKSPACES ||--o{ AUDIT_EVENTS : "隔离审计事件"
+    WORKSPACES ||--o{ WORKSPACE_EVENTS : "隔离安全回放事件"
+
+    EMPLOYEES o|--o{ EMPLOYEES : "管理下属"
+    EMPLOYEES ||--o{ ACCESS_REQUESTS : "发起申请"
+    EMPLOYEES ||--o{ APPROVAL_STEPS : "执行审批"
+    EMPLOYEES o|--o{ ENTITLEMENTS : "负责数据"
+
+    SYSTEMS ||--o{ ENTITLEMENTS : "包含权限"
+    ENTITLEMENTS ||--o{ ACCESS_REQUESTS : "被申请"
+    ACCESS_REQUESTS ||--o| APPROVAL_CASES : "创建审批流"
+    APPROVAL_CASES ||--|{ APPROVAL_STEPS : "包含节点"
+    ACCESS_REQUESTS ||--o| ACCESS_GRANTS : "开通后产生"
+    ACCESS_REQUESTS ||--o| PROVISIONING_ATTEMPTS : "记录开通尝试"
+    ACCESS_REQUESTS o|--o{ AUDIT_EVENTS : "记录时间线"
+```
+
+`POLICY_CHUNKS` 故意不连接业务表：它是全局虚构政策知识库，风险审查 Agent 通过向量检索读取它，不用外键绑定某一份申请。
+
+## 一笔申请如何穿过这些表
+
+1. Agent 收集信息时，可修改的草稿保存在 `WORKSPACES.draft`。
+2. 用户确认后，才生成不可随意修改的 `ACCESS_REQUESTS`。
+3. 提交申请时创建一个 `APPROVAL_CASES`，再按策略创建一个或多个 `APPROVAL_STEPS`。
+4. 所有必需审批节点通过后，IAM 模拟器尝试开通权限。
+5. IAM 调用先写 `PROVISIONING_ATTEMPTS`；只有确认成功才创建 `ACCESS_GRANTS`。超时保持 `unknown` 并按原幂等键查询，不伪造授权记录。
+6. 前端只从 `WORKSPACE_EVENTS` 读取白名单事件；模型隐藏推理、请求头和密钥不得进入该表。
+
+## 必须记住的数据库约束
+
+- `APPROVAL_CASES.request_id` 唯一：一份申请不能出现两条审批流。
+- `(approval_case_id, step_order)` 唯一：同一审批流不能出现两个“第 1 步”。
+- `ACCESS_GRANTS.request_id` 和 `idempotency_key` 唯一：重试不能重复授权。
+- `PROVISIONING_ATTEMPTS.request_id` 和 `idempotency_key` 唯一：失败、超时与恢复都复用同一操作。
+- `WORKSPACE_EVENTS.id` 单调递增：SSE 重连用 `Last-Event-ID` 只补发当前 Workspace 的遗漏事件。
+- `WORKSPACES.model_calls_used <= model_call_limit`：额度耗尽后禁止新模型调用，但允许只读回放。
+- 业务子表同时校验 `workspace_id` 和父记录 ID：Workspace A 不能引用 Workspace B 的申请。
+- `POLICY_CHUNKS.embedding` 允许为空，但检索时必须报可恢复错误，不得编造政策结论。

@@ -1,0 +1,90 @@
+name: accesspilot
+
+x-logging: &default-logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-resources: &default-resources
+  limits:
+    cpus: "1.0"
+    memory: 512M
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-accesspilot}
+      POSTGRES_USER: ${POSTGRES_USER:-accesspilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env before starting Compose}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${ACCESSPILOT_DB_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources: *default-resources
+    logging: *default-logging
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    env_file:
+      - .env
+    environment:
+      # 显式连接串允许对任意数据库密码做 URL 编码，避免 @/: 被误解析。
+      ACCESSPILOT_DATABASE_URL: ${ACCESSPILOT_COMPOSE_DATABASE_URL:?Set an URL-encoded ACCESSPILOT_COMPOSE_DATABASE_URL in .env}
+      # 浏览器访问 Compose 入口时 Origin 必须精确匹配，不能混用 localhost。
+      ACCESSPILOT_WEB_ORIGIN: ${ACCESSPILOT_COMPOSE_WEB_ORIGIN:-http://127.0.0.1:${ACCESSPILOT_WEB_PORT:-8080}}
+      # 本地 Compose 由 HTTP Nginx 提供服务；生产 TLS 反代时通过
+      # ACCESSPILOT_COMPOSE_WEB_ORIGIN 覆盖为真实 HTTPS Origin。
+      ACCESSPILOT_AUTH_COOKIE_SECURE: ${ACCESSPILOT_AUTH_COOKIE_SECURE:-false}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources: *default-resources
+    logging: *default-logging
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${ACCESSPILOT_WEB_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources: *default-resources
+    logging: *default-logging
+
+volumes:
+  postgres-data:

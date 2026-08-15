@@ -1,0 +1,223 @@
+from collections.abc import Iterator
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from accesspilot.agent.embeddings import DeterministicEmbeddingModel
+from accesspilot.config import Settings
+from accesspilot.db.models import PolicyChunkRecord
+from accesspilot.db.seed import seed_catalog
+from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
+from accesspilot.main import create_app
+from accesspilot.rag.policies import index_policy_embeddings
+from accesspilot.risk.review import (
+    DeterministicRiskReviewModel,
+    RiskReview,
+    RiskReviewContext,
+)
+from support.auth import login_as
+
+
+class CountingRiskReviewModel:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def review(self, context: RiskReviewContext) -> RiskReview:
+        self.calls += 1
+        return DeterministicRiskReviewModel().review(context)
+
+
+@pytest.fixture
+def approval_client(
+    database_session_factory: sessionmaker[Session],
+) -> Iterator[TestClient]:
+    embedding_model = DeterministicEmbeddingModel()
+    with database_session_factory() as session:
+        seed_catalog(session)
+        index_policy_embeddings(session, embedding_model)
+    client = TestClient(
+        create_app(
+            store=SqlAlchemyWorkspaceStore(database_session_factory),
+            settings=Settings(demo_mode_enabled=True, deepseek_api_key=None),
+            session_factory=database_session_factory,
+            embedding_model=embedding_model,
+            risk_review_model=DeterministicRiskReviewModel(),
+        )
+    )
+    login_as(client)
+    yield client
+    # 测试库恢复为“待向量化”，避免影响只验证种子行为的旧测试。
+    with database_session_factory() as session:
+        for chunk in session.scalars(select(PolicyChunkRecord)).all():
+            chunk.embedding = None
+        session.commit()
+
+
+def submit_request(client: TestClient) -> str:
+    assert (
+        client.post(
+            "/api/drafts/preview",
+            json={
+                "entitlement_id": "insighthub.customer_export",
+                "duration_days": 14,
+                "justification": "核验虚构项目运营数据",
+                "confirmed": True,
+            },
+        ).status_code
+        == 200
+    )
+    response = client.post("/api/requests")
+    assert response.status_code == 201
+    return response.json()["request_id"]
+
+
+def start_case(client: TestClient, request_id: str) -> dict[str, object]:
+    packet = client.post(f"/api/requests/{request_id}/decision-packet")
+    assert packet.status_code == 201
+    response = client.post(f"/api/requests/{request_id}/approval-case")
+    assert response.status_code == 201
+    return response.json()
+
+
+def role_client(client: TestClient, employee_id: str) -> TestClient:
+    role = TestClient(client.app)
+    login_as(role, employee_id)
+    return role
+
+
+def test_api_role_sessions_advance_shared_case_in_order(
+    approval_client: TestClient,
+) -> None:
+    request_id = submit_request(approval_client)
+    case = start_case(approval_client, request_id)
+    case_id = case["approval_case_id"]
+    assert case["approval_status"] == "pending_manager"
+    detail = approval_client.get(f"/api/requests/{request_id}").json()
+    manager_step_id = detail["approval"]["steps"][0]["step_id"]
+    owner_step_id = detail["approval"]["steps"][1]["step_id"]
+
+    manager_client = role_client(approval_client, "EMP-002")
+    manager = manager_client.post(
+        f"/api/approval-cases/{case_id}/decisions",
+        json={
+            "approval_step_id": manager_step_id,
+            "decision": "approve",
+            "comment": "经理确认业务需要。",
+        },
+    )
+    assert manager.status_code == 200
+
+    owner_client = role_client(approval_client, "EMP-003")
+    owner = owner_client.post(
+        f"/api/approval-cases/{case_id}/decisions",
+        json={
+            "approval_step_id": owner_step_id,
+            "decision": "approve",
+            "comment": "数据所有者确认最小权限。",
+        },
+    )
+    assert owner.status_code == 200
+
+
+def test_api_role_session_cannot_advance_out_of_order_case(
+    approval_client: TestClient,
+) -> None:
+    request_id = submit_request(approval_client)
+    case = start_case(approval_client, request_id)
+    case_id = case["approval_case_id"]
+    detail = approval_client.get(f"/api/requests/{request_id}").json()
+    manager_step_id = detail["approval"]["steps"][0]["step_id"]
+    owner_step_id = detail["approval"]["steps"][1]["step_id"]
+
+    owner_client = role_client(approval_client, "EMP-003")
+    owner = owner_client.post(
+        f"/api/approval-cases/{case_id}/decisions",
+        json={"approval_step_id": owner_step_id, "decision": "approve"},
+    )
+    assert owner.status_code == 409
+
+    manager_client = role_client(approval_client, "EMP-002")
+    manager = manager_client.post(
+        f"/api/approval-cases/{case_id}/decisions",
+        json={"approval_step_id": manager_step_id, "decision": "approve"},
+    )
+    assert manager.status_code == 200
+
+
+def test_api_rejects_stale_draft_after_workspace_identity_switch(
+    approval_client: TestClient,
+) -> None:
+    preview = approval_client.post(
+        "/api/drafts/preview",
+        json={
+            "entitlement_id": "insighthub.customer_export",
+            "duration_days": 14,
+            "justification": "核验虚构项目运营数据",
+            "confirmed": True,
+        },
+    )
+    assert preview.status_code == 200
+    manager_client = role_client(approval_client, "EMP-002")
+    submitted = manager_client.post("/api/requests")
+
+    assert submitted.status_code == 409
+    assert submitted.json()["detail"] in {
+        "申请草稿尚未完成",
+        "申请草稿尚未明确确认",
+        "申请草稿不完整，无法提交",
+        "当前没有可提交的申请草稿",
+    }
+
+
+def test_decision_body_cannot_supply_an_actor_id(
+    approval_client: TestClient,
+) -> None:
+    request_id = submit_request(approval_client)
+    case_id = start_case(approval_client, request_id)["approval_case_id"]
+    detail = approval_client.get(f"/api/requests/{request_id}").json()
+    step_id = detail["approval"]["steps"][0]["step_id"]
+
+    response = approval_client.post(
+        f"/api/approval-cases/{case_id}/decisions",
+        json={
+            "approval_step_id": step_id,
+            "actor_id": "EMP-002",
+            "decision": "approve",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_api_rejects_cross_workspace_before_calling_risk_model(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    embedding_model = DeterministicEmbeddingModel()
+    review_model = CountingRiskReviewModel()
+    with database_session_factory() as session:
+        seed_catalog(session)
+        index_policy_embeddings(session, embedding_model)
+    app = create_app(
+        store=SqlAlchemyWorkspaceStore(database_session_factory),
+        settings=Settings(demo_mode_enabled=True, deepseek_api_key=None),
+        session_factory=database_session_factory,
+        embedding_model=embedding_model,
+        risk_review_model=review_model,
+    )
+    owner_browser = TestClient(app)
+    other_browser = TestClient(app)
+    login_as(owner_browser)
+    login_as(other_browser, "EMP-002")
+    request_id = submit_request(owner_browser)
+
+    response = other_browser.post(f"/api/requests/{request_id}/approval-case")
+
+    assert response.status_code == 404
+    assert review_model.calls == 0
+
+    with database_session_factory() as session:
+        for chunk in session.scalars(select(PolicyChunkRecord)).all():
+            chunk.embedding = None
+        session.commit()

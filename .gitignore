@@ -1,4 +1,5 @@
 .DS_Store
+.vscode/
 .env
 .env.*
 !.env.example
@@ -13,5 +14,6 @@ coverage/
 .superpowers/
 *.pyc
 *.log
+*.tsbuildinfo
+.playwright-cli/
 postgres-data/
-

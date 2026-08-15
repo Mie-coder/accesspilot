@@ -1,0 +1,47 @@
+"""应用配置的默认值测试。"""
+
+from accesspilot.config import Settings
+
+
+def test_database_url_defaults_to_lightweight_local_postgres(
+    monkeypatch,
+) -> None:
+    """旧电脑本地开发默认连接 55432 端口的专用数据库。"""
+
+    monkeypatch.delenv("ACCESSPILOT_DATABASE_URL", raising=False)
+
+    assert Settings(_env_file=None).database_url == (
+        "postgresql+psycopg://accesspilot@127.0.0.1:55432/accesspilot"
+    )
+
+
+def test_deepseek_settings_use_server_environment(monkeypatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "local-test-key")
+    monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+
+    settings = Settings()
+
+    assert settings.deepseek_api_key is not None
+    assert settings.deepseek_api_key.get_secret_value() == "local-test-key"
+    assert settings.deepseek_model == "deepseek-v4-flash"
+    assert "local-test-key" not in repr(settings)
+
+
+def test_dashscope_settings_use_server_environment(monkeypatch) -> None:
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "local-embedding-key")
+    monkeypatch.setenv("DASHSCOPE_EMBEDDING_MODEL", "text-embedding-v4")
+
+    settings = Settings()
+
+    assert settings.dashscope_api_key is not None
+    assert settings.dashscope_api_key.get_secret_value() == "local-embedding-key"
+    assert settings.dashscope_embedding_model == "text-embedding-v4"
+    assert "local-embedding-key" not in repr(settings)
+
+
+def test_demo_mode_supports_constructor_and_environment_values(monkeypatch) -> None:
+    monkeypatch.delenv("ACCESSPILOT_DEMO_MODE_ENABLED", raising=False)
+    assert Settings(demo_mode_enabled=True, _env_file=None).demo_mode_enabled is True
+
+    monkeypatch.setenv("ACCESSPILOT_DEMO_MODE_ENABLED", "true")
+    assert Settings(_env_file=None).demo_mode_enabled is True
