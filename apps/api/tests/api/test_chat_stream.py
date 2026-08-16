@@ -15,10 +15,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from accesspilot.agent.deepseek import SYSTEM_PROMPT
+from accesspilot.agent.structured_reply import MalformedStructuredOutputError
 from accesspilot.config import Settings
-from accesspilot.db.models import WorkspaceEventRecord
+from accesspilot.db.models import WorkspaceEventRecord, WorkspaceRecord
 from accesspilot.db.seed import seed_catalog
-from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
+from accesspilot.db.workspace_store import (
+    SqlAlchemyWorkspaceStore,
+    hash_workspace_token,
+)
 from accesspilot.domain.models import ParsedReply, RequestDraft
 from accesspilot.main import create_app
 from accesspilot.streaming import DeterministicAnswerStreamModel
@@ -60,6 +64,18 @@ class PromptLeakingStructuredReplyModel:
             justification=SYSTEM_PROMPT,
             confirmed=True,
         )
+
+
+class AlwaysMalformedStructuredReplyModel:
+    """Freeze the Legacy structured-reply failure mapping at the SSE boundary."""
+
+    def parse_reply(
+        self,
+        user_reply: str,
+        correction: str | None = None,
+    ) -> ParsedReply:
+        del user_reply, correction
+        raise MalformedStructuredOutputError("unsafe upstream detail")
 
 
 class TwoDeltaAnswerStream:
@@ -188,7 +204,7 @@ def test_current_turn_sse_emits_ordered_real_deltas_and_persists_before_complete
     database_session_factory: sessionmaker[Session],
 ) -> None:
     client = TestClient(_stream_app(database_session_factory, TwoDeltaAnswerStream()))
-    _start_workspace(client)
+    login = _start_workspace(client, database_session_factory)
     response = client.post(
         "/api/chat/messages/stream",
         json={"content": "申请仪表盘查看权限"},
@@ -198,6 +214,19 @@ def test_current_turn_sse_emits_ordered_real_deltas_and_persists_before_complete
     assert response.headers["content-type"].startswith("text/event-stream")
     frames = _parse_sse_frames(response.text)
     event_names = [frame["event"] for frame in frames]
+    assert event_names == [
+        "turn.started",
+        "intent.detected",
+        "tool.started",
+        "tool.completed",
+        "draft.updated",
+        "tool.started",
+        "tool.completed",
+        "business.status",
+        "message.delta",
+        "message.delta",
+        "message.completed",
+    ]
     assert event_names[0:2] == ["turn.started", "intent.detected"]
     assert event_names.index("tool.started") < event_names.index("tool.completed")
     assert event_names.index("tool.completed") < event_names.index("draft.updated")
@@ -236,6 +265,12 @@ def test_current_turn_sse_emits_ordered_real_deltas_and_persists_before_complete
         all_events = list(session.scalars(select(WorkspaceEventRecord)).all())
         assert all(event.event_type != "message.delta" for event in all_events)
 
+    cursor = WorkspaceService(
+        SqlAlchemyWorkspaceStore(database_session_factory)
+    ).get(login.session_token).active_cursor()
+    assert cursor is not None
+    assert cursor.expected_field == "confirmation"
+
     assert "upstream failure" not in response.text
     assert all(
         key not in response.text
@@ -247,7 +282,7 @@ def test_current_turn_sse_model_error_has_single_recoverable_terminal(
     database_session_factory: sessionmaker[Session],
 ) -> None:
     client = TestClient(_stream_app(database_session_factory, BrokenAnswerStream()))
-    _start_workspace(client)
+    login = _start_workspace(client, database_session_factory)
     response = client.post(
         "/api/chat/messages/stream",
         json={"content": "申请仪表盘查看权限"},
@@ -260,6 +295,83 @@ def test_current_turn_sse_model_error_has_single_recoverable_terminal(
     assert [frame["event"] for frame in terminals] == ["error.recoverable"]
     assert "upstream failure" not in response.text
     assert "message.delta" not in response.text
+    assert (
+        WorkspaceService(SqlAlchemyWorkspaceStore(database_session_factory))
+        .get(login.session_token)
+        .active_cursor()
+        is None
+    )
+
+
+def test_current_turn_sse_quota_error_has_one_legacy_terminal(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    client = TestClient(_stream_app(database_session_factory, TwoDeltaAnswerStream()))
+    login = _start_workspace(client, database_session_factory)
+    with database_session_factory() as session:
+        workspace = session.scalar(
+            select(WorkspaceRecord).where(
+                WorkspaceRecord.token_hash == hash_workspace_token(login.session_token)
+            )
+        )
+        assert workspace is not None
+        workspace.model_call_limit = 0
+        session.commit()
+
+    response = client.post(
+        "/api/chat/messages/stream",
+        json={"content": "申请仪表盘查看权限"},
+    )
+
+    frames = _parse_sse_frames(response.text)
+    assert response.status_code == 200
+    assert [frame["event"] for frame in frames] == [
+        "turn.started",
+        "error.recoverable",
+    ]
+    assert frames[-1]["data"]["payload"]["code"] == "MODEL_QUOTA_EXCEEDED"
+    assert (
+        WorkspaceService(SqlAlchemyWorkspaceStore(database_session_factory))
+        .get(login.session_token)
+        .active_cursor()
+        is None
+    )
+
+
+def test_current_turn_sse_parse_error_has_one_legacy_terminal(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    client = TestClient(
+        _stream_app(
+            database_session_factory,
+            TwoDeltaAnswerStream(),
+            AlwaysMalformedStructuredReplyModel(),
+        )
+    )
+    login = _start_workspace(client, database_session_factory)
+
+    response = client.post(
+        "/api/chat/messages/stream",
+        json={"content": "申请仪表盘查看权限"},
+    )
+
+    frames = _parse_sse_frames(response.text)
+    assert response.status_code == 200
+    assert [frame["event"] for frame in frames] == [
+        "turn.started",
+        "intent.detected",
+        "error.recoverable",
+    ]
+    payload = frames[-1]["data"]["payload"]
+    assert payload["code"] == "BUSINESS_VALIDATION_FAILED"
+    assert payload["error_code"] == "MODEL_REPLY_UNAVAILABLE"
+    assert "unsafe upstream detail" not in response.text
+    assert (
+        WorkspaceService(SqlAlchemyWorkspaceStore(database_session_factory))
+        .get(login.session_token)
+        .active_cursor()
+        is None
+    )
 
 
 @pytest.mark.parametrize(
@@ -388,7 +500,7 @@ def test_current_turn_cancellation_persists_interrupted_without_completed(
     client = TestClient(
         _stream_app(database_session_factory, CancelAfterFirstDeltaAnswerStream())
     )
-    _start_workspace(client)
+    login = _start_workspace(client, database_session_factory)
     response = client.post(
         "/api/chat/messages/stream",
         json={"content": "申请仪表盘查看权限"},
@@ -421,6 +533,12 @@ def test_current_turn_cancellation_persists_interrupted_without_completed(
         assert any(event.event_type == "turn.interrupted" for event in events)
         assert all(event.event_type != "message.completed" for event in events)
         assert all(event.payload.get("content") != "半截" for event in events)
+    assert (
+        WorkspaceService(SqlAlchemyWorkspaceStore(database_session_factory))
+        .get(login.session_token)
+        .active_cursor()
+        is None
+    )
 
 
 def test_current_turn_sse_never_exposes_model_returned_internal_prompt(
