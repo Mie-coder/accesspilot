@@ -2,6 +2,7 @@
 set -eu
 export LC_ALL=en_US.UTF-8
 export LANG=en_US.UTF-8
+export LANGGRAPH_STRICT_MSGPACK=true
 
 if [ -x .venv/bin/python ]; then
   PYTHON_BIN=.venv/bin/python
