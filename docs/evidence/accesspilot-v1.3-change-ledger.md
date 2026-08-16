@@ -3,7 +3,7 @@
 **用途：** 每完成一张 Ticket，同步记录技术改变、解决的问题、验证证据与可面试价值。
 **v1.2 基线：** 顺序执行的 `ConversationService` + 业务 Cursor；仅政策问答使用 pgvector RAG；当前生产入口未由 LangGraph 编排。
 **v1.3 目标：** 真实 LangGraph Agent Loop + PostgreSQL 持久恢复 + HITL interrupt/resume + 只读真实轨迹。
-**当前总状态：** `In progress`；T26 `Verified` 并已本地提交；T27 为下一张。正式简历仍未修改，也不得将后续未完成的主链、HITL 或轨迹能力当作已实现成果。
+**当前总状态：** `In progress`；T26–T27 `Verified`，T28 为下一张。正式简历仍未修改，也不得将后续未完成的主链、HITL 或轨迹能力当作已实现成果。
 
 ## 状态口径
 
@@ -16,7 +16,7 @@
 | Ticket | 技术改变 | 解决的问题 | 简历 / 面试价值 | 证据链接 | 状态 / 限制 |
 |---|---|---|---|---|---|
 | T26 | 锁定 LangGraph / PostgresSaver / psycopg 矩阵；用真实 PostgreSQL 实测修正为每 run 独立 checkpoint thread 和 candidate→accepted 两阶段 head | 提前暴露 root namespace、半写入 interrupt、精确 head 恢复与跨平台依赖漂移风险 | 可讲“先做兼容性 Spike，用运行证据修正架构合同，再工程化接入”，而不是只堆框架名 | [T26 验收证据](accesspilot-v1.3-t26-acceptance-2026-08-17.md)、[双评审决策](../reviews/accesspilot-v1.3-t26-acceptance-decisions-2026-08-17.md)、[Probe](../../scripts/t26_langgraph_compat.py)、[测试](../../apps/api/tests/agent/test_t26_langgraph_compat.py)、[R-29/R-30 裁决](../reviews/accesspilot-v1.3-spec-review-decisions-2026-08-16.md#2-议题清单) | `Verified`；T26-only 快照中 PostgreSQL probe/9 项测试、Python 3.11 新环境、Python 3.12 Docker、后端 451 项/旧前端 95 项与全量评测均通过；Claude Code + DeepSeek 均无 P0/P1；生产 saver/fence 与主链仍属后续 Ticket |
-| T27 | 抽象 `ConversationOrchestrator`，Legacy 结果冻结为黄金样本 | 在不改变 JSON/SSE 对外行为的前提下替换编排内核 | 可讲解 Strangler/兼容层、回归保护与可回滚设计 | [T27 计划](../tickets/accesspilot-langgraph-agent-loop-v1.3.md#t27--conversationorchestrator-兼容层与-legacy-黄金基线) | `Planned`；仍全量 Legacy |
+| T27 | 抽象 `ConversationOrchestrator`，让 JSON/SSE 只依赖可注入边界；用 engine-owned success finalizer 保持 terminal→Cursor→emit 顺序，并冻结 Legacy 黄金样本 | 在不改变对外行为的前提下建立可替换内核，避免接口层继续理解 Legacy Cursor 状态机 | 可讲 Strangler 迁移、依赖注入、契约测试、独立验收发现边界泄漏后的闭环修复与一键回滚 | [T27 验收证据](accesspilot-v1.3-t27-acceptance-2026-08-17.md)、[实现](../../apps/api/src/accesspilot/conversation.py)、[黄金测试](../../apps/api/tests/conversation/test_t27_orchestrator.py) | `Verified`；定向 27 项、相关 151 项、API 467 项通过，另有 1 项 T26 专用数据库 probe 因未配置变量跳过；独立验收无 P0/P1；默认仍 100% Legacy，生产 LangGraph 尚未接入 |
 | T28 | 增加 thread、execution、pending、fence、幂等与事件身份事实 | 为可恢复执行、去重和引擎粘性建立可查询的数据不变量 | 可深入讲幂等键、状态机约束、迁移和历史数据兼容 | [T28 计划](../tickets/accesspilot-langgraph-agent-loop-v1.3.md#t28--应用-schema运行事实与确定性身份) | `Planned`；数据库尚未迁移 |
 | T29 | 接入官方 PostgreSQL checkpointer，分离 migration/runtime 账号与连接周期 | 避免请求期 DDL、连接泄漏和 stale checkpoint 恢复 | 可讲解持久化 Agent 的运行责任、最小权限和生命周期 | [T29 计划](../tickets/accesspilot-langgraph-agent-loop-v1.3.md#t29--postgresql-checkpointer-初始化账号与运行生命周期) | `Planned`；不得宣称已可跨进程恢复 |
 | T30 | 建立类型化 GraphState、Runtime Context 与真实多节点拓扑 | 防止将凭证、授权事实或不必要内容写入 checkpoint | 可讲解 Agent State 与业务权威源的边界、类型化图设计 | [T30 计划](../tickets/accesspilot-langgraph-agent-loop-v1.3.md#t30--安全-graphstateruntime-context-与生产拓扑骨架) | `Planned`；现有 LangGraph 仅为测试 Demo |
@@ -80,6 +80,12 @@
 > 在 AccessPilot 主链迁移前设计 LangGraph 1.2 + PostgresSaver 兼容性 Spike，通过真实 PostgreSQL 跨进程 exact-head resume 实测，发现 root namespace 归一和 interrupt 半写入窗口，将恢复合同修正为 per-run checkpoint thread 与 candidate→accepted 两阶段 head；锁定 Python 3.11/3.12 与 Docker 依赖，保持 v1.2 后端 451 项、前端 95 项及产品评测全绿。
 
 使用边界：该表述只说明“生产迁移前的兼容性与架构验证”；不能写成 AccessPilot 生产主链已使用 LangGraph。正式简历仍需用户另行确认后才修改。
+
+## T27 Verified 简历候选表述
+
+> 为 AccessPilot 的 LangGraph 渐进迁移建立 `ConversationOrchestrator` Strangler 边界，将 JSON/SSE 入口与 Legacy 编排解耦，并以全意图 outcome、Cursor 三态、流式终态和异常黄金测试锁定兼容合同；独立验收发现并修复接口层 Cursor 业务规则泄漏，相关 151 项与完整 API 467 项回归通过（另有 1 项 T26 专用数据库 probe 因未配置变量跳过）。
+
+使用边界：该表述只说明“已建立可替换编排边界并冻结 Legacy 合同”；当前默认仍为 Legacy，不能写成生产主链已经运行 LangGraph。正式简历仍需用户另行确认后才修改。
 
 ## 固定参考
 

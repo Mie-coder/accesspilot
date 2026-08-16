@@ -1,6 +1,6 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Spec
 
-**状态：** T26 `Verified` 并已本地提交；T27 为下一张，T28–T42 尚未开始；未授权推送、合并、部署或修改正式简历
+**状态：** T26–T27 `Verified`；T28 为下一张，T29–T42 尚未开始；未授权推送、合并、部署或修改正式简历
 **更新时间：** 2026-08-17
 **继承基线：** AccessPilot v1.2，`product_verified=true`；历史验证结果不能自动证明 v1.3
 **上游规格：** `docs/specs/accesspilot-productized-agent-v1.2.md`
@@ -31,7 +31,7 @@ v1.3 不把 LangGraph 当作轨迹图标签，而是让它真实承接 AccessPil
 - T26 已将 LangGraph/PostgresSaver/psycopg 候选矩阵锁定并在隔离 PostgreSQL 中验证，但生产入口尚未调用它；
 - `apps/api/src/accesspilot/agent/graph.py` 只有 `START → ask_question → END` 的单节点教学图；
 - 该图只在 `apps/api/tests/agent/test_graph.py` 中调用，checkpointer 也是进程内 `InMemorySaver`；
-- 生产 `/api/chat/messages` 与 `/api/chat/messages/stream` 仍直接调用 `conversation.py` 的过程式编排；
+- 生产 `/api/chat/messages` 与 `/api/chat/messages/stream` 已通过默认 `LegacyConversationOrchestrator` 调用 Legacy 实现，尚未进入 LangGraph；
 - 当前政策问答已经真实使用 `PolicyService + pgvector`，权限目录解析不是 RAG；
 - 当前 SSE 中的 `tool.started/tool.completed` 是根据执行后的 `tool.summary` 事后合成，不能证明真实工具边界或耗时；
 - 前端轨迹原型已经能安全回放现有事件，但必须在后端切流前诚实显示 Legacy 引擎。
@@ -628,4 +628,4 @@ Claim Ledger 能从“LangGraph 主链、Postgres checkpoint、interrupt/resume�
 
 用户已选择 Claude Code + DeepSeek 双评审；两份只读结果已完成，接受项已回流本修订版，裁决见评审决策记录。
 
-用户已确认 T26–T42 按张串行实施。T26 已通过 Claude Code + DeepSeek 双独立验收并本地提交；当前进入 T27。仍未授权推送、合并、部署或修改正式简历。
+用户已确认 T26–T42 按张串行实施。T26 已通过 Claude Code + DeepSeek 双独立验收并本地提交；T27 已通过独立只读验收，当前进入 T28。仍未授权推送、合并、部署或修改正式简历。

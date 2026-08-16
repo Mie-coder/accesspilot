@@ -63,14 +63,13 @@ from accesspilot.auth import (
 from accesspilot.config import Settings
 from accesspilot.conversation import (
     ConversationInputError,
+    ConversationOrchestrator,
     DeterministicStructuredReplyModel,
+    LegacyConversationOrchestrator,
     _redact_sensitive_content,
-    apply_cursor_transition,
     contains_protected_internal_content,
-    handle_chat_message,
     is_suspicious_protected_prefix,
     normalized_outcome,
-    prepare_chat_message,
     split_safe_model_output_prefix,
 )
 from accesspilot.db.models import (
@@ -295,6 +294,7 @@ def create_app(
     structured_reply_model: StructuredReplyModel | None = None,
     answer_stream_model: AnswerStreamModel | None = None,
     policy_service: PolicyService | None = None,
+    conversation_orchestrator: ConversationOrchestrator | None = None,
 ) -> FastAPI:
     """创建一个可配置、可测试的 FastAPI 应用。"""
     active_settings = settings or Settings()
@@ -348,6 +348,16 @@ def create_app(
         store,
         product_actor_id=active_settings.product_actor_id,
         demo_mode_enabled=active_settings.demo_mode_enabled,
+    )
+    active_conversation_orchestrator = (
+        conversation_orchestrator
+        if conversation_orchestrator is not None
+        else LegacyConversationOrchestrator(
+            session_factory=active_session_factory,
+            workspace_service=workspace_service,
+            model=structured_reply_model,
+            policy_service=active_policy_service,
+        )
     )
     app = FastAPI(title=active_settings.app_name)
 
@@ -1165,17 +1175,14 @@ def create_app(
             seq += 1
             prepared = None
             try:
-                prepared = await asyncio.to_thread(
-                    prepare_chat_message,
-                    active_session_factory,
-                    workspace_service=workspace_service,
+                run_result = await asyncio.to_thread(
+                    active_conversation_orchestrator.prepare,
                     workspace_token=workspace.token,
                     content=body.content,
-                    model=structured_reply_model,
                     turn_id=turn_id,
-                    policy_service=active_policy_service,
                     auth_session_id=auth_session_id,
                 )
+                prepared = run_result.turn
             except ModelQuotaExceededError:
                 message = "模型调用额度已用尽，当前为只读回放模式"
                 event = persist_terminal(
@@ -1391,12 +1398,7 @@ def create_app(
             )
             if event is None:
                 return
-            apply_cursor_transition(
-                workspace_service,
-                workspace_token=workspace.token,
-                turn=prepared,
-                auth_session_id=auth_session_id,
-            )
+            run_result.finalize_success()
             payload = dict(event.payload)
             payload["persisted_event_id"] = event.id
             yield encode_persisted_frame(
@@ -1424,13 +1426,9 @@ def create_app(
         """处理一轮申请对话，并持久化前端可回放的安全事件。"""
 
         try:
-            turn = handle_chat_message(
-                active_session_factory,
-                workspace_service=workspace_service,
+            turn = active_conversation_orchestrator.handle(
                 workspace_token=workspace.token,
                 content=body.content,
-                model=structured_reply_model,
-                policy_service=active_policy_service,
                 auth_session_id=workspace.auth_session_id,
             )
         except ModelQuotaExceededError as error:
