@@ -194,7 +194,7 @@
 
 ## T33 — Turn Execution Lease、Fence 与崩溃接管内核
 
-**状态：** `In progress`（已实现，待独立复核）；T33 定向 18 项、Agent 230 项、隔离 PG 9 项通过；Ruff/MyPy/`git diff --check` 通过；尚未标记 `Verified`
+**状态：** `In progress`（已实现，待独立复核）；T33 定向 23 项、Agent 235 项、隔离 PG 9 项通过；Ruff/MyPy/`git diff --check` 通过；尚未标记 `Verified`
 
 **目标：** 在打开 interrupt/API canary 前，证明同 thread 串行、accepted checkpoint head 单调、stale owner 无法写入，且恢复不伪造新用户输入。
 

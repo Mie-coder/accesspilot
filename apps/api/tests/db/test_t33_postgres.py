@@ -576,21 +576,6 @@ def test_t33_and_t32_write_paths_share_lock_order_no_deadlock() -> None:
             actor_id="EMP-001",
             safe_user_text="lock order",
         )
-        with factory() as session:
-            terminal = WorkspaceEventRecord(
-                workspace_id=workspace_id,
-                event_type="message.completed",
-                payload={
-                    "turn_id": handle.input_turn_id,
-                    "message_id": "msg-lock",
-                    "content": "ok",
-                },
-            )
-            session.add(terminal)
-            session.flush()
-            terminal_event_id = terminal.id
-            session.commit()
-
         errors: list[BaseException] = []
 
         def t32_style_write() -> None:
@@ -617,11 +602,16 @@ def test_t33_and_t32_write_paths_share_lock_order_no_deadlock() -> None:
         def t33_complete() -> None:
             try:
                 with service.advisory_lock(agent_thread_id) as lock:
-                    service.complete_turn(
+                    service.complete_turn_with_event(
                         handle,
                         workspace_token=token,
-                        terminal_event_id=terminal_event_id,
                         lock=lock,
+                        event_type="message.completed",
+                        payload={
+                            "turn_id": handle.input_turn_id,
+                            "message_id": "msg-lock",
+                            "content": "ok",
+                        },
                     )
             except BaseException as error:  # pragma: no cover - failure path
                 errors.append(error)
@@ -782,26 +772,17 @@ def test_takeover_historical_accepted_head_forbids_input_event_fallback() -> Non
         accepted_id = first_context.accepted_checkpoint_id
         assert accepted_id is not None
 
-        with factory() as session:
-            terminal = WorkspaceEventRecord(
-                workspace_id=workspace_id,
+        with service.advisory_lock(agent_thread_id) as lock:
+            service.complete_turn_with_event(
+                first,
+                workspace_token=token,
+                lock=lock,
                 event_type="message.completed",
                 payload={
                     "turn_id": first.input_turn_id,
                     "message_id": "msg-historical",
                     "content": "ok",
                 },
-            )
-            session.add(terminal)
-            session.flush()
-            terminal_event_id = terminal.id
-            session.commit()
-        with service.advisory_lock(agent_thread_id) as lock:
-            service.complete_turn(
-                first,
-                workspace_token=token,
-                terminal_event_id=terminal_event_id,
-                lock=lock,
             )
 
         second = service.begin_input(

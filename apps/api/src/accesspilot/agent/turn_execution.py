@@ -504,66 +504,11 @@ class TurnExecutionService:
     # ------------------------------------------------------------------
     # Complete
     # ------------------------------------------------------------------
-    def complete_turn(
-        self,
-        handle: TurnExecutionHandle,
-        *,
-        workspace_token: str,
-        terminal_event_id: int,
-        lock: AdvisoryLockHandle,
-        status: Literal[
-            "completed",
-            "recoverable_error",
-            "interrupted",
-        ] = "completed",
-    ) -> None:
-        """Release the lease and terminalize the exact active execution.
-
-        The terminal write must happen on the same advisory-lock owning Session
-        so the lock continuously covers takeover, graph run, head promotion and
-        finalize.
-        """
-        session = lock.session
-        with session.begin():
-            execution = session.scalar(
-                select(AgentTurnExecutionRecord)
-                .where(
-                    AgentTurnExecutionRecord.id == handle.execution_id,
-                    AgentTurnExecutionRecord.workspace_id == handle.workspace_id,
-                    AgentTurnExecutionRecord.graph_run_id == handle.graph_run_id,
-                    AgentTurnExecutionRecord.input_seq == handle.input_seq,
-                    AgentTurnExecutionRecord.input_turn_id == handle.input_turn_id,
-                    AgentTurnExecutionRecord.actor_id == handle.actor_id,
-                    AgentTurnExecutionRecord.auth_session_ref
-                    == handle.auth_session_ref,
-                    AgentTurnExecutionRecord.lease_fence == handle.lease_fence,
-                    AgentTurnExecutionRecord.status == "running",
-                )
-                .with_for_update()
-            )
-            if execution is None:
-                raise StaleTurnFenceError("execution is not owned by this handle")
-            now = datetime.now(UTC)
-            if execution.lease_expires_at is None or execution.lease_expires_at <= now:
-                raise StaleTurnFenceError("execution lease has expired")
-            workspace = session.scalar(
-                select(WorkspaceRecord)
-                .where(
-                    WorkspaceRecord.id == handle.workspace_id,
-                    WorkspaceRecord.token_hash == hash_workspace_token(workspace_token),
-                    WorkspaceRecord.actor_id == handle.actor_id,
-                    WorkspaceRecord.lease_fence == handle.lease_fence,
-                )
-                .with_for_update()
-            )
-            if workspace is None:
-                raise StaleTurnFenceError("workspace fence does not match execution")
-            lock.require_thread(workspace.agent_thread_id)
-            execution.status = status
-            execution.lease_expires_at = None
-            execution.terminal_event_id = terminal_event_id
-            execution.updated_at = utc_now()
-            session.flush()
+    _TERMINAL_STATUS_BY_EVENT: dict[str, str] = {
+        "message.completed": "completed",
+        "error.recoverable": "recoverable_error",
+        "turn.interrupted": "interrupted",
+    }
 
     def complete_turn_with_event(
         self,
@@ -573,22 +518,24 @@ class TurnExecutionService:
         lock: AdvisoryLockHandle,
         payload: dict[str, object],
         event_type: Literal["message.completed", "error.recoverable", "turn.interrupted"],
-        status: Literal[
-            "completed",
-            "recoverable_error",
-            "interrupted",
-        ] = "completed",
     ) -> int:
         """Create the terminal event and terminalize execution in one fenced transaction.
 
-        This is the only finalize path that guarantees a stale owner cannot
-        publish a visible terminal event: the execution fence is validated
-        before the event row is added, and both the event and the execution
-        terminal reference commit together.
+        This is the only public finalize path.  The execution status is derived
+        exclusively from ``event_type`` and the payload ``turn_id`` must equal
+        ``handle.input_turn_id``; any mismatch fails before an event row is
+        added, so stale/mismatched terminal writes are zero-write.
         """
         from accesspilot.events import validate_event_payload
 
+        if event_type not in self._TERMINAL_STATUS_BY_EVENT:
+            raise ValueError("unsupported terminal event type")
         safe_payload = validate_event_payload(event_type, payload)
+        if safe_payload.get("turn_id") != handle.input_turn_id:
+            raise TurnExecutionError(
+                "terminal event turn_id does not match the execution turn"
+            )
+        status = self._TERMINAL_STATUS_BY_EVENT[event_type]
         session = lock.session
         with session.begin():
             execution = session.scalar(
