@@ -109,7 +109,7 @@ def execute_read_only_tool(
         )
         return ToolResult(
             status="success",
-            policy_answer=active_policy_service.query(session, "我能自己审批自己的申请吗？"),
+            policy_answer=active_policy_service.self_approval(session),
         )
     if call.tool == "search_policies":
         if call.query is None or not call.query.strip():

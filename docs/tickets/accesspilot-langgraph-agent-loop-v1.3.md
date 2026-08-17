@@ -1,8 +1,8 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Tickets
 
-**状态：** 用户已确认串行实施；T26–T30 `Verified`，T31 为下一张，T32–T42 尚未开始；未授权推送、合并、部署或修改正式简历
+**状态：** 用户已确认串行实施；T26–T31 `Verified`，T32 为下一张，T33–T42 尚未开始；未授权推送、合并、部署或修改正式简历
 **更新时间：** 2026-08-17
-**继承基线：** AccessPilot v1.2，`product_verified=true`；T30 实现基线 HEAD `76676a7`，历史证据不自动证明 v1.3
+**继承基线：** AccessPilot v1.2，`product_verified=true`；T31 实现基线 HEAD `9df3a00`，历史证据不自动证明 v1.3
 **Canonical Spec：** `docs/specs/accesspilot-langgraph-agent-loop-v1.3.md`
 **双评审裁决：** `docs/reviews/accesspilot-v1.3-spec-review-decisions-2026-08-16.md`
 
@@ -128,7 +128,7 @@
 
 ## T30 — 安全 GraphState、Runtime Context 与生产拓扑骨架
 
-**状态：** `Verified`；三条验收标准通过，独立只读验收无 P0/P1/P2，等待本 Ticket 本地提交
+**状态：** `Verified`；三条验收标准通过，独立只读验收无 P0/P1/P2，已本地提交 `9df3a00`
 
 **目标：** 固定可持久 State 边界和完整生产拓扑，但暂不接入 API。
 
@@ -150,19 +150,19 @@
 
 ## T31 — 确定性路由、只读工具与政策 RAG 图分支
 
-**状态：** 尚未开始
+**状态：** `Verified`；三条验收标准通过，独立只读验收无 P0/P1/P2
 
-**目标：** 先迁移无业务写入的路由、数字 Cursor、只读工具和政策问答分支。
+**目标：** 先迁移无业务写入的路由、数字 Cursor 只读/零写子集、只读工具和政策问答分支；合法且未超限的 duration 消费留给 T32。
 
 **Spec 映射：** §5.1–§5.2、§7；AC-01、AC-02、AC-06。
 
 **验收：**
 
-1. hydrate、help/security/unknown、numeric cursor、read-only 和 policy 分支执行规定真实节点序列，并生成与 Legacy 相同的规范化结果。
+1. hydrate、help/security/unknown、numeric cursor 只读/零写子集、read-only 和 policy 分支执行规定真实节点序列，并生成与 Legacy 相同的规范化结果。
 2. 固定只读 parity 场景 route/outcome 100%，连续两次完整运行零差异；shadow 不调模型、不写草稿。
 3. 只有政策问答调用 pgvector 并保留 grounded/insufficient/unavailable 三态；目录、自审批政策和权限解析不走、不显示 RAG。
 
-**测试/运行验证：** 图路径、Router 优先级、数字 Cursor、工具白名单、RAG 三态/反证和错误闭合；直接 invoke 政策、权限解析和安全场景。
+**测试/运行验证：** 图路径、Router 优先级、数字 Cursor 只读/零写子集、工具白名单、RAG 三态/反证和错误闭合；合法且未超限的 duration 明确 defer T32；直接 invoke 政策、权限解析和安全场景。
 
 **依赖：** T30。
 
@@ -416,4 +416,4 @@
 
 - T26–T40 分层建立 AC-01–AC-12；T41 在同一 revision 汇总判定 AC-01–AC-13；T42 单独完成 AC-14；
 - 数据库、checkpoint、Graph State、JSON、SSE、UI 和证据按依赖串行，不并发修改共享权威源；
-- **当前停点：进入 T31。** 仍不推送、合并、部署或修改正式简历。
+- **当前停点：进入 T32。** 仍不推送、合并、部署或修改正式简历。

@@ -182,6 +182,7 @@ def _runtime_context() -> dict[str, object]:
         "current_turn_id": "runtime-turn-secret",
         "current_fence": 91,
         "workspace_token": "workspace-token-canary",
+        "auth_session_id": "auth-session-canary",
         "cookie": "cookie-canary",
         "csrf_token": "csrf-canary",
         "api_key": "sk-runtime-canary-12345678",
@@ -508,27 +509,63 @@ class _ExplodingDependency:
         raise AssertionError(f"stub graph touched runtime dependency: {name}")
 
 
-def test_stub_graph_invokes_without_models_services_tools_rag_writes_or_interrupts() -> None:
-    from accesspilot.agent.production_graph import GraphOutput, build_production_graph
+def test_safe_graph_invokes_without_models_tools_rag_writes_or_interrupts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import nullcontext
 
+    from accesspilot.agent.embeddings import DeterministicEmbeddingModel
+    from accesspilot.agent.production_graph import GraphOutput, build_production_graph
+    from accesspilot.agent.routing import DeterministicIntentRouter
+    from accesspilot.auth import Principal
+    from accesspilot.events import ModelQuota
+    from accesspilot.tools.policies import PolicyService
+    from accesspilot.workspaces import InMemoryWorkspaceStore, WorkspaceService
+
+    _ExplodingDependency.calls = 0
     dependency = _ExplodingDependency()
-    context = {key: dependency for key in _runtime_context()}
-    context.update(
-        {
-            "current_turn_id": "turn-runtime-only",
-            "current_fence": 12,
-            "workspace_token": "workspace-runtime-only",
-            "cookie": "cookie-runtime-only",
-            "csrf_token": "csrf-runtime-only",
-            "api_key": "sk-runtime-only-12345678",
-        }
+    workspace_service = WorkspaceService(InMemoryWorkspaceStore())
+    workspace = workspace_service.create()
+    monkeypatch.setattr(
+        "accesspilot.agent.production_graph.get_model_quota",
+        lambda *args, **kwargs: ModelQuota(
+            used=0,
+            limit=20,
+            remaining=20,
+            retry_consumed=0,
+        ),
     )
+    context = {
+        "session_factory": lambda: nullcontext(object()),
+        "workspace_service": workspace_service,
+        "policy_service": PolicyService(
+            embedding_model=DeterministicEmbeddingModel()
+        ),
+        "structured_reply_model": dependency,
+        "intent_router": DeterministicIntentRouter(),
+        "principal": Principal(
+            employee_id="EMP-001",
+            name="林晓",
+            department="数据平台部",
+            roles=("analyst",),
+        ),
+        "current_turn_id": "turn-runtime-only",
+        "current_fence": 12,
+        "workspace_token": workspace.token,
+        "auth_session_id": "auth-session-runtime-only",
+        "cookie": "cookie-runtime-only",
+        "csrf_token": "csrf-runtime-only",
+        "api_key": "sk-runtime-only-12345678",
+    }
     graph = build_production_graph(checkpointer=False)
 
-    result = graph.invoke(_input(), context=context)
+    result = graph.invoke(
+        _input(workspace_ref=workspace.workspace_id, safe_user_text="帮助"),
+        context=context,  # type: ignore[arg-type]
+    )
 
     assert isinstance(result, GraphOutput)
-    assert result.intent == "unknown"
+    assert result.intent == "help"
     assert result.business_status == "answered"
     assert _ExplodingDependency.calls == 0
     assert "__interrupt__" not in result.model_dump()
