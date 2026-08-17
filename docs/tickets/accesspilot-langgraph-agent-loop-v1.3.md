@@ -1,8 +1,8 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Tickets
 
-**状态：** 用户已确认串行实施；T26–T31 `Verified`，T32 为下一张，T33–T42 尚未开始；未授权推送、合并、部署或修改正式简历
+**状态：** 用户已确认串行实施；T26–T32 `Verified`，T33–T42 尚未开始；未授权推送、合并、部署或修改正式简历
 **更新时间：** 2026-08-17
-**继承基线：** AccessPilot v1.2，`product_verified=true`；T31 实现基线 HEAD `9df3a00`，历史证据不自动证明 v1.3
+**继承基线：** AccessPilot v1.2，`product_verified=true`；T32 实现基线 HEAD `7ad8a01`，历史证据不自动证明 v1.3
 **Canonical Spec：** `docs/specs/accesspilot-langgraph-agent-loop-v1.3.md`
 **双评审裁决：** `docs/reviews/accesspilot-v1.3-spec-review-decisions-2026-08-16.md`
 
@@ -172,7 +172,7 @@
 
 ## T32 — 申请收集、模型解析、草稿 CAS 与步骤幂等
 
-**状态：** 尚未开始
+**状态：** `Verified`；预审的 execution/fence 与 interrupt/finalizer 两项 P1 边界已冻结；首轮验收的纠正参数/节点路径两项 P1 已闭环，二轮只读复核 P1=1（revision race 与合法 numeric 两个场景缺 compiled-stream 路径断言）已补齐；二轮独立复核 P0=0、P1=0，已本地提交
 
 **目标：** 完成申请字段解析、权限目录解析、草稿写入和校验节点，让本地副作用可重放。
 
@@ -181,10 +181,10 @@
 **验收：**
 
 1. `parse_request_patch → resolve_entitlement → merge → persist_draft_cas → validate` 的缺项、成功、解析失败、quota 耗尽和 revision conflict 与 Legacy 黄金样本一致。
-2. 模型 quota、草稿 CAS 和应用步骤使用稳定 `operation_id` 记录 `reserved/completed`；同一逻辑输入重试时 quota/revision 最多增加一次，下一 `input_seq` 仍可合法执行同节点。
-3. T31–T32 已实现路径（至 `validate_draft/await_requester_confirmation` 边界，不包含尚未实现的 resume/确认语义）的 parity matrix 连续两次 100%；图不创建 Request、Approval 或 Grant，身份/确认字段和非白名单工具名在副作用前被拒绝。确认 parity 由 T34 补全，全意图矩阵由 T41 汇总。
+2. 模型两次 attempt、普通草稿 CAS 与合法 numeric duration Cursor 各使用稳定 `operation_id`；ledger reserve/complete 必须与对应 quota/CAS 在同一事务。T32 节点只校验测试夹具预建的 `running` execution、actor 与 fence，不创建、续租、接管或释放 execution；这些生命周期与 stale-owner 全链由 T33 验证。
+3. T31–T32 已实现路径（至 `validate_draft/await_requester_confirmation` 边界，不包含尚未实现的 resume/确认语义）的 parity matrix 连续两次 100%：14 个正常场景（12 个矩阵场景 + revision race + 合法 numeric）每轮都先断言真实 compiled-stream 节点路径（path 28/28）再逐字段比较 outcome/phase/quota/Cursor 投影（28/28），另 2 个 quota 异常场景×2 失败行为一致；完整草稿在 await 边界安全结束，不创建 pending/confirmation Cursor，缺项或 numeric 的下一 Cursor 只在成功终态 finalizer 后激活。图不创建 Request、Approval 或 Grant，身份/确认字段和非白名单工具名在副作用前被拒绝。真实 interrupt/pending 由 T34 补全，全意图矩阵由 T41 汇总。
 
-**测试/运行验证：** 字段覆盖、身份注入、CAS 冲突、重复/并发 operation、quota 和 shadow 零副作用；直接 invoke 不完整/完整/冲突申请收集路径。
+**测试/运行验证：** 14 个正常场景×2 的 path+outcome parity（12 个矩阵场景内嵌 `expected_path`；revision race 两轮锁死 `_PARITY_PATH_RECOVERABLE_RESOLVED`；合法 numeric 两轮锁死 `hydrate→route→handle_numeric_followup→finalize`，均断言 compiled stream 节点序列）、两个 quota 异常×2、纠正参数断言（`calls==2` 且 `corrections==[None, CORRECTION_PROMPT]`，HTTP/超时失败不重试）、字段覆盖、canonical code 仍走资格解析、身份注入、CAS 冲突、重复/并发 operation、合法 numeric 重放先查 completed operation、终态前后 Cursor 时机、fenced finalizer 重放与 stale fence 零写入；直接 invoke 不完整/完整/冲突申请收集路径。夹具负责预建 execution，T32 不把它写成 T33 崩溃恢复证据。
 
 **依赖：** T31。
 
@@ -416,4 +416,4 @@
 
 - T26–T40 分层建立 AC-01–AC-12；T41 在同一 revision 汇总判定 AC-01–AC-13；T42 单独完成 AC-14；
 - 数据库、checkpoint、Graph State、JSON、SSE、UI 和证据按依赖串行，不并发修改共享权威源；
-- **当前停点：进入 T32。** 仍不推送、合并、部署或修改正式简历。
+- **当前停点：进入 T33。** 仍不推送、合并、部署或修改正式简历。

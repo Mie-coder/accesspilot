@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Hashable, Iterator, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Annotated, Any, Literal, NotRequired, TypedDict, cast
 from uuid import UUID
 
+import httpx
 from langchain_core.runnables.config import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.constants import END, START
@@ -46,24 +47,44 @@ from accesspilot.agent.state import (
     SafeRecoverableError,
     SafeToolStatus,
     TurnReference,
-    is_canonical_entitlement_code,
+)
+from accesspilot.agent.step_operations import (
+    AgentStepContext,
+    AgentStepOperationService,
+)
+from accesspilot.agent.structured_reply import (
+    CORRECTION_PROMPT,
+    MalformedStructuredOutputError,
 )
 from accesspilot.auth import Principal
 from accesspilot.conversation import (
     SECURITY_MESSAGE,
     compose_tool_answer,
+    entitlement_resolution_message,
+    is_obvious_question,
+    is_request_collection_follow_up,
+    is_safe_justification_cursor_reply,
+    merge_request_candidate,
+    missing_field_question,
+    normalize_request_candidate,
 )
 from accesspilot.db.models import EntitlementRecord
-from accesspilot.domain.models import ConversationCursor, RequestDraft
+from accesspilot.domain.models import ConversationCursor, ParsedReply, RequestDraft
 from accesspilot.events import ModelQuota, get_model_quota
-from accesspilot.tools.catalog import ToolResult
+from accesspilot.tools.catalog import ToolResult, validate_access_request
 from accesspilot.tools.executor import (
     ReadOnlyToolCall,
     execute_read_only_tool,
     tool_call_for_intent,
 )
 from accesspilot.tools.policies import PolicyAnswer, PolicyService
-from accesspilot.workspaces import UnknownWorkspaceError, Workspace, WorkspaceService
+from accesspilot.workspaces import (
+    CursorConflictError,
+    DraftRevisionConflictError,
+    UnknownWorkspaceError,
+    Workspace,
+    WorkspaceService,
+)
 
 
 class _StrictFrozenModel(BaseModel):
@@ -117,6 +138,25 @@ class GraphOutput(_StrictFrozenModel):
     tool_results: list[ToolResult]
     draft_revision: Annotated[StrictInt, Field(ge=0)]
     error_code: str | None = None
+
+
+def _noop_success_finalizer() -> None:
+    """Default post-terminal hook for outcomes with no Cursor projection."""
+
+
+@dataclass(frozen=True)
+class ProductionGraphRunResult:
+    """Prepared graph turn plus its post-terminal Cursor projection."""
+
+    turn: GraphOutput
+    success_finalizer: Callable[[], None] = field(
+        default=_noop_success_finalizer,
+        repr=False,
+        compare=False,
+    )
+
+    def finalize_success(self) -> None:
+        self.success_finalizer()
 
 
 @dataclass
@@ -322,17 +362,6 @@ REPRESENTATIVE_PATHS = {
         "persist_draft_cas",
         "validate_draft",
         "await_requester_confirmation",
-        "rehydrate_resume_snapshot",
-        "apply_confirmation_cas",
-        "ready_to_submit",
-        "finalize_public_outcome",
-        END,
-    ),
-    "request_resume_new_input": (
-        "await_requester_confirmation",
-        "rehydrate_resume_snapshot",
-        "route_intent",
-        "compose_safe_answer",
         "finalize_public_outcome",
         END,
     ),
@@ -354,6 +383,66 @@ class GraphRuntimeContractError(RuntimeError):
 
 class GraphWritePathDeferredError(RuntimeError):
     """A path requires a T32 application write and cannot run in T31."""
+
+
+def _execution_step_context(
+    runtime: Runtime[GraphRuntimeContext],
+    *,
+    workspace_ref: UUID,
+    graph_run_id: UUID,
+    input_seq: int,
+    input_turn_id: str,
+) -> AgentStepContext:
+    """Validate runtime-owned execution coordinates shared by nodes and finalizers."""
+
+    principal = _context_value(runtime, "principal")
+    current_turn_id = _context_value(runtime, "current_turn_id")
+    current_fence = _context_value(runtime, "current_fence")
+    auth_session_id = _context_value(runtime, "auth_session_id")
+    if (
+        not isinstance(principal, Principal)
+        or not isinstance(current_turn_id, str)
+        or current_turn_id != input_turn_id
+        or type(current_fence) is not int
+        or current_fence <= 0
+        or not isinstance(auth_session_id, str)
+    ):
+        raise GraphRuntimeContractError("graph execution binding failed")
+    try:
+        auth_session_ref = UUID(auth_session_id)
+    except ValueError:
+        raise GraphRuntimeContractError("graph execution binding failed") from None
+    return AgentStepContext(
+        workspace_id=workspace_ref,
+        graph_run_id=graph_run_id,
+        input_seq=input_seq,
+        input_turn_id=input_turn_id,
+        actor_id=principal.employee_id,
+        auth_session_ref=auth_session_ref,
+        lease_fence=current_fence,
+    )
+
+
+def _step_context(
+    state: GraphState,
+    runtime: Runtime[GraphRuntimeContext],
+) -> AgentStepContext:
+    return _execution_step_context(
+        runtime,
+        workspace_ref=state.workspace_ref,
+        graph_run_id=state.graph_run_id,
+        input_seq=state.input_seq,
+        input_turn_id=state.input_turn_id,
+    )
+
+
+def _step_service(
+    runtime: Runtime[GraphRuntimeContext],
+) -> AgentStepOperationService:
+    session_factory = _context_value(runtime, "session_factory")
+    if not callable(session_factory):
+        raise GraphRuntimeContractError("database service is unavailable")
+    return AgentStepOperationService(cast(Any, session_factory))
 
 
 def validate_state_update(state: GraphState, update: StateUpdate) -> GraphState:
@@ -516,7 +605,9 @@ def _hydrate_authoritative_snapshot(
         selected_route="unknown",
         base_draft_revision=workspace.draft_revision,
         committed_draft_revision=None,
-        draft_patch=_draft_patch(draft),
+        # Candidate state belongs only to this logical input. The authoritative
+        # prior draft remains runtime/DB data and is re-read by write nodes.
+        draft_patch=None,
         missing_fields=cast(list[MissingField], draft.missing_fields()),
         phase="routing",
         tool_name=None,
@@ -580,11 +671,7 @@ def route_graph_input(
     elif route.intent in {"help", "unknown"}:
         selected_route = "help" if route.intent == "help" else "unknown"
     elif route.intent == "policy_question":
-        selected_route = (
-            "policy"
-            if classify_policy_question(content) == "search"
-            else "read_only"
-        )
+        selected_route = "policy" if classify_policy_question(content) == "search" else "read_only"
     elif route.intent in {
         "discover_eligible_access",
         "list_active_access",
@@ -617,6 +704,27 @@ def _route_intent(
         router=cast(IntentRouter, router),
         numeric_cursor_active=snapshot.cursor is not None,
     )
+    cursor = snapshot.cursor
+    if (
+        cursor is not None
+        and cursor.expected_field == "justification"
+        and decision.intent in {"help", "request_access"}
+        and is_obvious_question(state.safe_user_text)
+    ):
+        decision = DeterministicGraphRoute(
+            intent="help",
+            security_flagged=decision.security_flagged,
+            selected_route="help",
+        )
+    elif decision.intent == "help" and is_request_collection_follow_up(
+        state.safe_user_text,
+        snapshot.draft.missing_fields(),
+    ):
+        decision = DeterministicGraphRoute(
+            intent="request_access",
+            security_flagged=decision.security_flagged,
+            selected_route="request_access",
+        )
     return {
         "intent": decision.intent,
         "security_flagged": decision.security_flagged,
@@ -631,6 +739,155 @@ def _route_intent(
         "business_status": "pending",
         "phase": "routing",
     }
+
+
+def _candidate_patch(parsed: ParsedReply) -> DraftPatch | None:
+    values: dict[str, object] = {
+        "entitlement_id": parsed.entitlement_id,
+        "duration_days": parsed.duration_days,
+        "justification": parsed.justification,
+    }
+    if not any(value is not None for value in values.values()):
+        return None
+    return DraftPatch.model_validate(values)
+
+
+def _call_model_attempt(
+    state: GraphState,
+    runtime: Runtime[GraphRuntimeContext],
+    *,
+    attempt: Literal[1, 2],
+) -> tuple[Literal["parsed", "malformed", "unavailable"], ParsedReply | None]:
+    model = _context_value(runtime, "structured_reply_model")
+    if not hasattr(model, "parse_reply"):
+        raise GraphRuntimeContractError("structured reply model is unavailable")
+    workspace_token = _context_value(runtime, "workspace_token")
+    if not isinstance(workspace_token, str):
+        raise GraphRuntimeContractError("workspace binding is unavailable")
+    service = _step_service(runtime)
+    context = _step_context(state, runtime)
+    reservation = service.reserve_model_attempt(
+        context,
+        workspace_token=workspace_token,
+        attempt=attempt,
+    )
+    if reservation.status == "reserved":
+        service.complete_model_attempt(
+            context,
+            workspace_token=workspace_token,
+            attempt=attempt,
+        )
+    correction = CORRECTION_PROMPT if attempt == 2 else None
+    try:
+        raw_parsed = model.parse_reply(
+            state.safe_user_text,
+            correction=correction,
+        )
+        parsed = ParsedReply.model_validate(raw_parsed)
+    except (MalformedStructuredOutputError, ValidationError):
+        return "malformed", None
+    except (httpx.HTTPError, TimeoutError):
+        return "unavailable", None
+    principal = _context_value(runtime, "principal")
+    if not isinstance(principal, Principal):
+        raise GraphRuntimeContractError("principal is unavailable")
+    parsed = normalize_request_candidate(
+        parsed,
+        actor_id=principal.employee_id,
+        content=state.safe_user_text,
+        security_probe=state.security_flagged,
+    )
+    # Confirmation is a T34 input decision, never a T32 model candidate.
+    parsed = parsed.model_copy(update={"confirmed": None})
+    return "parsed", parsed
+
+
+def _model_unavailable_update(state: GraphState) -> StateUpdate:
+    message = "我暂时没能可靠理解这条消息，请稍后重试或换一种说法。"
+    if state.security_flagged:
+        message = f"{SECURITY_MESSAGE}\n\n{message}"
+    return {
+        "draft_patch": None,
+        "assistant_message": message,
+        "business_status": "recoverable_error",
+        "phase": "recoverable_error",
+        "recoverable_error": {
+            "code": "MODEL_REPLY_UNAVAILABLE",
+            "message": message,
+        },
+    }
+
+
+def _parse_request_patch(
+    state: GraphState,
+    runtime: Runtime[GraphRuntimeContext],
+) -> StateUpdate:
+    workspace_token = _context_value(runtime, "workspace_token")
+    if not isinstance(workspace_token, str):
+        raise GraphRuntimeContractError("workspace binding is unavailable")
+    context = _step_context(state, runtime)
+    service = _step_service(runtime)
+    # A replay that already committed its authoritative draft must not spend
+    # model quota or depend on an at-least-once provider call to reconstruct it.
+    for step_key in ("persist_draft_cas", "persist_justification_cursor"):
+        if (
+            service.completed_step(
+                context,
+                workspace_token=workspace_token,
+                step_key=step_key,
+            )
+            is not None
+        ):
+            return {"draft_patch": None}
+    snapshot = _read_authoritative_snapshot(
+        state.workspace_ref,
+        runtime,
+        include_quota=False,
+    )
+    route = IntentRoute(
+        intent="request_access",
+        security_probe=state.security_flagged,
+    )
+    if (
+        snapshot.cursor is not None
+        and snapshot.cursor.expected_field == "justification"
+        and is_safe_justification_cursor_reply(state.safe_user_text, route)
+    ):
+        cursor_parsed = ParsedReply(
+            employee_id=snapshot.workspace.actor_id,
+            justification=state.safe_user_text,
+            confirmed=None,
+        )
+        return {"draft_patch": _candidate_patch(cursor_parsed)}
+
+    primary_status, candidate = _call_model_attempt(
+        state,
+        runtime,
+        attempt=1,
+    )
+    if primary_status == "unavailable":
+        return _model_unavailable_update(state)
+    if primary_status == "malformed":
+        retry_status, candidate = _call_model_attempt(
+            state,
+            runtime,
+            attempt=2,
+        )
+        if retry_status != "parsed":
+            return _model_unavailable_update(state)
+    if candidate is None:
+        raise GraphRuntimeContractError("parsed request candidate is unavailable")
+    if candidate.entitlement_id is not None and not candidate.entitlement_id.strip():
+        message = "当前无法可靠解析权限，请检查演示身份后重试。"
+        if state.security_flagged:
+            message = f"{SECURITY_MESSAGE}\n\n{message}"
+        return {
+            "draft_patch": None,
+            "assistant_message": message,
+            "business_status": "resolution_unavailable",
+            "phase": ("collecting" if snapshot.draft.missing_fields() else "awaiting_confirmation"),
+        }
+    return {"draft_patch": _candidate_patch(candidate)}
 
 
 def _select_read_tool(
@@ -657,9 +914,7 @@ def _safe_tool_result(
     if result.active_access is not None:
         entitlement_codes.extend(item.code for item in result.active_access)
     if result.entitlement_resolution is not None:
-        entitlement_codes.extend(
-            item.code for item in result.entitlement_resolution.candidates
-        )
+        entitlement_codes.extend(item.code for item in result.entitlement_resolution.candidates)
         entitlement_codes.extend(
             item.code for item in result.entitlement_resolution.eligible_access
         )
@@ -699,11 +954,7 @@ def _execute_read_tool(
     if state.intent is None or state.tool_name is None:
         raise GraphRuntimeContractError("read-only tool call is unavailable")
     call = tool_call_for_intent(state.intent, content=state.safe_user_text)
-    if (
-        call is None
-        or call.tool == "search_policies"
-        or call.tool != state.tool_name
-    ):
+    if call is None or call.tool == "search_policies" or call.tool != state.tool_name:
         raise GraphRuntimeContractError("read-only tool selection is invalid")
     session_factory = _context_value(runtime, "session_factory")
     workspace_token = _context_value(runtime, "workspace_token")
@@ -755,9 +1006,7 @@ def _compose_safe_answer(
         message = compose_tool_answer(route, None)
     if state.security_flagged and state.intent != "security_probe":
         message = f"{SECURITY_MESSAGE}\n\n{message}"
-    business_status = (
-        "needs_clarification" if state.intent == "unknown" else "answered"
-    )
+    business_status = "needs_clarification" if state.intent == "unknown" else "answered"
     recoverable_error = None
     if state.intent == "unknown":
         recoverable_error = {
@@ -791,10 +1040,80 @@ def _numeric_error(
     }
 
 
+def _numeric_success_update(
+    state: GraphState,
+    runtime: Runtime[GraphRuntimeContext],
+) -> StateUpdate:
+    """Compose a numeric-CAS outcome only from the re-read authoritative draft."""
+
+    snapshot = _read_authoritative_snapshot(
+        state.workspace_ref,
+        runtime,
+        include_quota=False,
+    )
+    missing = cast(list[MissingField], snapshot.draft.missing_fields())
+    if missing:
+        message = missing_field_question(missing[0])
+        business_status: BusinessStatus = "collecting"
+        phase: GraphPhase = "collecting"
+        recoverable_error = None
+    else:
+        session_factory = _context_value(runtime, "session_factory")
+        if not callable(session_factory):
+            raise GraphRuntimeContractError("database service is unavailable")
+        with session_factory() as session:
+            validation = validate_access_request(session, snapshot.draft)
+        if validation.status != "success":
+            message = "申请未通过目录校验，请检查员工、权限或期限。"
+            business_status = "validation_failed"
+            # Preserve the existing deterministic numeric outcome contract.
+            phase = "awaiting_confirmation"
+            recoverable_error = {
+                "code": "BUSINESS_VALIDATION_FAILED",
+                "message": message,
+            }
+        else:
+            message = "申请信息已完整。请明确回复“确认提交”后再创建正式申请。"
+            business_status = "awaiting_confirmation"
+            phase = "awaiting_confirmation"
+            recoverable_error = None
+    if state.security_flagged:
+        message = f"{SECURITY_MESSAGE}\n\n{message}"
+    return {
+        "intent": "request_access",
+        "committed_draft_revision": snapshot.workspace.draft_revision,
+        "missing_fields": missing,
+        "assistant_message": message,
+        "business_status": business_status,
+        "phase": phase,
+        "recoverable_error": recoverable_error,
+    }
+
+
 def _handle_numeric_followup(
     state: GraphState,
     runtime: Runtime[GraphRuntimeContext],
 ) -> StateUpdate:
+    workspace_token = _context_value(runtime, "workspace_token")
+    if not isinstance(workspace_token, str):
+        raise GraphRuntimeContractError("workspace binding is unavailable")
+    service = _step_service(runtime)
+    context: AgentStepContext | None = None
+    if _VALID_DURATION_RE.fullmatch(state.safe_user_text) is not None:
+        try:
+            context = _step_context(state, runtime)
+        except GraphRuntimeContractError:
+            # T31's non-writing numeric compatibility paths intentionally have
+            # no execution binding. A legal T32 write still requires it below.
+            context = None
+        if context is not None:
+            completed = service.completed_step(
+                context,
+                workspace_token=workspace_token,
+                step_key="persist_numeric_duration",
+            )
+            if completed is not None:
+                return _numeric_success_update(state, runtime)
     snapshot = _read_authoritative_snapshot(
         state.workspace_ref,
         runtime,
@@ -806,10 +1125,7 @@ def _handle_numeric_followup(
         return _numeric_error(
             runtime,
             intent="unknown",
-            message=(
-                "我需要更多上下文才能理解“111”："
-                "它是期限、权限编号，还是其他内容？"
-            ),
+            message=("我需要更多上下文才能理解“111”：它是期限、权限编号，还是其他内容？"),
             business_status="needs_clarification",
             phase="collecting" if state.missing_fields else "awaiting_confirmation",
             error_code="NUMERIC_CONTEXT_REQUIRED",
@@ -832,14 +1148,10 @@ def _handle_numeric_followup(
             intent="request_access",
             message=questions[cursor.expected_field],
             business_status=(
-                "awaiting_confirmation"
-                if cursor.expected_field == "confirmation"
-                else "collecting"
+                "awaiting_confirmation" if cursor.expected_field == "confirmation" else "collecting"
             ),
             phase=(
-                "awaiting_confirmation"
-                if cursor.expected_field == "confirmation"
-                else "collecting"
+                "awaiting_confirmation" if cursor.expected_field == "confirmation" else "collecting"
             ),
             error_code=codes[cursor.expected_field],
         )
@@ -865,17 +1177,31 @@ def _handle_numeric_followup(
         return _numeric_error(
             runtime,
             intent="request_access",
-            message=(
-                f"该权限最长只能申请 {maximum} 天，"
-                "请重新输入不超过上限的期限。"
-            ),
+            message=(f"该权限最长只能申请 {maximum} 天，请重新输入不超过上限的期限。"),
             business_status="collecting",
             phase="collecting",
             error_code="DURATION_EXCEEDS_MAXIMUM",
         )
-    raise GraphWritePathDeferredError(
-        "valid duration persistence is deferred to T32"
-    )
+    proposed = draft.model_copy(update={"duration_days": candidate, "confirmed": False})
+    if context is None:
+        context = _step_context(state, runtime)
+    try:
+        service.persist_numeric_duration(
+            context,
+            workspace_token=workspace_token,
+            expected_revision=cursor.draft_revision,
+            draft=proposed,
+        )
+    except CursorConflictError:
+        return _numeric_error(
+            runtime,
+            intent="unknown",
+            message="这条期限上下文已经变化，请重新说明申请内容。",
+            business_status="needs_clarification",
+            phase="collecting",
+            error_code="CURSOR_STALE",
+        )
+    return _numeric_success_update(state, runtime)
 
 
 def _unavailable_policy_answer() -> PolicyAnswer:
@@ -908,9 +1234,7 @@ def _retrieve_policy_pgvector(
             query=state.safe_user_text,
         )
         invocation.tool_result = ToolResult(status="success", policy_answer=answer)
-    evidence_codes = list(
-        dict.fromkeys(item.policy_code for item in answer.evidence)
-    )[:8]
+    evidence_codes = list(dict.fromkeys(item.policy_code for item in answer.evidence))[:8]
     status = {
         "grounded": "grounded",
         "insufficient_evidence": "insufficient",
@@ -1017,6 +1341,8 @@ def _compose_recoverable_answer(
             runtime,
             expected_status="unavailable",
         )
+    if state.assistant_message is not None and state.business_status != "pending":
+        return {}
     return {
         "assistant_message": "当前请求暂时无法安全完成，请稍后重试。",
         "business_status": "recoverable_error",
@@ -1025,6 +1351,282 @@ def _compose_recoverable_answer(
             "code": "GRAPH_STEP_UNAVAILABLE",
             "message": "当前请求暂时无法安全完成，请稍后重试。",
         },
+    }
+
+
+def _resolve_entitlement(
+    state: GraphState,
+    runtime: Runtime[GraphRuntimeContext],
+) -> StateUpdate:
+    if state.recoverable_error is not None:
+        return {}
+    if state.draft_patch is None or state.draft_patch.entitlement_id is None:
+        raise GraphRuntimeContractError("entitlement candidate is unavailable")
+    session_factory = _context_value(runtime, "session_factory")
+    workspace_token = _context_value(runtime, "workspace_token")
+    if not callable(session_factory) or not isinstance(workspace_token, str):
+        raise GraphRuntimeContractError("entitlement resolver is unavailable")
+    call = ReadOnlyToolCall(
+        tool="resolve_entitlement",
+        query=state.draft_patch.entitlement_id,
+    )
+    try:
+        with session_factory() as session:
+            result = execute_read_only_tool(
+                session,
+                workspace_token=workspace_token,
+                call=call,
+            )
+    except Exception:
+        result = ToolResult(status="workspace_not_found")
+    invocation = _optional_invocation_facts(runtime)
+    if invocation is not None:
+        invocation.tool_call = call
+        invocation.tool_result = result
+    summary = entitlement_resolution_message(result)
+    safe_result = _safe_tool_result(call, result, summary=summary)
+    resolution = result.entitlement_resolution
+    matched = (
+        result.status == "success"
+        and resolution is not None
+        and resolution.status == "matched"
+        and len(resolution.candidates) == 1
+    )
+    if matched:
+        assert resolution is not None
+        return {
+            "draft_patch": state.draft_patch.model_copy(
+                update={"entitlement_id": resolution.candidates[0].code}
+            ),
+            "tool_name": "resolve_entitlement",
+            "safe_tool_result": safe_result,
+        }
+
+    resolution_status = resolution.status if resolution is not None else None
+    business_status: BusinessStatus = (
+        cast(BusinessStatus, f"entitlement_{resolution_status}")
+        if resolution_status in {"ambiguous", "no_match"}
+        else "resolution_unavailable"
+    )
+    snapshot = _read_authoritative_snapshot(
+        state.workspace_ref,
+        runtime,
+        include_quota=False,
+    )
+    message = summary
+    if state.security_flagged:
+        message = f"{SECURITY_MESSAGE}\n\n{message}"
+    return {
+        "tool_name": "resolve_entitlement",
+        "safe_tool_result": safe_result,
+        "assistant_message": message,
+        "business_status": business_status,
+        "phase": ("collecting" if snapshot.draft.missing_fields() else "awaiting_confirmation"),
+    }
+
+
+def _merged_draft(
+    state: GraphState,
+    runtime: Runtime[GraphRuntimeContext],
+) -> tuple[_AuthoritativeSnapshot, RequestDraft]:
+    snapshot = _read_authoritative_snapshot(
+        state.workspace_ref,
+        runtime,
+        include_quota=False,
+    )
+    patch = state.draft_patch
+    candidate = ParsedReply(
+        employee_id=snapshot.workspace.actor_id,
+        entitlement_id=patch.entitlement_id if patch is not None else None,
+        duration_days=patch.duration_days if patch is not None else None,
+        justification=patch.justification if patch is not None else None,
+        confirmed=None,
+    )
+    return snapshot, merge_request_candidate(snapshot.draft, candidate)
+
+
+def _merge_candidate(
+    state: GraphState,
+    runtime: Runtime[GraphRuntimeContext],
+) -> StateUpdate:
+    if state.recoverable_error is not None or state.business_status in {
+        "entitlement_ambiguous",
+        "entitlement_no_match",
+        "resolution_unavailable",
+    }:
+        return {}
+    _, merged = _merged_draft(state, runtime)
+    missing = cast(list[MissingField], merged.missing_fields())
+    return {
+        "missing_fields": missing,
+        "phase": "collecting" if missing else "awaiting_confirmation",
+    }
+
+
+def _draft_conflict_update(
+    state: GraphState,
+    runtime: Runtime[GraphRuntimeContext],
+) -> StateUpdate:
+    snapshot = _read_authoritative_snapshot(
+        state.workspace_ref,
+        runtime,
+        include_quota=False,
+    )
+    message = "申请草稿刚刚被另一轮更新，请基于最新草稿继续。"
+    return {
+        "committed_draft_revision": snapshot.workspace.draft_revision,
+        "missing_fields": cast(list[MissingField], snapshot.draft.missing_fields()),
+        "assistant_message": message,
+        "business_status": "recoverable_error",
+        "phase": "recoverable_error",
+        "recoverable_error": {
+            "code": "DRAFT_REVISION_CONFLICT",
+            "message": message,
+        },
+    }
+
+
+def _persist_draft_cas(
+    state: GraphState,
+    runtime: Runtime[GraphRuntimeContext],
+) -> StateUpdate:
+    if state.recoverable_error is not None or state.business_status in {
+        "entitlement_ambiguous",
+        "entitlement_no_match",
+        "resolution_unavailable",
+    }:
+        return {}
+    snapshot, merged = _merged_draft(state, runtime)
+    workspace_token = _context_value(runtime, "workspace_token")
+    if not isinstance(workspace_token, str):
+        raise GraphRuntimeContractError("workspace binding is unavailable")
+    service = _step_service(runtime)
+    context = _step_context(state, runtime)
+    cursor = snapshot.cursor
+    route = IntentRoute(
+        intent="request_access",
+        security_probe=state.security_flagged,
+    )
+    try:
+        if (
+            cursor is not None
+            and cursor.expected_field == "justification"
+            and is_safe_justification_cursor_reply(state.safe_user_text, route)
+        ):
+            completed = service.persist_justification_cursor(
+                context,
+                workspace_token=workspace_token,
+                expected_revision=state.base_draft_revision,
+                draft=merged,
+            )
+        else:
+            completed = service.persist_draft(
+                context,
+                workspace_token=workspace_token,
+                expected_revision=state.base_draft_revision,
+                draft=merged,
+            )
+    except (CursorConflictError, DraftRevisionConflictError):
+        return _draft_conflict_update(state, runtime)
+    authoritative = _read_authoritative_snapshot(
+        state.workspace_ref,
+        runtime,
+        include_quota=False,
+    )
+    return {
+        "committed_draft_revision": completed.committed_revision,
+        "missing_fields": cast(list[MissingField], authoritative.draft.missing_fields()),
+    }
+
+
+def _validate_draft(
+    state: GraphState,
+    runtime: Runtime[GraphRuntimeContext],
+) -> StateUpdate:
+    if state.recoverable_error is not None or state.business_status in {
+        "entitlement_ambiguous",
+        "entitlement_no_match",
+        "resolution_unavailable",
+    }:
+        return {}
+    snapshot = _read_authoritative_snapshot(
+        state.workspace_ref,
+        runtime,
+        include_quota=False,
+    )
+    missing = cast(list[MissingField], snapshot.draft.missing_fields())
+    if missing:
+        return {
+            "missing_fields": missing,
+            "business_status": "collecting",
+            "phase": "collecting",
+        }
+    session_factory = _context_value(runtime, "session_factory")
+    if not callable(session_factory):
+        raise GraphRuntimeContractError("database service is unavailable")
+    with session_factory() as session:
+        result = validate_access_request(session, snapshot.draft)
+    invocation = _optional_invocation_facts(runtime)
+    if invocation is not None:
+        invocation.tool_result = result
+    summary = (
+        "申请字段与目录校验通过"
+        if result.status == "success"
+        else "申请未通过目录校验，请检查员工、权限或期限"
+    )
+    safe_result: dict[str, object] = {
+        "tool": "validate_access_request",
+        "status": result.status,
+        "entitlement_codes": [],
+        "policy_codes": [],
+        "match_count": 0,
+        "summary": summary,
+    }
+    if result.status != "success":
+        return {
+            "tool_name": "validate_access_request",
+            "safe_tool_result": safe_result,
+            "assistant_message": summary,
+            "business_status": "validation_failed",
+            "phase": "recoverable_error",
+        }
+    return {
+        "tool_name": "validate_access_request",
+        "safe_tool_result": safe_result,
+        "business_status": "awaiting_confirmation",
+        "phase": "awaiting_confirmation",
+    }
+
+
+def _ask_missing_field(
+    state: GraphState,
+    runtime: Runtime[GraphRuntimeContext],
+) -> StateUpdate:
+    del runtime
+    if not state.missing_fields:
+        raise GraphRuntimeContractError("missing-field branch has no missing field")
+    message = missing_field_question(state.missing_fields[0])
+    if state.security_flagged:
+        message = f"{SECURITY_MESSAGE}\n\n{message}"
+    return {
+        "assistant_message": message,
+        "business_status": "collecting",
+        "phase": "collecting",
+    }
+
+
+def _await_requester_confirmation(
+    state: GraphState,
+    runtime: Runtime[GraphRuntimeContext],
+) -> StateUpdate:
+    del runtime
+    message = "申请信息已完整。请明确回复“确认提交”后再创建正式申请。"
+    if state.security_flagged:
+        message = f"{SECURITY_MESSAGE}\n\n{message}"
+    return {
+        "assistant_message": message,
+        "business_status": "awaiting_confirmation",
+        "phase": "awaiting_confirmation",
     }
 
 
@@ -1056,17 +1658,25 @@ def _route_policy_evidence(state: GraphState) -> str:
 
 
 def _route_entitlement_resolution(state: GraphState) -> str:
-    if (
-        state.draft_patch is None
-        or state.draft_patch.entitlement_id is None
-        or not is_canonical_entitlement_code(state.draft_patch.entitlement_id)
-    ):
-        return "yes"
-    return "no"
+    return (
+        "yes"
+        if state.draft_patch is not None and state.draft_patch.entitlement_id is not None
+        else "no"
+    )
 
 
 def _route_draft_validation(state: GraphState) -> str:
-    if state.recoverable_error is not None or state.phase == "recoverable_error":
+    if (
+        state.recoverable_error is not None
+        or state.phase == "recoverable_error"
+        or state.business_status
+        in {
+            "entitlement_ambiguous",
+            "entitlement_no_match",
+            "resolution_unavailable",
+            "validation_failed",
+        }
+    ):
         return "invalid_or_conflict"
     if state.missing_fields:
         return "missing"
@@ -1078,6 +1688,32 @@ def _route_resume(state: GraphState) -> str:
 
 
 Checkpointer = BaseCheckpointSaver[Any] | Literal[False] | None
+
+
+def _activate_t32_missing_cursor(
+    *,
+    service: AgentStepOperationService,
+    context: AgentStepContext,
+    workspace_token: str,
+    turn: GraphOutput,
+) -> None:
+    """Project only the next missing-field Cursor after a successful terminal."""
+
+    if (
+        turn.intent != "request_access"
+        or turn.business_status != "collecting"
+        or not turn.missing_fields
+    ):
+        return
+    expected_field = turn.missing_fields[0]
+    if expected_field not in {"entitlement_id", "duration_days", "justification"}:
+        raise GraphRuntimeContractError("cursor projection field is unsupported")
+    service.activate_missing_cursor(
+        context,
+        workspace_token=workspace_token,
+        expected_revision=turn.draft_revision,
+        expected_field=expected_field,
+    )
 
 
 def _compile_production_graph(
@@ -1116,6 +1752,13 @@ def _compile_production_graph(
         "compose_grounded_answer": _compose_grounded_answer,
         "compose_insufficient_answer": _compose_insufficient_answer,
         "compose_recoverable_answer": _compose_recoverable_answer,
+        "parse_request_patch": _parse_request_patch,
+        "resolve_entitlement": _resolve_entitlement,
+        "merge_candidate": _merge_candidate,
+        "persist_draft_cas": _persist_draft_cas,
+        "validate_draft": _validate_draft,
+        "ask_missing_field": _ask_missing_field,
+        "await_requester_confirmation": _await_requester_confirmation,
         "finalize_public_outcome": _finalize_public_outcome,
     }
     for node_name in PRODUCTION_NODE_NAMES:
@@ -1129,9 +1772,7 @@ def _compile_production_graph(
             node_name,
             cast(
                 Any,
-                validated_state_node(
-                    implemented_nodes.get(node_name, _passthrough_stub)
-                ),
+                validated_state_node(implemented_nodes.get(node_name, _passthrough_stub)),
             ),
         )
 
@@ -1163,9 +1804,9 @@ def _compile_production_graph(
         _route_draft_validation,
         PRODUCTION_CONDITIONAL_PATHS["validate_draft"],
     )
-    # T30 deliberately contains no interrupt(). This edge is the replaceable
-    # T34 resume contract and keeps rehydration visible in the production DAG.
-    builder.add_edge("await_requester_confirmation", "rehydrate_resume_snapshot")
+    # T32 stops safely at the confirmation boundary. T34 will replace this
+    # direct terminal edge with interrupt/pending resume semantics.
+    builder.add_edge("await_requester_confirmation", "finalize_public_outcome")
     builder.add_conditional_edges(
         "rehydrate_resume_snapshot",
         _route_resume,
@@ -1235,15 +1876,18 @@ class ProductionGraph:
         )
         if snapshot.quota is None:
             raise GraphRuntimeContractError("authoritative output snapshot is unavailable")
-        public_phase = (
-            ConversationPhase.RECOVERABLE_ERROR
-            if node_output.business_status == "recoverable_error"
-            else (
+        if node_output.phase == "recoverable_error":
+            public_phase = ConversationPhase.RECOVERABLE_ERROR
+        elif node_output.phase == "collecting":
+            public_phase = ConversationPhase.COLLECTING
+        elif node_output.phase in {"awaiting_confirmation", "ready_to_submit"}:
+            public_phase = ConversationPhase.AWAITING_CONFIRMATION
+        else:
+            public_phase = (
                 ConversationPhase.COLLECTING
                 if snapshot.draft.missing_fields()
                 else ConversationPhase.AWAITING_CONFIRMATION
             )
-        )
         return GraphOutput(
             assistant_message=node_output.assistant_message,
             draft=snapshot.draft,
@@ -1253,11 +1897,7 @@ class ProductionGraph:
             quota=snapshot.quota,
             intent=node_output.intent,
             security_flagged=node_output.security_flagged,
-            tool_results=(
-                [invocation.tool_result]
-                if invocation.tool_result is not None
-                else []
-            ),
+            tool_results=([invocation.tool_result] if invocation.tool_result is not None else []),
             draft_revision=snapshot.workspace.draft_revision,
             error_code=(
                 invocation.error_code
@@ -1268,6 +1908,47 @@ class ProductionGraph:
                 )
             ),
         )
+
+    def prepare(
+        self,
+        graph_input: GraphInput | Mapping[str, object],
+        config: RunnableConfig | None = None,
+        *,
+        context: GraphRuntimeContext,
+        **kwargs: Any,
+    ) -> ProductionGraphRunResult:
+        """Prepare one turn and defer the allowed Cursor write until terminal success."""
+
+        validated_input = GraphInput.model_validate(graph_input)
+        turn = self.invoke(
+            validated_input,
+            config,
+            context=context,
+            **kwargs,
+        )
+        workspace_token = context.get("workspace_token")
+        if not isinstance(workspace_token, str):
+            raise GraphRuntimeContractError("cursor finalizer context is unavailable")
+        prepared_context, _ = self._prepare_context(context)
+        runtime = Runtime(context=prepared_context)
+        step_context = _execution_step_context(
+            runtime,
+            workspace_ref=validated_input.workspace_ref,
+            graph_run_id=validated_input.graph_run_id,
+            input_seq=validated_input.input_seq,
+            input_turn_id=validated_input.input_turn_id,
+        )
+        service = _step_service(runtime)
+
+        def finalize() -> None:
+            _activate_t32_missing_cursor(
+                service=service,
+                context=step_context,
+                workspace_token=workspace_token,
+                turn=turn,
+            )
+
+        return ProductionGraphRunResult(turn=turn, success_finalizer=finalize)
 
     def stream(
         self,

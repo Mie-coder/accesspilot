@@ -112,15 +112,13 @@ EXPECTED_UNCONDITIONAL_EDGES = {
     ("resolve_entitlement", "merge_candidate"),
     ("merge_candidate", "persist_draft_cas"),
     ("persist_draft_cas", "validate_draft"),
-    ("await_requester_confirmation", "rehydrate_resume_snapshot"),
-    ("apply_confirmation_cas", "ready_to_submit"),
+    ("await_requester_confirmation", "finalize_public_outcome"),
     ("compose_safe_answer", "finalize_public_outcome"),
     ("handle_numeric_followup", "finalize_public_outcome"),
     ("compose_grounded_answer", "finalize_public_outcome"),
     ("compose_insufficient_answer", "finalize_public_outcome"),
     ("compose_recoverable_answer", "finalize_public_outcome"),
     ("ask_missing_field", "finalize_public_outcome"),
-    ("ready_to_submit", "finalize_public_outcome"),
     ("finalize_public_outcome", "__end__"),
 }
 
