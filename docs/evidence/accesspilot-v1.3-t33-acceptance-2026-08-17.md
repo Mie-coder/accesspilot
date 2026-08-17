@@ -1,9 +1,9 @@
-# AccessPilot v1.3 T33 验收证据（待独立复核）
+# AccessPilot v1.3 T33 验收证据（Verified）
 
 **Ticket：** T33 — Turn Execution Lease、Fence 与崩溃接管内核
 **实现基线 revision：** `7ad8a01`（T32 基线）；T33 本地提交见 git log
 **日期：** 2026-08-17
-**状态：** `In progress`（已实现，待独立复核）；尚未标记 `Verified`
+**状态：** `Verified`；独立复核 P0=0、P1=0，验收通过
 
 ## 1. AC 覆盖与证据
 
@@ -86,6 +86,12 @@
 - MyPy：`Success: no issues found in 53 source files`
 - `git diff --check`：通过。
 
+## 3.5 独立复核结论
+
+- 独立复核：P0=0、P1=0。
+- AC1/AC2/AC3 均通过；`takeover → exact resume → promote → finalize` 真实组合路径已跑通。
+- 状态：`Verified`。
+
 ## 4. 实现文件
 
 - `apps/api/src/accesspilot/agent/advisory_lock.py`（新增）
@@ -101,4 +107,4 @@
 - 未接入生产 JSON/SSE 入口；T33 runner 是可复用内核，T38/T40 才做入口门禁与 canary。
 - 未生成 T36 脱敏轨迹事件。
 - 未做六点崩溃恢复故障注入（T37）。
-- 本文件不是独立验收结论；`Verified` 必须由独立 reviewer 给出 P0=0、P1=0 后标记。
+- 本文件已由独立复核确认 P0=0、P1=0，状态为 `Verified`；正式简历仍需用户另行确认后才修改。
