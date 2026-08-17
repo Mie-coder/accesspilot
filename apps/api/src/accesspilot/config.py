@@ -1,6 +1,9 @@
 """AccessPilot 应用配置。"""
 
-from pydantic import Field, SecretStr
+import re
+from typing import Literal
+
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,6 +25,22 @@ class Settings(BaseSettings):
     demo_mode_enabled: bool = False
     database_url: str = (
         "postgresql+psycopg://accesspilot@127.0.0.1:55432/accesspilot"
+    )
+    # Deploy-time DDL credentials are intentionally separate from both the
+    # application and checkpoint runtime credentials.  They are only consumed
+    # by ``python -m accesspilot.checkpoint_init``.
+    migration_database_url: str | None = None
+    checkpoint_migration_database_url: str | None = None
+    checkpoint_database_url: str | None = None
+    checkpoint_schema: str = "accesspilot_checkpoint"
+    checkpoint_pool_min_size: int = Field(default=1, ge=1, le=20)
+    checkpoint_pool_max_size: int = Field(default=4, ge=1, le=50)
+    checkpoint_readiness_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
+    orchestrator_mode: Literal["legacy", "mixed", "langgraph"] = "legacy"
+    langgraph_canary_percent: int | None = None
+    langgraph_strict_msgpack: bool = Field(
+        default=False,
+        validation_alias="LANGGRAPH_STRICT_MSGPACK",
     )
     deepseek_api_key: SecretStr | None = Field(
         default=None,
@@ -49,6 +68,35 @@ class Settings(BaseSettings):
         validation_alias="DASHSCOPE_BASE_URL",
     )
     policy_similarity_threshold: float = Field(default=0.20, ge=0.0, le=1.0)
+
+    @field_validator("checkpoint_schema")
+    @classmethod
+    def validate_checkpoint_schema(cls, value: str) -> str:
+        if value == "public" or not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", value):
+            raise ValueError("checkpoint_schema must be an independent checkpoint schema")
+        return value
+
+    @model_validator(mode="after")
+    def validate_orchestrator_configuration(self) -> "Settings":
+        if self.checkpoint_pool_min_size > self.checkpoint_pool_max_size:
+            raise ValueError("checkpoint_pool_min_size cannot exceed max size")
+        if self.orchestrator_mode == "mixed":
+            if self.langgraph_canary_percent is None:
+                raise ValueError("langgraph_canary_percent is required in mixed mode")
+            if not 0 <= self.langgraph_canary_percent <= 100:
+                raise ValueError("langgraph_canary_percent must be between 0 and 100")
+        elif self.langgraph_canary_percent is not None:
+            raise ValueError("langgraph_canary_percent is only valid in mixed mode")
+        if self.orchestrator_mode in {"mixed", "langgraph"}:
+            if not self.checkpoint_database_url:
+                raise ValueError(
+                    "checkpoint_database_url is required when LangGraph is allowed"
+                )
+            if not self.langgraph_strict_msgpack:
+                raise ValueError(
+                    "LANGGRAPH_STRICT_MSGPACK=true is required when LangGraph is allowed"
+                )
+        return self
 
     model_config = SettingsConfigDict(
         env_prefix="ACCESSPILOT_",

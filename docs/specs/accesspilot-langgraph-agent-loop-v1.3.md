@@ -1,6 +1,6 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Spec
 
-**状态：** T26–T28 `Verified`；T29 为下一张，T30–T42 尚未开始；未授权推送、合并、部署或修改正式简历
+**状态：** T26–T29 `Verified`；T30 为下一张，T31–T42 尚未开始；未授权推送、合并、部署或修改正式简历
 **更新时间：** 2026-08-17
 **继承基线：** AccessPilot v1.2，`product_verified=true`；历史验证结果不能自动证明 v1.3
 **上游规格：** `docs/specs/accesspilot-productized-agent-v1.2.md`
@@ -628,4 +628,4 @@ Claim Ledger 能从“LangGraph 主链、Postgres checkpoint、interrupt/resume�
 
 用户已选择 Claude Code + DeepSeek 双评审；两份只读结果已完成，接受项已回流本修订版，裁决见评审决策记录。
 
-用户已确认 T26–T42 按张串行实施。T26 已通过 Claude Code + DeepSeek 双独立验收并本地提交；T27 已独立验收并本地提交；T28 已通过独立只读验收，当前进入 T29。仍未授权推送、合并、部署或修改正式简历。
+用户已确认 T26–T42 按张串行实施。T26 已通过 Claude Code + DeepSeek 双独立验收并本地提交；T27–T28 已独立验收并本地提交；T29 已通过独立只读验收，当前进入 T30。仍未授权推送、合并、部署或修改正式简历。
