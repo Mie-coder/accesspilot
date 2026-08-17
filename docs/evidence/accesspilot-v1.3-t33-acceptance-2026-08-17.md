@@ -68,12 +68,18 @@
 4. 新增 `complete_turn_with_event()`：terminal 事件创建与 execution terminalize 在同一个 fenced 事务；stale owner 场景断言事件数不增加。
 5. 新增真实组合测试 `test_takeover_runner_promote_finalize_combined_real_checkpoint`：takeover → 精确 accepted interrupt head 恢复 invoke → promote → finalize 全程由服务方法提交，测试不手动 `commit()`。
 
+第三轮 P1 修复（terminal finalizer 合同）：
+1. `complete_turn_with_event()` 删除可调用方指定的 `status`，状态由 `event_type` 唯一派生：`message.completed → completed`、`error.recoverable → recoverable_error`、`turn.interrupted → interrupted`。
+2. terminal payload 的 `turn_id` 必须等于 `handle.input_turn_id`，不匹配时事件和 execution 都零写入。
+3. 删除旧的公开 `complete_turn(terminal_event_id=...)` 逃生口；生产只保留原子 `complete_turn_with_event()`。
+4. 新增测试：三种 event/status 映射、错误 turn_id 零写入、旧入口不可用。
+
 ## 3. 测试结果（本轮真实命令输出）
 
-- T33 定向：`18 passed`
-  - `apps/api/tests/agent/test_t33_turn_execution.py`：9 项
+- T33 定向：`23 passed`
+  - `apps/api/tests/agent/test_t33_turn_execution.py`：14 项
   - `apps/api/tests/db/test_t33_postgres.py`（真实隔离 disposable PostgreSQL）：9 项
-- Agent 相关回归：`230 passed, 1 skipped`
+- Agent 相关回归：`235 passed, 1 skipped`
   - skip 为 T26 destructive-isolated PostgreSQL probe 的环境门禁。
 - 相关真实 PG 回归：`apps/api/tests/db/test_t29_postgres.py` 通过。
 - Ruff：`All checks passed!`

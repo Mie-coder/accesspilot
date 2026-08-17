@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from accesspilot.agent.advisory_lock import AdvisoryLockOwnershipError
 from accesspilot.agent.turn_execution import (
     StaleTurnFenceError,
+    TurnExecutionError,
     TurnExecutionService,
     TurnInProgressError,
     TurnLockUnavailableError,
@@ -265,27 +266,17 @@ def test_complete_turn_releases_lease_and_next_input_reuses_graph_run(
         safe_user_text="first",
     )
 
-    with database_session_factory() as session:
-        terminal = WorkspaceEventRecord(
-            workspace_id=workspace_id,
+    with service.advisory_lock(agent_thread_id) as lock:
+        terminal_event_id = service.complete_turn_with_event(
+            first,
+            workspace_token=token,
+            lock=lock,
             event_type="message.completed",
             payload={
                 "turn_id": first.input_turn_id,
                 "message_id": "msg-1",
                 "content": "ok",
             },
-        )
-        session.add(terminal)
-        session.flush()
-        terminal_event_id = terminal.id
-        session.commit()
-
-    with service.advisory_lock(agent_thread_id) as lock:
-        service.complete_turn(
-            first,
-            workspace_token=token,
-            terminal_event_id=terminal_event_id,
-            lock=lock,
         )
 
     with database_session_factory() as session:
@@ -308,6 +299,112 @@ def test_complete_turn_releases_lease_and_next_input_reuses_graph_run(
     assert second.graph_run_id == first.graph_run_id
     assert second.input_seq == first.input_seq + 1
     assert second.lease_fence == first.lease_fence + 1
+
+
+@pytest.mark.parametrize(
+    ("event_type", "expected_status"),
+    [
+        ("message.completed", "completed"),
+        ("error.recoverable", "recoverable_error"),
+        ("turn.interrupted", "interrupted"),
+    ],
+)
+def test_complete_turn_with_event_derives_status_from_event_type(
+    database_session_factory: sessionmaker[Session],
+    event_type: str,
+    expected_status: str,
+) -> None:
+    token, workspace_id, agent_thread_id, auth_session_id = _workspace_fixture(
+        database_session_factory
+    )
+    service = TurnExecutionService(database_session_factory)
+    handle = service.begin_input(
+        workspace_token=token,
+        auth_session_ref=auth_session_id,
+        actor_id="EMP-001",
+        safe_user_text="status mapping",
+    )
+    with service.advisory_lock(agent_thread_id) as lock:
+        if event_type == "message.completed":
+            payload: dict[str, object] = {
+                "turn_id": handle.input_turn_id,
+                "message_id": "msg-map",
+                "content": "ok",
+            }
+        elif event_type == "error.recoverable":
+            payload = {
+                "turn_id": handle.input_turn_id,
+                "code": "TEST_RECOVERABLE",
+                "message": "recoverable",
+            }
+        else:
+            payload = {
+                "turn_id": handle.input_turn_id,
+                "reason": "test interruption",
+            }
+        service.complete_turn_with_event(
+            handle,
+            workspace_token=token,
+            lock=lock,
+            event_type=event_type,  # type: ignore[arg-type]
+            payload=payload,
+        )
+    with database_session_factory() as session:
+        execution = session.scalar(
+            select(AgentTurnExecutionRecord).where(
+                AgentTurnExecutionRecord.workspace_id == workspace_id
+            )
+        )
+        assert execution is not None
+        assert execution.status == expected_status
+        assert execution.lease_expires_at is None
+        assert execution.terminal_event_id is not None
+
+
+def test_complete_turn_with_event_rejects_mismatched_turn_id_zero_write(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    token, workspace_id, agent_thread_id, auth_session_id = _workspace_fixture(
+        database_session_factory
+    )
+    service = TurnExecutionService(database_session_factory)
+    handle = service.begin_input(
+        workspace_token=token,
+        auth_session_ref=auth_session_id,
+        actor_id="EMP-001",
+        safe_user_text="mismatched turn",
+    )
+    before_events = _event_count(database_session_factory, workspace_id)
+    with service.advisory_lock(agent_thread_id) as lock:
+        with pytest.raises(TurnExecutionError, match="turn_id"):
+            service.complete_turn_with_event(
+                handle,
+                workspace_token=token,
+                lock=lock,
+                event_type="message.completed",
+                payload={
+                    "turn_id": "turn-that-does-not-own-this-execution",
+                    "message_id": "msg-wrong",
+                    "content": "ok",
+                },
+            )
+    assert _event_count(database_session_factory, workspace_id) == before_events
+    with database_session_factory() as session:
+        execution = session.scalar(
+            select(AgentTurnExecutionRecord).where(
+                AgentTurnExecutionRecord.workspace_id == workspace_id
+            )
+        )
+        assert execution is not None
+        assert execution.status == "running"
+        assert execution.terminal_event_id is None
+
+
+def test_old_complete_turn_entry_is_unavailable(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    service = TurnExecutionService(database_session_factory)
+    assert not hasattr(service, "complete_turn")
 
 
 class _BlockingGraph:
