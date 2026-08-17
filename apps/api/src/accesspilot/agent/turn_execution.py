@@ -22,7 +22,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from accesspilot.agent.advisory_lock import (
     AdvisoryLockHandle,
-    AdvisoryLockOwnershipError,
+    _create_lock_handle,
+    _LockState,
 )
 from accesspilot.agent.checkpoint import CheckpointLocator, SaverLike
 from accesspilot.agent.safety import redact_sensitive_content
@@ -30,6 +31,7 @@ from accesspilot.db.models import (
     AgentPendingInputRecord,
     AgentTurnExecutionRecord,
     AuthSessionRecord,
+    WorkspaceEventRecord,
     WorkspaceRecord,
     utc_now,
 )
@@ -312,9 +314,18 @@ class TurnExecutionService:
         *,
         timeout_seconds: float = 0.0,
     ) -> Iterator[AdvisoryLockHandle]:
-        """Hold a PostgreSQL session advisory lock for one graph execution."""
+        """Hold a PostgreSQL session advisory lock for one graph execution.
+
+        The lock is acquired on a dedicated connection that is kept checked out
+        across multiple application transactions.  This allows takeover to
+        commit before graph execution while the session-level advisory lock is
+        still held, and finalize to commit before the lock is released.
+        """
+        engine = self._session_factory.kw["bind"]
+        connection = engine.connect()
+        session = Session(bind=connection, expire_on_commit=False)
         key = f"accesspilot-turn:{agent_thread_id}"
-        with self._session_factory() as session:
+        try:
             if timeout_seconds > 0:
                 session.execute(
                     text("SET LOCAL lock_timeout = :milliseconds"),
@@ -326,22 +337,23 @@ class TurnExecutionService:
             ).scalar_one()
             if not acquired:
                 raise TurnLockUnavailableError("thread advisory lock is held elsewhere")
-            handle = AdvisoryLockHandle._create(session, agent_thread_id)
+            # Commit the lock-acquisition transaction while keeping the
+            # dedicated connection checked out; the session-level advisory lock
+            # remains held and later application transactions can begin cleanly.
+            session.commit()
+            state = _LockState()
+            handle = _create_lock_handle(state, session, agent_thread_id)
             try:
                 yield handle
-            except BaseException:
-                session.rollback()
-                raise
             finally:
-                # Unlock before closing the transaction.  SQLAlchemy returns the
-                # connection to the pool on commit, which would otherwise release
-                # the session-level advisory lock implicitly; explicit unlock
-                # first keeps ownership deterministic.
+                handle.invalidate()
                 session.execute(
                     text("SELECT pg_advisory_unlock(hashtextextended(:key, 0))"),
                     {"key": key},
                 )
-                session.commit()
+        finally:
+            session.close()
+            connection.close()
 
     # ------------------------------------------------------------------
     # Takeover
@@ -373,107 +385,105 @@ class TurnExecutionService:
         """
         session = lock.session
         now = datetime.now(UTC)
-        workspace = session.scalar(
-            select(WorkspaceRecord).where(
-                WorkspaceRecord.token_hash == hash_workspace_token(workspace_token)
+        with session.begin():
+            workspace = session.scalar(
+                select(WorkspaceRecord).where(
+                    WorkspaceRecord.token_hash == hash_workspace_token(workspace_token)
+                )
             )
-        )
-        if workspace is None:
-            raise UnknownWorkspaceError(workspace_token)
-        workspace_id = workspace.id
+            if workspace is None:
+                raise UnknownWorkspaceError(workspace_token)
+            workspace_id = workspace.id
 
-        execution = session.scalar(
-            select(AgentTurnExecutionRecord)
-            .where(
-                AgentTurnExecutionRecord.workspace_id == workspace_id,
-                AgentTurnExecutionRecord.graph_run_id == graph_run_id,
-                AgentTurnExecutionRecord.input_seq == input_seq,
-            )
-            .with_for_update()
-        )
-        if execution is None:
-            raise TurnNotFoundError("execution does not exist")
-        if (
-            execution.auth_session_ref != auth_session_ref
-            or execution.actor_id != actor_id
-        ):
-            raise TurnExecutionError("takeover owner does not match execution")
-        self._validate_auth_session(
-            session,
-            workspace_id=workspace_id,
-            auth_session_ref=auth_session_ref,
-            actor_id=actor_id,
-            now=now,
-        )
-        if execution.status != "running" or execution.terminal_event_id is not None:
-            raise TurnExecutionError("execution is not recoverable")
-        if (
-            execution.lease_expires_at is None
-            or execution.lease_expires_at > now
-        ):
-            raise TurnLeaseActiveError("lease has not expired")
-
-        accepted = execution.accepted_checkpoint_id
-        if accepted is None:
-            historical = session.scalar(
-                select(AgentTurnExecutionRecord.accepted_checkpoint_id)
+            execution = session.scalar(
+                select(AgentTurnExecutionRecord)
                 .where(
                     AgentTurnExecutionRecord.workspace_id == workspace_id,
                     AgentTurnExecutionRecord.graph_run_id == graph_run_id,
-                    AgentTurnExecutionRecord.accepted_checkpoint_id.is_not(None),
+                    AgentTurnExecutionRecord.input_seq == input_seq,
                 )
-                .order_by(
-                    AgentTurnExecutionRecord.input_seq.desc(),
-                    AgentTurnExecutionRecord.created_at.desc(),
-                )
-                .limit(1)
+                .with_for_update()
             )
-            if historical is not None:
-                accepted = historical
-            else:
-                pending = session.scalar(
-                    select(AgentPendingInputRecord)
+            if execution is None:
+                raise TurnNotFoundError("execution does not exist")
+            if (
+                execution.auth_session_ref != auth_session_ref
+                or execution.actor_id != actor_id
+            ):
+                raise TurnExecutionError("takeover owner does not match execution")
+            self._validate_auth_session(
+                session,
+                workspace_id=workspace_id,
+                auth_session_ref=auth_session_ref,
+                actor_id=actor_id,
+                now=now,
+            )
+            if execution.status != "running" or execution.terminal_event_id is not None:
+                raise TurnExecutionError("execution is not recoverable")
+            if (
+                execution.lease_expires_at is None
+                or execution.lease_expires_at > now
+            ):
+                raise TurnLeaseActiveError("lease has not expired")
+
+            accepted = execution.accepted_checkpoint_id
+            if accepted is None:
+                historical = session.scalar(
+                    select(AgentTurnExecutionRecord.accepted_checkpoint_id)
                     .where(
-                        AgentPendingInputRecord.workspace_id == workspace_id,
-                        AgentPendingInputRecord.graph_run_id == graph_run_id,
-                        AgentPendingInputRecord.accepted_checkpoint_id.is_not(None),
+                        AgentTurnExecutionRecord.workspace_id == workspace_id,
+                        AgentTurnExecutionRecord.graph_run_id == graph_run_id,
+                        AgentTurnExecutionRecord.accepted_checkpoint_id.is_not(None),
                     )
-                    .order_by(AgentPendingInputRecord.created_at.desc())
+                    .order_by(
+                        AgentTurnExecutionRecord.input_seq.desc(),
+                        AgentTurnExecutionRecord.created_at.desc(),
+                    )
                     .limit(1)
                 )
-                if pending is not None:
-                    accepted = pending.accepted_checkpoint_id
+                if historical is not None:
+                    accepted = historical
+                else:
+                    pending = session.scalar(
+                        select(AgentPendingInputRecord)
+                        .where(
+                            AgentPendingInputRecord.workspace_id == workspace_id,
+                            AgentPendingInputRecord.graph_run_id == graph_run_id,
+                            AgentPendingInputRecord.accepted_checkpoint_id.is_not(None),
+                        )
+                        .order_by(AgentPendingInputRecord.created_at.desc())
+                        .limit(1)
+                    )
+                    if pending is not None:
+                        accepted = pending.accepted_checkpoint_id
 
-        if accepted is not None and saver is not None:
-            locator = CheckpointLocator(
-                execution.checkpoint_thread_id,
-                execution.checkpoint_ns,
-                accepted,
-            )
-            if saver.get_tuple(locator.as_config()) is None:
-                raise TurnExecutionError("accepted checkpoint head is missing")
+            if accepted is not None and saver is not None:
+                locator = CheckpointLocator(
+                    execution.checkpoint_thread_id,
+                    execution.checkpoint_ns,
+                    accepted,
+                )
+                if saver.get_tuple(locator.as_config()) is None:
+                    raise TurnExecutionError("accepted checkpoint head is missing")
 
-        # Lock the Workspace row only after the execution row, preserving
-        # the canonical execution -> workspace order.
-        workspace = session.scalar(
-            select(WorkspaceRecord)
-            .where(WorkspaceRecord.id == workspace_id)
-            .with_for_update()
-        )
-        if workspace is None:  # pragma: no cover - FK prevents this
-            raise UnknownWorkspaceError(workspace_token)
-        if lock.agent_thread_id != workspace.agent_thread_id:
-            raise AdvisoryLockOwnershipError(
-                "advisory lock does not own this workspace thread"
+            # Lock the Workspace row only after the execution row, preserving
+            # the canonical execution -> workspace order.
+            workspace = session.scalar(
+                select(WorkspaceRecord)
+                .where(WorkspaceRecord.id == workspace_id)
+                .with_for_update()
             )
-        workspace.lease_fence += 1
-        new_fence = workspace.lease_fence
-        execution.attempt += 1
-        execution.lease_fence = new_fence
-        execution.lease_expires_at = now + timedelta(seconds=self._lease_seconds)
-        if accepted is not None and execution.accepted_checkpoint_id is None:
-            execution.accepted_checkpoint_id = accepted
-        session.flush()
+            if workspace is None:  # pragma: no cover - FK prevents this
+                raise UnknownWorkspaceError(workspace_token)
+            lock.require_thread(workspace.agent_thread_id)
+            workspace.lease_fence += 1
+            new_fence = workspace.lease_fence
+            execution.attempt += 1
+            execution.lease_fence = new_fence
+            execution.lease_expires_at = now + timedelta(seconds=self._lease_seconds)
+            if accepted is not None and execution.accepted_checkpoint_id is None:
+                execution.accepted_checkpoint_id = accepted
+            session.flush()
 
         return RecoveryPlan(
             execution_id=execution.id,
@@ -514,48 +524,120 @@ class TurnExecutionService:
         finalize.
         """
         session = lock.session
-        execution = session.scalar(
-            select(AgentTurnExecutionRecord)
-            .where(
-                AgentTurnExecutionRecord.id == handle.execution_id,
-                AgentTurnExecutionRecord.workspace_id == handle.workspace_id,
-                AgentTurnExecutionRecord.graph_run_id == handle.graph_run_id,
-                AgentTurnExecutionRecord.input_seq == handle.input_seq,
-                AgentTurnExecutionRecord.input_turn_id == handle.input_turn_id,
-                AgentTurnExecutionRecord.actor_id == handle.actor_id,
-                AgentTurnExecutionRecord.auth_session_ref
-                == handle.auth_session_ref,
-                AgentTurnExecutionRecord.lease_fence == handle.lease_fence,
-                AgentTurnExecutionRecord.status == "running",
+        with session.begin():
+            execution = session.scalar(
+                select(AgentTurnExecutionRecord)
+                .where(
+                    AgentTurnExecutionRecord.id == handle.execution_id,
+                    AgentTurnExecutionRecord.workspace_id == handle.workspace_id,
+                    AgentTurnExecutionRecord.graph_run_id == handle.graph_run_id,
+                    AgentTurnExecutionRecord.input_seq == handle.input_seq,
+                    AgentTurnExecutionRecord.input_turn_id == handle.input_turn_id,
+                    AgentTurnExecutionRecord.actor_id == handle.actor_id,
+                    AgentTurnExecutionRecord.auth_session_ref
+                    == handle.auth_session_ref,
+                    AgentTurnExecutionRecord.lease_fence == handle.lease_fence,
+                    AgentTurnExecutionRecord.status == "running",
+                )
+                .with_for_update()
             )
-            .with_for_update()
-        )
-        if execution is None:
-            raise StaleTurnFenceError("execution is not owned by this handle")
-        now = datetime.now(UTC)
-        if execution.lease_expires_at is None or execution.lease_expires_at <= now:
-            raise StaleTurnFenceError("execution lease has expired")
-        workspace = session.scalar(
-            select(WorkspaceRecord)
-            .where(
-                WorkspaceRecord.id == handle.workspace_id,
-                WorkspaceRecord.token_hash == hash_workspace_token(workspace_token),
-                WorkspaceRecord.actor_id == handle.actor_id,
-                WorkspaceRecord.lease_fence == handle.lease_fence,
+            if execution is None:
+                raise StaleTurnFenceError("execution is not owned by this handle")
+            now = datetime.now(UTC)
+            if execution.lease_expires_at is None or execution.lease_expires_at <= now:
+                raise StaleTurnFenceError("execution lease has expired")
+            workspace = session.scalar(
+                select(WorkspaceRecord)
+                .where(
+                    WorkspaceRecord.id == handle.workspace_id,
+                    WorkspaceRecord.token_hash == hash_workspace_token(workspace_token),
+                    WorkspaceRecord.actor_id == handle.actor_id,
+                    WorkspaceRecord.lease_fence == handle.lease_fence,
+                )
+                .with_for_update()
             )
-            .with_for_update()
-        )
-        if workspace is None:
-            raise StaleTurnFenceError("workspace fence does not match execution")
-        if lock.agent_thread_id != workspace.agent_thread_id:
-            raise AdvisoryLockOwnershipError(
-                "advisory lock does not own this workspace thread"
+            if workspace is None:
+                raise StaleTurnFenceError("workspace fence does not match execution")
+            lock.require_thread(workspace.agent_thread_id)
+            execution.status = status
+            execution.lease_expires_at = None
+            execution.terminal_event_id = terminal_event_id
+            execution.updated_at = utc_now()
+            session.flush()
+
+    def complete_turn_with_event(
+        self,
+        handle: TurnExecutionHandle,
+        *,
+        workspace_token: str,
+        lock: AdvisoryLockHandle,
+        payload: dict[str, object],
+        event_type: Literal["message.completed", "error.recoverable", "turn.interrupted"],
+        status: Literal[
+            "completed",
+            "recoverable_error",
+            "interrupted",
+        ] = "completed",
+    ) -> int:
+        """Create the terminal event and terminalize execution in one fenced transaction.
+
+        This is the only finalize path that guarantees a stale owner cannot
+        publish a visible terminal event: the execution fence is validated
+        before the event row is added, and both the event and the execution
+        terminal reference commit together.
+        """
+        from accesspilot.events import validate_event_payload
+
+        safe_payload = validate_event_payload(event_type, payload)
+        session = lock.session
+        with session.begin():
+            execution = session.scalar(
+                select(AgentTurnExecutionRecord)
+                .where(
+                    AgentTurnExecutionRecord.id == handle.execution_id,
+                    AgentTurnExecutionRecord.workspace_id == handle.workspace_id,
+                    AgentTurnExecutionRecord.graph_run_id == handle.graph_run_id,
+                    AgentTurnExecutionRecord.input_seq == handle.input_seq,
+                    AgentTurnExecutionRecord.input_turn_id == handle.input_turn_id,
+                    AgentTurnExecutionRecord.actor_id == handle.actor_id,
+                    AgentTurnExecutionRecord.auth_session_ref
+                    == handle.auth_session_ref,
+                    AgentTurnExecutionRecord.lease_fence == handle.lease_fence,
+                    AgentTurnExecutionRecord.status == "running",
+                )
+                .with_for_update()
             )
-        execution.status = status
-        execution.lease_expires_at = None
-        execution.terminal_event_id = terminal_event_id
-        execution.updated_at = utc_now()
-        session.flush()
+            if execution is None:
+                raise StaleTurnFenceError("execution is not owned by this handle")
+            now = datetime.now(UTC)
+            if execution.lease_expires_at is None or execution.lease_expires_at <= now:
+                raise StaleTurnFenceError("execution lease has expired")
+            workspace = session.scalar(
+                select(WorkspaceRecord)
+                .where(
+                    WorkspaceRecord.id == handle.workspace_id,
+                    WorkspaceRecord.token_hash == hash_workspace_token(workspace_token),
+                    WorkspaceRecord.actor_id == handle.actor_id,
+                    WorkspaceRecord.lease_fence == handle.lease_fence,
+                )
+                .with_for_update()
+            )
+            if workspace is None:
+                raise StaleTurnFenceError("workspace fence does not match execution")
+            lock.require_thread(workspace.agent_thread_id)
+            terminal = WorkspaceEventRecord(
+                workspace_id=handle.workspace_id,
+                event_type=event_type,
+                payload=safe_payload,
+            )
+            session.add(terminal)
+            session.flush()
+            execution.status = status
+            execution.lease_expires_at = None
+            execution.terminal_event_id = terminal.id
+            execution.updated_at = utc_now()
+            session.flush()
+            return terminal.id
 
     # ------------------------------------------------------------------
     # Helpers
