@@ -476,7 +476,7 @@ def _is_safe_justification_cursor_reply(
     )
 
 
-def _tool_answer(route: IntentRoute, result: ToolResult | None) -> str:
+def compose_tool_answer(route: IntentRoute, result: ToolResult | None) -> str:
     """用确定性模板把工具事实转成用户可读回答。"""
 
     if route.intent == "policy_question":
@@ -514,6 +514,10 @@ def _tool_answer(route: IntentRoute, result: ToolResult | None) -> str:
     if route.intent == "unknown":
         return "我需要更多上下文才能理解这条数字消息，请说明它是期限、权限编号还是其他内容。"
     return "我可以帮你查询可申请权限、当前有效授权、申请状态，或发起权限申请。"
+
+
+# Keep the private alias while v1.2 callers migrate to the shared pure composer.
+_tool_answer = compose_tool_answer
 
 
 def _append_security_notice(

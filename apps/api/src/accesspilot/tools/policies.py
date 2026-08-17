@@ -170,6 +170,11 @@ class PolicyService:
             next_step="请按上述政策核对申请字段和审批要求。",
         )
 
+    def self_approval(self, session: Session) -> PolicyAnswer:
+        """Read the fixed POL-006 fact without entering vector retrieval."""
+
+        return self._self_approval_answer(session)
+
     def _self_approval_answer(self, session: Session) -> PolicyAnswer:
         try:
             chunk = session.scalar(
