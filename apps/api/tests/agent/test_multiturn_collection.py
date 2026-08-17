@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 
-from accesspilot.agent.state import ConversationPhase, GraphState
+from accesspilot.agent.state import CollectionGraphState, ConversationPhase
 from accesspilot.domain.models import RequestDraft
 
 
@@ -19,7 +19,7 @@ class FakeModel:
 def test_partial_draft_asks_one_field_then_updates_state_for_next_turn() -> None:
     # 用户已说明申请人；第一轮只能继续询问固定顺序中的第一个缺失字段。
     draft = RequestDraft(employee_id="EMP-001")
-    initial_state = GraphState(
+    initial_state = CollectionGraphState(
         draft=draft,
         missing_fields=draft.missing_fields(),
         tool_summaries=[],
@@ -33,7 +33,7 @@ def test_partial_draft_asks_one_field_then_updates_state_for_next_turn() -> None
         }
     )
 
-    # 收集函数返回 tuple[GraphState, str | None]，每轮至多生成一个问题。
+    # 收集函数返回 tuple[CollectionGraphState, str | None]。
     from accesspilot.agent.collector import run_collection_turn
 
     first_state, first_question = run_collection_turn(
@@ -65,7 +65,7 @@ def test_answering_last_missing_field_moves_to_awaiting_confirmation() -> None:
         entitlement_id="insighthub.customer_export",
         duration_days=14,
     )
-    initial_state = GraphState(
+    initial_state = CollectionGraphState(
         draft=draft,
         missing_fields=draft.missing_fields(),
         tool_summaries=[],

@@ -3,7 +3,7 @@
 **用途：** 每完成一张 Ticket，同步记录技术改变、解决的问题、验证证据与可面试价值。
 **v1.2 基线：** 顺序执行的 `ConversationService` + 业务 Cursor；仅政策问答使用 pgvector RAG；当前生产入口未由 LangGraph 编排。
 **v1.3 目标：** 真实 LangGraph Agent Loop + PostgreSQL 持久恢复 + HITL interrupt/resume + 只读真实轨迹。
-**当前总状态：** `In progress`；T26–T29 `Verified`，T30 为下一张。正式简历仍未修改，也不得将后续未完成的主链、HITL 或轨迹能力当作已实现成果。
+**当前总状态：** `In progress`；T26–T30 `Verified`，T31 为下一张。正式简历仍未修改，也不得将后续未完成的主链、HITL 或轨迹能力当作已实现成果。
 
 ## 状态口径
 
@@ -19,7 +19,7 @@
 | T27 | 抽象 `ConversationOrchestrator`，让 JSON/SSE 只依赖可注入边界；用 engine-owned success finalizer 保持 terminal→Cursor→emit 顺序，并冻结 Legacy 黄金样本 | 在不改变对外行为的前提下建立可替换内核，避免接口层继续理解 Legacy Cursor 状态机 | 可讲 Strangler 迁移、依赖注入、契约测试、独立验收发现边界泄漏后的闭环修复与一键回滚 | [T27 验收证据](accesspilot-v1.3-t27-acceptance-2026-08-17.md)、[实现](../../apps/api/src/accesspilot/conversation.py)、[黄金测试](../../apps/api/tests/conversation/test_t27_orchestrator.py) | `Verified`；定向 27 项、相关 151 项、API 467 项通过，另有 1 项 T26 专用数据库 probe 因未配置变量跳过；独立验收无 P0/P1；默认仍 100% Legacy，生产 LangGraph 尚未接入 |
 | T28 | 通过 0010 迁移增加 Workspace thread/flow/fence、execution/pending/step facts 与 nullable event key；用 DB CHECK/partial unique/复合 FK/trigger 固化状态不变量，并实现 canonical JSON + SHA-256 稳定身份 | 为后续恢复、粘性切流和 checkpoint 重放提供应用权威事实；防止跨 Workspace 引用、并发双 running、tombstone 复活与重复事件 | 可深入讲数据库状态机、幂等身份、含数据可逆迁移、真实 PostgreSQL 约束反证和 checkpoint Schema 隔离 | [T28 验收证据](accesspilot-v1.3-t28-acceptance-2026-08-17.md)、[迁移](../../apps/api/migrations/versions/20260817_0010_add_agent_runtime_facts.py)、[身份工具](../../apps/api/src/accesspilot/agent/identity.py)、[真实 PG 测试](../../apps/api/tests/db/test_t28_postgres.py) | `Verified`；定向 23 项、相关 58 项、完整 API 491 项通过；fresh 与含数据 0009→0010→0009→0010/no-drift 通过；默认仍为 Legacy，T29 saver 生命周期与生产图尚未实现 |
 | T29 | 接入官方同步 PostgresSaver 生命周期；拆分显式初始化与普通 API 启动、migration/runtime 账号、独立 schema 与连接池；增加 exact-locator fenced adapter 和 candidate→accepted CAS primitive | 消除请求期 DDL、Legacy 对 checkpoint 的隐式依赖、连接泄漏、implicit latest 与 stale/half-write checkpoint 被错误恢复的风险 | 可讲最小权限、readiness/资源生命周期、官方 Saver 适配、精确 head 与独立评审发现版本语义泄漏后的闭环 | [T29 验收证据](accesspilot-v1.3-t29-acceptance-2026-08-17.md)、[运行适配器](../../apps/api/src/accesspilot/agent/checkpoint.py)、[初始化入口](../../apps/api/src/accesspilot/checkpoint_init.py)、[真实 PG 测试](../../apps/api/tests/db/test_t29_postgres.py) | `Verified`；单元 12 项、相关 44 项、真实 PG 1 项、完整 API 502 项通过（普通全量另有 T26/T29 两项专用 PG 测试按环境门控跳过）；默认仍 Legacy，T33 lease/advisory/takeover 与生产图尚未实现 |
-| T30 | 建立类型化 GraphState、Runtime Context 与真实多节点拓扑 | 防止将凭证、授权事实或不必要内容写入 checkpoint | 可讲解 Agent State 与业务权威源的边界、类型化图设计 | [T30 计划](../tickets/accesspilot-langgraph-agent-loop-v1.3.md#t30--安全-graphstateruntime-context-与生产拓扑骨架) | `Planned`；现有 LangGraph 仅为测试 Demo |
+| T30 | 建立 26 字段严格 GraphState、Runtime Context 和 22 节点生产拓扑骨架；增加 invoke 前输入与节点返回前 update 校验，并让 strict allowlist 传播到真实 PostgresSaver I/O | 防止额外输入或错误节点更新先进入 checkpoint；隔离服务、Principal、Token/Cookie/CSRF/API key；锁定后续业务节点的安全骨架 | 可讲类型化 Agent State、runtime/checkpoint 边界、LangGraph 持久化时机陷阱、真实 bytes/decoded 双重泄密扫描与独立评审闭环 | [T30 验收证据](accesspilot-v1.3-t30-acceptance-2026-08-17.md)、[生产图](../../apps/api/src/accesspilot/agent/production_graph.py)、[严格 State](../../apps/api/src/accesspilot/agent/state.py)、[真实 PG 测试](../../apps/api/tests/db/test_t30_postgres.py) | `Verified`；T30 57 项、相关 69 项、Agent 134 项、完整 API 559 项通过；T29/T30 真实 PG 各 1 项通过；节点仍为无副作用 stub，T31/T32/T34/API 接线未实现 |
 | T31 | 将确定性路由、只读工具和政策 pgvector RAG 迁入图节点 | 让真实执行路径可观察，同时防止把目录查询伪称为 RAG | 可讲解路由优先级、RAG 三态和确定性/模型边界 | [T31 计划](../tickets/accesspilot-langgraph-agent-loop-v1.3.md#t31--确定性路由只读工具与政策-rag-图分支) | `Planned`；当前只有原有政策 RAG |
 | T32 | 将申请解析、权限解析、草稿 CAS 与步骤幂等迁入图 | 防止重试时重复扣 quota、覆盖新草稿或重复提交本地副作用 | 可讲解 CAS、operation ledger 与 at-least-once 执行下的本地 exactly-once 效果 | [T32 计划](../tickets/accesspilot-langgraph-agent-loop-v1.3.md#t32--申请收集模型解析草稿-cas-与步骤幂等) | `Planned`；尚未验证重放幂等 |
 | T33 | 建立 turn lease、fence、advisory lock 与精确 checkpoint head 接管 | 防止同 thread 并发双写、旧 executor 续写和崩溃后丢输入 | 可深入讲分布式 lease/fencing、并发一致性和故障接管 | [T33 计划](../tickets/accesspilot-langgraph-agent-loop-v1.3.md#t33--turn-execution-leasefence-与崩溃接管内核) | `Planned`；尚无崩溃恢复证据 |
@@ -98,6 +98,12 @@
 > 为 AccessPilot 接入官方 PostgreSQL Checkpointer 运行层，拆分 migration/runtime 最小权限账号与显式初始化流程，建立每 App 连接池复用、readiness 和可关闭生命周期；通过 exact checkpoint locator、parent lineage 与 fenced CAS 将 saver head 区分为 candidate/accepted，真实验证 half-write、stale fence 和 latest orphan 均不能覆盖已接受恢复点，保持完整 API 502 项回归通过。
 
 使用边界：该表述只说明“官方 Saver 生命周期与精确 head 适配器已验证”；T33 的 lease、advisory lock、heartbeat、接管编排以及生产图的跨进程恢复尚未实现。默认入口仍为 Legacy，正式简历仍需用户另行确认后才修改。
+
+## T30 Verified 简历候选表述
+
+> 为 AccessPilot 设计 26 字段严格 GraphState、Runtime Context 与 22 节点生产 LangGraph 拓扑，在 invoke 前和节点 update 返回前建立双重校验，避免 LangGraph 将非法输入/更新先写入 checkpoint；通过真实 PostgresSaver 对 JSONB、BYTEA、pending writes 与 decoded state 递归扫描，验证服务对象、身份与敏感 canary 零落盘，并保持完整 API 559 项回归通过。
+
+使用边界：该表述只说明“安全 State、完整拓扑骨架和真实序列化边界已验证”；T30 节点仍是无副作用 stub，T31 的路由/RAG、T32 的解析/CAS、T34 的 interrupt/resume 以及生产 API 切流尚未实现。正式简历仍需用户另行确认后才修改。
 
 ## 固定参考
 

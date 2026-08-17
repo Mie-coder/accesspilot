@@ -20,6 +20,7 @@ from accesspilot.agent.routing import (
     IntentRoutingFailed,
     route_with_validation,
 )
+from accesspilot.agent.safety import redact_sensitive_content
 from accesspilot.agent.state import ConversationPhase
 from accesspilot.agent.structured_reply import (
     ReplyParsingFailed,
@@ -314,27 +315,7 @@ SECURITY_MESSAGE = (
 )
 
 
-def _redact_sensitive_content(content: str) -> str:
-    """在事件回放与模型输入前隐藏常见密钥形态。"""
-
-    redacted = re.sub(
-        r"(?i)\b(?:sk|ds)-[a-z0-9_-]{8,}",
-        "[已隐藏疑似密钥]",
-        content,
-    )
-    redacted = re.sub(
-        (
-            r"(?i)(?:api[_ -]?key|client[_ -]?secret|access[_ -]?token|"
-            r"refresh[_ -]?token|private[_ -]?key|password)\s*[:=]\s*\S+"
-        ),
-        "[已隐藏凭证]",
-        redacted,
-    )
-    return re.sub(
-        r"(?i)bearer\s+\S+",
-        "[已隐藏 Bearer 凭证]",
-        redacted,
-    )
+_redact_sensitive_content = redact_sensitive_content
 
 
 _PROTECTED_INTERNAL_CONTENT_MARKERS = (
