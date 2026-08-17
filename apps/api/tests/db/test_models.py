@@ -15,11 +15,14 @@ def load_tables():  # type: ignore[no-untyped-def]
 
 
 def test_metadata_contains_product_tables() -> None:
-    """当前产品表（包含 v1.2 Decision Packet）必须入 ORM 元数据。"""
+    """当前产品表（包含 T28 运行事实）必须入 ORM 元数据。"""
 
     assert set(load_tables()) == {
         "access_grants",
         "access_requests",
+        "agent_pending_inputs",
+        "agent_step_executions",
+        "agent_turn_executions",
         "auth_sessions",
         "approval_cases",
         "approval_steps",

@@ -1,8 +1,8 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Tickets
 
-**状态：** 用户已确认串行实施；T26–T27 `Verified`，T28 为下一张，T29–T42 尚未开始；未授权推送、合并、部署或修改正式简历
+**状态：** 用户已确认串行实施；T26–T28 `Verified`，T29 为下一张，T30–T42 尚未开始；未授权推送、合并、部署或修改正式简历
 **更新时间：** 2026-08-17
-**继承基线：** AccessPilot v1.2，`product_verified=true`；T27 实现基线 HEAD `90667e4`，历史证据不自动证明 v1.3
+**继承基线：** AccessPilot v1.2，`product_verified=true`；T28 实现基线 HEAD `db2ebf2`，历史证据不自动证明 v1.3
 **Canonical Spec：** `docs/specs/accesspilot-langgraph-agent-loop-v1.3.md`
 **双评审裁决：** `docs/reviews/accesspilot-v1.3-spec-review-decisions-2026-08-16.md`
 
@@ -62,7 +62,7 @@
 
 ## T27 — ConversationOrchestrator 兼容层与 Legacy 黄金基线
 
-**状态：** `Verified`；三条验收标准通过，独立只读验收无 P0/P1，等待本 Ticket 本地提交
+**状态：** `Verified`；三条验收标准通过，独立只读验收无 P0/P1，已本地提交 `db2ebf2`
 
 **目标：** 先建立可替换编排边界，JSON、SSE 和业务结果仍完全走 Legacy。
 
@@ -84,7 +84,7 @@
 
 ## T28 — 应用 Schema、运行事实与确定性身份
 
-**状态：** 尚未开始
+**状态：** `Verified`；三条验收标准通过，独立只读验收无 P0/P1/P2，等待本 Ticket 本地提交
 
 **目标：** 建立 sticky flow、逻辑输入、lease/fence、pending、步骤幂等和轨迹去重所需的应用数据事实。
 
@@ -416,4 +416,4 @@
 
 - T26–T40 分层建立 AC-01–AC-12；T41 在同一 revision 汇总判定 AC-01–AC-13；T42 单独完成 AC-14；
 - 数据库、checkpoint、Graph State、JSON、SSE、UI 和证据按依赖串行，不并发修改共享权威源；
-- **当前停点：进入 T28。** 仍不推送、合并、部署或修改正式简历。
+- **当前停点：进入 T29。** 仍不推送、合并、部署或修改正式简历。
