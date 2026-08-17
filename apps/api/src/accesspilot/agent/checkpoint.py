@@ -12,12 +12,12 @@ from uuid import UUID
 
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult, make_url
 from sqlalchemy.orm import Session
 
 from accesspilot.config import Settings
-from accesspilot.db.models import AgentTurnExecutionRecord, utc_now
+from accesspilot.db.models import AgentTurnExecutionRecord, WorkspaceRecord, utc_now
 
 
 class CheckpointUnavailableError(RuntimeError):
@@ -473,6 +473,12 @@ class AcceptedCheckpointHeadStore:
         statement = update(AgentTurnExecutionRecord).where(
             AgentTurnExecutionRecord.id == context.execution_id,
             AgentTurnExecutionRecord.workspace_id == context.workspace_id,
+            AgentTurnExecutionRecord.workspace_id.in_(
+                select(WorkspaceRecord.id).where(
+                    WorkspaceRecord.id == context.workspace_id,
+                    WorkspaceRecord.lease_fence == context.lease_fence,
+                )
+            ),
             AgentTurnExecutionRecord.graph_run_id == context.graph_run_id,
             AgentTurnExecutionRecord.input_seq == context.input_seq,
             AgentTurnExecutionRecord.input_turn_id == context.input_turn_id,
