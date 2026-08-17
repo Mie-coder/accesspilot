@@ -4,7 +4,8 @@ import asyncio
 import json
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from typing import Literal
 from urllib.parse import parse_qs
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -27,6 +28,11 @@ from sqlalchemy.orm import Session, sessionmaker
 from accesspilot.access_overview import (
     AccessOverviewNotFoundError,
     get_access_overview,
+)
+from accesspilot.agent.checkpoint import (
+    CheckpointRuntimeLike,
+    CheckpointUnavailableError,
+    build_checkpoint_runtime,
 )
 from accesspilot.agent.deepseek import DeepSeekStructuredReplyModel
 from accesspilot.agent.embeddings import (
@@ -295,6 +301,9 @@ def create_app(
     answer_stream_model: AnswerStreamModel | None = None,
     policy_service: PolicyService | None = None,
     conversation_orchestrator: ConversationOrchestrator | None = None,
+    checkpoint_runtime_factory: (
+        Callable[[Settings], CheckpointRuntimeLike] | None
+    ) = None,
 ) -> FastAPI:
     """创建一个可配置、可测试的 FastAPI 应用。"""
     active_settings = settings or Settings()
@@ -359,7 +368,24 @@ def create_app(
             policy_service=active_policy_service,
         )
     )
-    app = FastAPI(title=active_settings.app_name)
+    active_checkpoint_runtime_factory = (
+        checkpoint_runtime_factory or build_checkpoint_runtime
+    )
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        runtime: CheckpointRuntimeLike | None = None
+        if active_settings.orchestrator_mode in {"mixed", "langgraph"}:
+            runtime = active_checkpoint_runtime_factory(active_settings)
+            runtime.start()
+        application.state.checkpoint_runtime = runtime
+        try:
+            yield
+        finally:
+            if runtime is not None:
+                runtime.close()
+
+    app = FastAPI(title=active_settings.app_name, lifespan=lifespan)
 
     # v1.2 closes the anonymous Workspace/Demo surface at the application
     # boundary.  Keeping this guard ahead of route matching also prevents a
@@ -911,6 +937,18 @@ def create_app(
                 session.execute(text("SELECT 1"))
         except SQLAlchemyError as error:
             raise HTTPException(status_code=503, detail="数据库暂不可用") from error
+        runtime: CheckpointRuntimeLike | None = getattr(
+            app.state, "checkpoint_runtime", None
+        )
+        if active_settings.orchestrator_mode in {"mixed", "langgraph"}:
+            if runtime is None:
+                raise HTTPException(status_code=503, detail="Checkpoint 暂不可用")
+            try:
+                runtime.check_readiness()
+            except CheckpointUnavailableError as error:
+                raise HTTPException(
+                    status_code=503, detail="Checkpoint 暂不可用"
+                ) from error
         return {"status": "ready"}
 
     @app.get("/api/policies")
