@@ -3,7 +3,7 @@
 **用途：** 每完成一张 Ticket，同步记录技术改变、解决的问题、验证证据与可面试价值。
 **v1.2 基线：** 顺序执行的 `ConversationService` + 业务 Cursor；仅政策问答使用 pgvector RAG；当前生产入口未由 LangGraph 编排。
 **v1.3 目标：** 真实 LangGraph Agent Loop + PostgreSQL 持久恢复 + HITL interrupt/resume + 只读真实轨迹。
-**当前总状态：** `In progress`；T26–T27 `Verified`，T28 为下一张。正式简历仍未修改，也不得将后续未完成的主链、HITL 或轨迹能力当作已实现成果。
+**当前总状态：** `In progress`；T26–T28 `Verified`，T29 为下一张。正式简历仍未修改，也不得将后续未完成的主链、HITL 或轨迹能力当作已实现成果。
 
 ## 状态口径
 
@@ -17,7 +17,7 @@
 |---|---|---|---|---|---|
 | T26 | 锁定 LangGraph / PostgresSaver / psycopg 矩阵；用真实 PostgreSQL 实测修正为每 run 独立 checkpoint thread 和 candidate→accepted 两阶段 head | 提前暴露 root namespace、半写入 interrupt、精确 head 恢复与跨平台依赖漂移风险 | 可讲“先做兼容性 Spike，用运行证据修正架构合同，再工程化接入”，而不是只堆框架名 | [T26 验收证据](accesspilot-v1.3-t26-acceptance-2026-08-17.md)、[双评审决策](../reviews/accesspilot-v1.3-t26-acceptance-decisions-2026-08-17.md)、[Probe](../../scripts/t26_langgraph_compat.py)、[测试](../../apps/api/tests/agent/test_t26_langgraph_compat.py)、[R-29/R-30 裁决](../reviews/accesspilot-v1.3-spec-review-decisions-2026-08-16.md#2-议题清单) | `Verified`；T26-only 快照中 PostgreSQL probe/9 项测试、Python 3.11 新环境、Python 3.12 Docker、后端 451 项/旧前端 95 项与全量评测均通过；Claude Code + DeepSeek 均无 P0/P1；生产 saver/fence 与主链仍属后续 Ticket |
 | T27 | 抽象 `ConversationOrchestrator`，让 JSON/SSE 只依赖可注入边界；用 engine-owned success finalizer 保持 terminal→Cursor→emit 顺序，并冻结 Legacy 黄金样本 | 在不改变对外行为的前提下建立可替换内核，避免接口层继续理解 Legacy Cursor 状态机 | 可讲 Strangler 迁移、依赖注入、契约测试、独立验收发现边界泄漏后的闭环修复与一键回滚 | [T27 验收证据](accesspilot-v1.3-t27-acceptance-2026-08-17.md)、[实现](../../apps/api/src/accesspilot/conversation.py)、[黄金测试](../../apps/api/tests/conversation/test_t27_orchestrator.py) | `Verified`；定向 27 项、相关 151 项、API 467 项通过，另有 1 项 T26 专用数据库 probe 因未配置变量跳过；独立验收无 P0/P1；默认仍 100% Legacy，生产 LangGraph 尚未接入 |
-| T28 | 增加 thread、execution、pending、fence、幂等与事件身份事实 | 为可恢复执行、去重和引擎粘性建立可查询的数据不变量 | 可深入讲幂等键、状态机约束、迁移和历史数据兼容 | [T28 计划](../tickets/accesspilot-langgraph-agent-loop-v1.3.md#t28--应用-schema运行事实与确定性身份) | `Planned`；数据库尚未迁移 |
+| T28 | 通过 0010 迁移增加 Workspace thread/flow/fence、execution/pending/step facts 与 nullable event key；用 DB CHECK/partial unique/复合 FK/trigger 固化状态不变量，并实现 canonical JSON + SHA-256 稳定身份 | 为后续恢复、粘性切流和 checkpoint 重放提供应用权威事实；防止跨 Workspace 引用、并发双 running、tombstone 复活与重复事件 | 可深入讲数据库状态机、幂等身份、含数据可逆迁移、真实 PostgreSQL 约束反证和 checkpoint Schema 隔离 | [T28 验收证据](accesspilot-v1.3-t28-acceptance-2026-08-17.md)、[迁移](../../apps/api/migrations/versions/20260817_0010_add_agent_runtime_facts.py)、[身份工具](../../apps/api/src/accesspilot/agent/identity.py)、[真实 PG 测试](../../apps/api/tests/db/test_t28_postgres.py) | `Verified`；定向 23 项、相关 58 项、完整 API 491 项通过；fresh 与含数据 0009→0010→0009→0010/no-drift 通过；默认仍为 Legacy，T29 saver 生命周期与生产图尚未实现 |
 | T29 | 接入官方 PostgreSQL checkpointer，分离 migration/runtime 账号与连接周期 | 避免请求期 DDL、连接泄漏和 stale checkpoint 恢复 | 可讲解持久化 Agent 的运行责任、最小权限和生命周期 | [T29 计划](../tickets/accesspilot-langgraph-agent-loop-v1.3.md#t29--postgresql-checkpointer-初始化账号与运行生命周期) | `Planned`；不得宣称已可跨进程恢复 |
 | T30 | 建立类型化 GraphState、Runtime Context 与真实多节点拓扑 | 防止将凭证、授权事实或不必要内容写入 checkpoint | 可讲解 Agent State 与业务权威源的边界、类型化图设计 | [T30 计划](../tickets/accesspilot-langgraph-agent-loop-v1.3.md#t30--安全-graphstateruntime-context-与生产拓扑骨架) | `Planned`；现有 LangGraph 仅为测试 Demo |
 | T31 | 将确定性路由、只读工具和政策 pgvector RAG 迁入图节点 | 让真实执行路径可观察，同时防止把目录查询伪称为 RAG | 可讲解路由优先级、RAG 三态和确定性/模型边界 | [T31 计划](../tickets/accesspilot-langgraph-agent-loop-v1.3.md#t31--确定性路由只读工具与政策-rag-图分支) | `Planned`；当前只有原有政策 RAG |
@@ -86,6 +86,12 @@
 > 为 AccessPilot 的 LangGraph 渐进迁移建立 `ConversationOrchestrator` Strangler 边界，将 JSON/SSE 入口与 Legacy 编排解耦，并以全意图 outcome、Cursor 三态、流式终态和异常黄金测试锁定兼容合同；独立验收发现并修复接口层 Cursor 业务规则泄漏，相关 151 项与完整 API 467 项回归通过（另有 1 项 T26 专用数据库 probe 因未配置变量跳过）。
 
 使用边界：该表述只说明“已建立可替换编排边界并冻结 Legacy 合同”；当前默认仍为 Legacy，不能写成生产主链已经运行 LangGraph。正式简历仍需用户另行确认后才修改。
+
+## T28 Verified 简历候选表述
+
+> 为可恢复 Agent Loop 设计应用侧运行事实层，通过 Alembic 迁移建立 Workspace thread/flow/fence、execution/pending/step ledger 与确定性 event/operation identity；使用 PostgreSQL CHECK、partial unique、复合外键和不可变 trigger 固化并发与恢复不变量，并完成含历史数据的 0009→0010→0009→0010 可逆迁移、checkpoint Schema 隔离和 491 项 API 回归。
+
+使用边界：该表述说明“运行事实和恢复不变量的数据底座已验证”；T29 的官方 PostgresSaver 生命周期、fenced adapter、生产 LangGraph 主链和真实崩溃恢复尚未实现。正式简历仍需用户另行确认后才修改。
 
 ## 固定参考
 
