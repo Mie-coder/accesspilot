@@ -1,6 +1,6 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Spec
 
-**状态：** T26–T33 `Verified`；T34–T42 尚未开始；未授权推送、合并、部署或修改正式简历
+**状态：** T26–T33 `Verified`；T34 `In progress`（服务原语已实现，图接入待完成）；T35–T42 尚未开始；未授权推送、合并、部署或修改正式简历
 **更新时间：** 2026-08-17
 **继承基线：** AccessPilot v1.2，`product_verified=true`；历史验证结果不能自动证明 v1.3
 **上游规格：** `docs/specs/accesspilot-productized-agent-v1.2.md`

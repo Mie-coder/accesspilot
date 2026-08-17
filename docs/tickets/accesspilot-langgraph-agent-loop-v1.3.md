@@ -1,6 +1,6 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Tickets
 
-**状态：** 用户已确认串行实施；T26–T33 `Verified`，T34–T42 尚未开始；未授权推送、合并、部署或修改正式简历
+**状态：** 用户已确认串行实施；T26–T33 `Verified`，T34 `In progress`（服务原语已实现，图接入待完成），T35–T42 尚未开始；未授权推送、合并、部署或修改正式简历
 **更新时间：** 2026-08-17
 **继承基线：** AccessPilot v1.2，`product_verified=true`；T32 实现基线 HEAD `7ad8a01`，历史证据不自动证明 v1.3
 **Canonical Spec：** `docs/specs/accesspilot-langgraph-agent-loop-v1.3.md`
@@ -216,7 +216,7 @@
 
 ## T34 — 申请人确认 Interrupt/Resume 与原子投影
 
-**状态：** 尚未开始
+**状态：** `In progress`（服务原语已实现，图接入待完成）；`agent.input.required` 事件、`finalize_interrupt`/`begin_resume`/`confirm_draft` 原语与 3 项服务测试已落地；尚未完成生产图 interrupt/resume 接线与独立复核
 
 **目标：** 在图内完成唯一 P0 业务 interrupt，关闭 terminal/Cursor 窗口，并保证 resume 中的新输入不丢失。
 
@@ -416,4 +416,4 @@
 
 - T26–T40 分层建立 AC-01–AC-12；T41 在同一 revision 汇总判定 AC-01–AC-13；T42 单独完成 AC-14；
 - 数据库、checkpoint、Graph State、JSON、SSE、UI 和证据按依赖串行，不并发修改共享权威源；
-- **当前停点：T33 已 `Verified`，进入 T34。** 仍不推送、合并、部署或修改正式简历。
+- **当前停点：T34 `In progress`，继续完成图接入与验收。** 仍不推送、合并、部署或修改正式简历。
