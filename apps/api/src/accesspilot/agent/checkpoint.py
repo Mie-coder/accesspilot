@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
+from copy import copy
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Protocol, TypeVar, cast
@@ -32,9 +33,16 @@ class CandidateCheckpointRejected(RuntimeError):
 
 
 class SaverLike(Protocol):
+    serde: Any
+
     def get_tuple(self, config: dict[str, Any]) -> object | None: ...
 
     def get_next_version(self, current: Any | None, channel: None) -> Any: ...
+
+    def with_allowlist(
+        self,
+        extra_allowlist: Collection[tuple[str, ...]],
+    ) -> SaverLike: ...
 
     def put(
         self,
@@ -288,6 +296,22 @@ class FencedSaverInvocation:
         """Preserve the official saver channel-version and concurrency semantics."""
 
         return self._saver.get_next_version(current, channel)
+
+    def with_allowlist(
+        self,
+        extra_allowlist: Collection[tuple[str, ...]],
+    ) -> FencedSaverInvocation:
+        """Propagate strict serde types to the saver that performs the actual I/O."""
+
+        delegated = self._saver.with_allowlist(extra_allowlist)
+        if delegated is self._saver and getattr(delegated, "serde", None) is self.serde:
+            return self
+        clone = copy(self)
+        clone._saver = delegated
+        clone.serde = getattr(delegated, "serde", None)
+        # copy() intentionally keeps the invocation holder and candidate-id sets
+        # shared between the caller-facing facade and LangGraph's serde clone.
+        return clone
 
     def list(
         self,

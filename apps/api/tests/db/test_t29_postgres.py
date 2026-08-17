@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, NotRequired, TypedDict
@@ -70,6 +70,20 @@ class _RecordingSaver:
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._saver, name)
+
+    def with_allowlist(
+        self,
+        extra_allowlist: Collection[tuple[str, ...]],
+    ) -> _RecordingSaver:
+        clone = _RecordingSaver(
+            self._saver.with_allowlist(extra_allowlist),  # type: ignore[attr-defined]
+            fail_writes_after_put=self._fail_writes_after_put,
+        )
+        # The graph receives the clone, while assertions retain this wrapper.
+        # Share invocation-local evidence instead of silently dropping it.
+        clone.trace = self.trace
+        clone.version_calls = self.version_calls
+        return clone
 
     def get_tuple(self, config):  # type: ignore[no-untyped-def]
         return self._saver.get_tuple(config)  # type: ignore[attr-defined]
