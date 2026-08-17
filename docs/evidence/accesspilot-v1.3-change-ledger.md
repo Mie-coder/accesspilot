@@ -3,7 +3,7 @@
 **用途：** 每完成一张 Ticket，同步记录技术改变、解决的问题、验证证据与可面试价值。
 **v1.2 基线：** 顺序执行的 `ConversationService` + 业务 Cursor；仅政策问答使用 pgvector RAG；当前生产入口未由 LangGraph 编排。
 **v1.3 目标：** 真实 LangGraph Agent Loop + PostgreSQL 持久恢复 + HITL interrupt/resume + 只读真实轨迹。
-**当前总状态：** `In progress`；T26–T31 `Verified`，T32 为下一张。正式简历仍未修改，也不得将后续未完成的主链、HITL 或轨迹能力当作已实现成果。
+**当前总状态：** `In progress`；T26–T32 `Verified`，T33–T42 `Planned`。正式简历仍未修改，也不得将后续未完成的主链、HITL 或轨迹能力当作已实现成果。
 
 ## 状态口径
 
@@ -21,7 +21,7 @@
 | T29 | 接入官方同步 PostgresSaver 生命周期；拆分显式初始化与普通 API 启动、migration/runtime 账号、独立 schema 与连接池；增加 exact-locator fenced adapter 和 candidate→accepted CAS primitive | 消除请求期 DDL、Legacy 对 checkpoint 的隐式依赖、连接泄漏、implicit latest 与 stale/half-write checkpoint 被错误恢复的风险 | 可讲最小权限、readiness/资源生命周期、官方 Saver 适配、精确 head 与独立评审发现版本语义泄漏后的闭环 | [T29 验收证据](accesspilot-v1.3-t29-acceptance-2026-08-17.md)、[运行适配器](../../apps/api/src/accesspilot/agent/checkpoint.py)、[初始化入口](../../apps/api/src/accesspilot/checkpoint_init.py)、[真实 PG 测试](../../apps/api/tests/db/test_t29_postgres.py) | `Verified`；单元 12 项、相关 44 项、真实 PG 1 项、完整 API 502 项通过（普通全量另有 T26/T29 两项专用 PG 测试按环境门控跳过）；默认仍 Legacy，T33 lease/advisory/takeover 与生产图尚未实现 |
 | T30 | 建立 26 字段严格 GraphState、Runtime Context 和 22 节点生产拓扑骨架；增加 invoke 前输入与节点返回前 update 校验，并让 strict allowlist 传播到真实 PostgresSaver I/O | 防止额外输入或错误节点更新先进入 checkpoint；隔离服务、Principal、Token/Cookie/CSRF/API key；锁定后续业务节点的安全骨架 | 可讲类型化 Agent State、runtime/checkpoint 边界、LangGraph 持久化时机陷阱、真实 bytes/decoded 双重泄密扫描与独立评审闭环 | [T30 验收证据](accesspilot-v1.3-t30-acceptance-2026-08-17.md)、[生产图](../../apps/api/src/accesspilot/agent/production_graph.py)、[严格 State](../../apps/api/src/accesspilot/agent/state.py)、[真实 PG 测试](../../apps/api/tests/db/test_t30_postgres.py) | `Verified`；T30 57 项、相关 69 项、Agent 134 项、完整 API 559 项通过；T29/T30 真实 PG 各 1 项通过；节点仍为无副作用 stub，T31/T32/T34/API 接线未实现 |
 | T31 | 将 hydrate、确定性路由、只读工具、numeric 只读子集和政策 pgvector RAG 三态迁入真实图节点；下游 compose 只依赖可持久化的脱敏 State，不依赖进程内 scratch | 让只读 Agent Loop 真正按节点运行，并以 fresh-runtime 节点级重放验证下游状态依赖；明确 generic policy search 与目录/自审批/权限解析的非 RAG 边界 | 可讲节点级迁移、Legacy parity、shadow route-only、RAG 三态、节点间状态完整性与避免“什么都叫 RAG” | [T31 验收证据](accesspilot-v1.3-t31-acceptance-2026-08-17.md)、[生产图](../../apps/api/src/accesspilot/agent/production_graph.py)、[两轮 parity 测试](../../apps/api/tests/agent/test_t31_readonly_graph.py) | `Verified`；14 场景×2 的 route/outcome 28/28 均 100% 且零差异，fresh-runtime 节点级反证 6 项通过；T31 35 项、相关 262 项、完整 API 594 项通过；尚未验证 PostgreSQL checkpoint resume 或进程重启，合法 duration 写入、模型/草稿 CAS、interrupt 与 API 接线未实现 |
-| T32 | 将申请解析、权限解析、草稿 CAS 与步骤幂等迁入图 | 防止重试时重复扣 quota、覆盖新草稿或重复提交本地副作用 | 可讲解 CAS、operation ledger 与 at-least-once 执行下的本地 exactly-once 效果 | [T32 计划](../tickets/accesspilot-langgraph-agent-loop-v1.3.md#t32--申请收集模型解析草稿-cas-与步骤幂等) | `Planned`；尚未验证重放幂等 |
+| T32 | 将申请解析、权限解析、草稿 CAS 与步骤幂等迁入图；quota/CAS/Cursor 各用稳定 operation 的同一事务 ledger，重放先查 completed；缺项下一 Cursor 由 fenced finalizer 同事务写入 | 防止重试时重复扣 quota、覆盖新草稿或重复提交本地副作用；防止失效 executor 自提交 Cursor 投影 | 可讲解 CAS、operation ledger、at-least-once 执行下的本地 exactly-once、canonical 锁顺序与 fenced finalizer | [T32 验收证据](accesspilot-v1.3-t32-acceptance-2026-08-17.md)、[步骤操作](../../apps/api/src/accesspilot/agent/step_operations.py)、[生产图](../../apps/api/src/accesspilot/agent/production_graph.py)、[两轮 parity 测试](../../apps/api/tests/agent/test_t32_request_graph.py) | `Verified`；14 个正常场景×2 的 path+outcome 28/28 断言已齐（含 revision race 与合法 numeric），T32 52 项、Agent 221 项通过（完整 API 646 项为历史证据）；二轮独立复核 P0=0、P1=0；execution 生命周期/接管（T33）与 interrupt/resume（T34）未实现 |
 | T33 | 建立 turn lease、fence、advisory lock 与精确 checkpoint head 接管 | 防止同 thread 并发双写、旧 executor 续写和崩溃后丢输入 | 可深入讲分布式 lease/fencing、并发一致性和故障接管 | [T33 计划](../tickets/accesspilot-langgraph-agent-loop-v1.3.md#t33--turn-execution-leasefence-与崩溃接管内核) | `Planned`；尚无崩溃恢复证据 |
 | T34 | 用 LangGraph interrupt/resume 实现持久的申请人确认 | 关闭 checkpoint、pending、Cursor 和 terminal 之间的丢消息窗口 | 可讲解 Human-in-the-loop、跨进程恢复与非 2PC 一致性取舍 | [T34 计划](../tickets/accesspilot-langgraph-agent-loop-v1.3.md#t34--申请人确认-interruptresume-与原子投影) | `Planned`；当前确认仍依赖业务 Cursor |
 | T35 | 实现 Workspace 粘性引擎、pending/checkpoint 对账与 Legacy 降级桥 | 防止 JSON/SSE 将同一 Workspace 分流到不同引擎，保证可控回滚 | 可讲解粘性切流、双向对账门禁和不破坏降级 | [T35 计划](../tickets/accesspilot-langgraph-agent-loop-v1.3.md#t35--workspace-sticky-enginepending-对账与-legacy-降级桥) | `Planned`；切流前仍必须 Legacy |
@@ -110,6 +110,12 @@
 > 将 AccessPilot 的确定性路由、只读工具与政策 pgvector RAG 拆入真实 LangGraph 多节点链路，固定 generic search 才走 RAG、目录/自审批/权限解析不走 RAG，并以 14 个场景连续两轮验证 route/outcome 28/28 全部一致；补充 6 项 fresh-runtime 节点级反证，证明下游只依赖可持久化的脱敏 GraphState、不依赖进程内 scratch，完整 API 594 项回归通过。
 
 使用边界：该表述只覆盖 T31 已实现的只读图分支与节点级重放，不代表 PostgreSQL checkpoint resume 或进程重启已经验证；合法期限消费、模型解析、草稿 CAS 属于 T32，崩溃接管/恢复属于 T33/T37，申请人 interrupt/resume 属于 T34，生产 JSON/SSE 仍未切入 LangGraph。正式简历仍需用户另行确认后才修改。
+
+## T32 Verified 简历候选表述
+
+> 将 AccessPilot 的申请收集主链（模型解析、权限解析、草稿 CAS、字段校验）迁入真实 LangGraph 节点，以稳定 operation ledger 实现 quota/草稿/Cursor 的应用级幂等，并让第二次模型调用携带纠正提示、14 个正常场景连续两轮 path+outcome 28/28 与 Legacy 一致；补充 fenced finalizer 事务（Cursor 五列与 ledger 同事务、重放同一行、stale fence/过期租约零写入）。独立验收 P0=0、P1=0，T32 定向 52 项、Agent 相关 221 项通过（完整 API 646 项为此前历史证据，本轮未重跑）。
+
+使用边界：该表述只覆盖 T32 已实现的申请收集/草稿 CAS/步骤幂等；execution 生命周期、lease、崩溃接管属于 T33，申请人 interrupt/resume 属于 T34，真实轨迹事件与生产 JSON/SSE 切流尚未实现。正式简历仍需用户另行确认后才修改。
 
 ## 固定参考
 

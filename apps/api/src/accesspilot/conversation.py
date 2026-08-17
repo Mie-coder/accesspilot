@@ -390,6 +390,28 @@ def _sanitize_model_text(content: str | None) -> str | None:
     return redacted
 
 
+def normalize_request_candidate(
+    parsed: ParsedReply,
+    *,
+    actor_id: str,
+    content: str,
+    security_probe: bool,
+) -> ParsedReply:
+    """Apply the server-owned identity, confirmation, and text safety rules."""
+
+    explicit_confirmation = _explicit_confirmation_from_text(content)
+    if security_probe and explicit_confirmation is None:
+        explicit_confirmation = False
+    return parsed.model_copy(
+        update={
+            "employee_id": actor_id,
+            "entitlement_id": _sanitize_model_text(parsed.entitlement_id),
+            "justification": _sanitize_model_text(parsed.justification),
+            "confirmed": explicit_confirmation,
+        }
+    )
+
+
 _QUESTION_WORD_MARKERS = (
     "怎么",
     "如何",
@@ -474,6 +496,16 @@ def _is_safe_justification_cursor_reply(
         and re.search(r"[^\W\d_]", content) is not None
         and _is_request_collection_follow_up(content, ["justification"])
     )
+
+
+# Pure request-collection helpers shared by Legacy and the real graph nodes.
+merge_request_candidate = _merge_reply
+missing_field_question = _missing_field_question
+entitlement_resolution_message = _entitlement_resolution_message
+entitlement_resolution_status = _entitlement_resolution_status
+is_request_collection_follow_up = _is_request_collection_follow_up
+is_safe_justification_cursor_reply = _is_safe_justification_cursor_reply
+is_obvious_question = _is_obvious_question
 
 
 def compose_tool_answer(route: IntentRoute, result: ToolResult | None) -> str:
@@ -1143,17 +1175,11 @@ def _process_chat_message(
                 before_retry=consume_retry_quota,
             )
         )
-        explicit_confirmation = _explicit_confirmation_from_text(normalized_content)
-        if route.security_probe and explicit_confirmation is None:
-            explicit_confirmation = False
-        # 模型可以理解用户文本，但无权更改身份事实或把疑似密钥写入草稿。
-        parsed = parsed.model_copy(
-            update={
-                "employee_id": workspace.actor_id,
-                "entitlement_id": _sanitize_model_text(parsed.entitlement_id),
-                "justification": _sanitize_model_text(parsed.justification),
-                "confirmed": explicit_confirmation,
-            }
+        parsed = normalize_request_candidate(
+            parsed,
+            actor_id=workspace.actor_id,
+            content=normalized_content,
+            security_probe=route.security_probe,
         )
         if parsed.entitlement_id is not None:
             if parsed.entitlement_id.strip():

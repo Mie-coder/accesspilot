@@ -15,7 +15,7 @@ from accesspilot.agent.embeddings import DeterministicEmbeddingModel
 from accesspilot.agent.production_graph import (
     GraphInput,
     GraphRuntimeContext,
-    GraphWritePathDeferredError,
+    GraphRuntimeContractError,
     ProductionGraph,
     _compose_grounded_answer,
     _compose_insufficient_answer,
@@ -308,7 +308,7 @@ def test_direct_readonly_paths_execute_real_nodes_and_match_legacy_outcome(
     }
 
 
-def test_legal_duration_is_explicitly_deferred_without_mutating_draft(
+def test_legal_duration_requires_t32_execution_binding_without_mutating_draft(
     database_session_factory: sessionmaker[Session],
 ) -> None:
     fixture = _workspace_fixture(
@@ -325,7 +325,7 @@ def test_legal_duration_is_explicitly_deferred_without_mutating_draft(
         fixture.token, auth_session_id=AUTH_SESSION_ID
     )
 
-    with pytest.raises(GraphWritePathDeferredError, match="T32"):
+    with pytest.raises(GraphRuntimeContractError, match="execution binding"):
         graph.invoke(_input(fixture, "14"), context=fixture.context)
 
     after = fixture.workspace_service.get(
