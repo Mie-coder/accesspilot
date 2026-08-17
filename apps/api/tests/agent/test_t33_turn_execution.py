@@ -253,7 +253,7 @@ def test_advisory_lock_is_exclusive_per_agent_thread(
 def test_complete_turn_releases_lease_and_next_input_reuses_graph_run(
     database_session_factory: sessionmaker[Session],
 ) -> None:
-    token, workspace_id, _agent_thread_id, auth_session_id = _workspace_fixture(
+    token, workspace_id, agent_thread_id, auth_session_id = _workspace_fixture(
         database_session_factory
     )
     service = TurnExecutionService(database_session_factory)
@@ -279,11 +279,13 @@ def test_complete_turn_releases_lease_and_next_input_reuses_graph_run(
         terminal_event_id = terminal.id
         session.commit()
 
-    service.complete_turn(
-        first,
-        workspace_token=token,
-        terminal_event_id=terminal_event_id,
-    )
+    with service.advisory_lock(agent_thread_id) as lock:
+        service.complete_turn(
+            first,
+            workspace_token=token,
+            terminal_event_id=terminal_event_id,
+            lock=lock,
+        )
 
     with database_session_factory() as session:
         execution = session.scalar(
@@ -328,6 +330,54 @@ class _BlockingGraph:
         return {"ok": True}
 
 
+class _CountingGraph:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def invoke(
+        self,
+        graph_input: object,
+        config: object | None = None,
+        *,
+        context: object | None = None,
+        **kwargs: object,
+    ) -> dict[str, bool]:
+        del graph_input, config, context, kwargs
+        self.calls += 1
+        return {"ok": True}
+
+
+def test_runner_expired_handle_fails_before_graph_invoke(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    token, workspace_id, agent_thread_id, auth_session_id = _workspace_fixture(
+        database_session_factory
+    )
+    service = TurnExecutionService(database_session_factory)
+    handle = service.begin_input(
+        workspace_token=token,
+        auth_session_ref=auth_session_id,
+        actor_id="EMP-001",
+        safe_user_text="expired runner",
+    )
+    with database_session_factory() as session:
+        execution = session.scalar(
+            select(AgentTurnExecutionRecord).where(
+                AgentTurnExecutionRecord.workspace_id == workspace_id
+            )
+        )
+        assert execution is not None
+        execution.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        session.commit()
+
+    graph = _CountingGraph()
+    runner = FencedGraphTurnRunner(graph, service, heartbeat_interval=0.05)
+    with pytest.raises(StaleTurnFenceError):
+        with service.advisory_lock(agent_thread_id) as lock:
+            runner.run(handle, {}, context={}, lock=lock)  # type: ignore[arg-type]
+    assert graph.calls == 0
+
+
 def test_runner_holds_advisory_lock_during_graph_invoke(
     database_session_factory: sessionmaker[Session],
 ) -> None:
@@ -350,7 +400,10 @@ def test_runner_holds_advisory_lock_during_graph_invoke(
 
     def run() -> None:
         try:
-            results.append(runner.run(handle, {}, context={}))  # type: ignore[arg-type]
+            with service.advisory_lock(agent_thread_id) as lock:
+                results.append(
+                    runner.run(handle, {}, context={}, lock=lock)  # type: ignore[arg-type]
+                )
         except BaseException as error:  # pragma: no cover - failure path
             errors.append(error)
 

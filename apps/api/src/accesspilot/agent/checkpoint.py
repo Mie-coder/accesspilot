@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable, Collection, Iterator, Sequence
 from copy import copy
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any, Protocol, TypeVar, cast
 from uuid import UUID
@@ -16,6 +17,7 @@ from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult, make_url
 from sqlalchemy.orm import Session
 
+from accesspilot.agent.advisory_lock import AdvisoryLockHandle
 from accesspilot.config import Settings
 from accesspilot.db.models import AgentTurnExecutionRecord, WorkspaceRecord, utc_now
 
@@ -466,10 +468,15 @@ class AcceptedCheckpointHeadStore:
         self,
         session: Session,
         verified: VerifiedCheckpointCandidate,
+        *,
+        lock: AdvisoryLockHandle | None = None,
     ) -> bool:
         if not isinstance(verified, VerifiedCheckpointCandidate):
             raise TypeError("head promotion requires a verified checkpoint candidate")
+        if lock is not None:
+            lock.require_session(session)
         context = verified.context
+        now = datetime.now(UTC)
         statement = update(AgentTurnExecutionRecord).where(
             AgentTurnExecutionRecord.id == context.execution_id,
             AgentTurnExecutionRecord.workspace_id == context.workspace_id,
@@ -484,6 +491,8 @@ class AcceptedCheckpointHeadStore:
             AgentTurnExecutionRecord.input_turn_id == context.input_turn_id,
             AgentTurnExecutionRecord.status == "running",
             AgentTurnExecutionRecord.lease_fence == context.lease_fence,
+            AgentTurnExecutionRecord.lease_expires_at.is_not(None),
+            AgentTurnExecutionRecord.lease_expires_at > now,
             AgentTurnExecutionRecord.checkpoint_thread_id
             == context.checkpoint_thread_id,
             AgentTurnExecutionRecord.checkpoint_ns == context.checkpoint_ns,

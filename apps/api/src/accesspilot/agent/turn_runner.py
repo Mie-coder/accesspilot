@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Protocol
 
+from accesspilot.agent.advisory_lock import AdvisoryLockHandle
 from accesspilot.agent.turn_execution import (
     TurnExecutionHandle,
     TurnExecutionService,
@@ -25,7 +26,13 @@ class GraphInvoker(Protocol):
 
 
 class FencedGraphTurnRunner:
-    """Run one graph turn while holding the thread lock and renewing the lease."""
+    """Run one graph turn while holding the thread lock and renewing the lease.
+
+    The caller must already hold the ``AdvisoryLockHandle`` from
+    ``TurnExecutionService.advisory_lock``.  The lock therefore continuously
+    covers any preceding takeover, this graph invocation, and any subsequent
+    head promotion/terminal finalize performed on the same lock session.
+    """
 
     def __init__(
         self,
@@ -43,39 +50,42 @@ class FencedGraphTurnRunner:
         handle: TurnExecutionHandle,
         graph_input: Any,
         context: Any,
+        lock: AdvisoryLockHandle,
         config: Any | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Invoke the graph under the thread advisory lock.
+        """Invoke the graph under an already-held thread advisory lock.
 
-        A daemon heartbeat thread CAS-renews the lease while the synchronous
-        graph call is running.  If the lease/fence is stolen, the heartbeat
-        records the failure and the runner raises it after the graph call
-        settles; application writes and head promotion still fail closed on
-        their own fenced transactions.
+        Before the graph is called, the lease is immediately CAS-renewed so an
+        expired/stale handle fails with zero graph invocations.  A daemon
+        heartbeat thread then keeps renewing while the synchronous graph call
+        runs.
         """
-        with self._turn_service.advisory_lock(handle.agent_thread_id):
-            stop = threading.Event()
-            heartbeat_errors: list[BaseException] = []
+        # Pre-flight: this must fail before graph.invoke for expired/stale
+        # handles, leaving graph call count at zero.
+        self._turn_service.heartbeat(handle)
 
-            def heartbeat_loop() -> None:
-                try:
-                    while not stop.wait(self._heartbeat_interval):
-                        self._turn_service.heartbeat(handle)
-                except BaseException as error:  # pragma: no cover - failure path
-                    heartbeat_errors.append(error)
+        stop = threading.Event()
+        heartbeat_errors: list[BaseException] = []
 
-            thread = threading.Thread(target=heartbeat_loop, daemon=True)
-            thread.start()
+        def heartbeat_loop() -> None:
             try:
-                return self._graph.invoke(
-                    graph_input,
-                    config,
-                    context=context,
-                    **kwargs,
-                )
-            finally:
-                stop.set()
-                thread.join(timeout=min(max(self._heartbeat_interval * 2, 1.0), 5.0))
-                if heartbeat_errors:
-                    raise heartbeat_errors[0]
+                while not stop.wait(self._heartbeat_interval):
+                    self._turn_service.heartbeat(handle)
+            except BaseException as error:  # pragma: no cover - failure path
+                heartbeat_errors.append(error)
+
+        thread = threading.Thread(target=heartbeat_loop, daemon=True)
+        thread.start()
+        try:
+            return self._graph.invoke(
+                graph_input,
+                config,
+                context=context,
+                **kwargs,
+            )
+        finally:
+            stop.set()
+            thread.join(timeout=min(max(self._heartbeat_interval * 2, 1.0), 5.0))
+            if heartbeat_errors:
+                raise heartbeat_errors[0]

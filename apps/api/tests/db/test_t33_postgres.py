@@ -9,18 +9,27 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from typing import TypedDict
 from uuid import UUID, uuid4
 
 import psycopg
 import pytest
 from alembic import command
 from alembic.config import Config
+from langgraph.graph import END, START, StateGraph
 from psycopg import sql
 from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.orm.session import close_all_sessions
 
+from accesspilot.agent.checkpoint import (
+    AcceptedCheckpointHeadStore,
+    ExactCheckpointRequired,
+    FencedPostgresSaverAdapter,
+    PostgresCheckpointRuntime,
+    ServerExecutionContext,
+)
 from accesspilot.agent.step_operations import (
     AgentStepContext,
     AgentStepOperationService,
@@ -28,10 +37,14 @@ from accesspilot.agent.step_operations import (
 )
 from accesspilot.agent.turn_execution import (
     RecoveryPlan,
+    StaleTurnFenceError,
+    TurnExecutionError,
     TurnExecutionService,
     TurnInProgressError,
     TurnRecoveryInProgressError,
 )
+from accesspilot.checkpoint_init import run_official_checkpoint_setup
+from accesspilot.config import Settings
 from accesspilot.db.models import (
     AgentTurnExecutionRecord,
     AuthSessionRecord,
@@ -95,6 +108,89 @@ def _isolated_database() -> Iterator[str]:
             )
 
 
+@contextmanager
+def _isolated_checkpoint_database() -> Iterator[Settings]:
+    configured = _admin_url()
+    if not configured:
+        pytest.skip(
+            f"set {_ADMIN_URL_ENV} to run the destructive-isolated T33 checkpoint proof"
+        )
+    admin_url = make_url(configured).set(
+        drivername="postgresql", database="postgres"
+    )
+    admin_conninfo = admin_url.render_as_string(hide_password=False)
+    suffix = uuid4().hex[:12]
+    database = f"t33chk_{suffix}"
+    migration_role = f"t33m_{suffix}"
+    runtime_role = f"t33r_{suffix}"
+    migration_password = f"m-{uuid4().hex}"
+    runtime_password = f"r-{uuid4().hex}"
+    with psycopg.connect(admin_conninfo, autocommit=True) as admin:
+        admin.execute(
+            sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                sql.Identifier(migration_role), sql.Literal(migration_password)
+            )
+        )
+        admin.execute(
+            sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                sql.Identifier(runtime_role), sql.Literal(runtime_password)
+            )
+        )
+        admin.execute(
+            sql.SQL("CREATE DATABASE {} OWNER {}").format(
+                sql.Identifier(database), sql.Identifier(migration_role)
+            )
+        )
+    database_admin_url = make_url(configured).set(
+        drivername="postgresql", database=database
+    ).render_as_string(hide_password=False)
+    with psycopg.connect(database_admin_url, autocommit=True) as database_admin:
+        database_admin.execute("CREATE EXTENSION vector")
+    migration_url = make_url(configured).set(
+        username=migration_role,
+        password=migration_password,
+        database=database,
+    ).render_as_string(hide_password=False)
+    runtime_url = make_url(configured).set(
+        username=runtime_role,
+        password=runtime_password,
+        database=database,
+    ).render_as_string(hide_password=False)
+    schema = f"t33_checkpoint_{suffix}"
+    settings = Settings(
+        database_url=migration_url,
+        checkpoint_migration_database_url=migration_url,
+        checkpoint_database_url=runtime_url,
+        checkpoint_schema=schema,
+        orchestrator_mode="mixed",
+        langgraph_canary_percent=0,
+        _env_file=None,
+    )
+    try:
+        root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
+        alembic_config = Config(os.path.join(root, "alembic.ini"))
+        alembic_config.attributes["database_url"] = migration_url
+        command.upgrade(alembic_config, "head")
+        run_official_checkpoint_setup(settings)
+        yield settings
+    finally:
+        with psycopg.connect(admin_conninfo, autocommit=True) as admin:
+            admin.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = %s AND pid <> pg_backend_pid()",
+                (database,),
+            )
+            admin.execute(
+                sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(database))
+            )
+            admin.execute(
+                sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(runtime_role))
+            )
+            admin.execute(
+                sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(migration_role))
+            )
+
+
 def _workspace_fixture(
     factory: sessionmaker[Session],
 ) -> tuple[str, UUID, UUID, UUID]:
@@ -134,7 +230,8 @@ def _expire_lease(
     with factory() as session:
         execution = session.scalar(
             select(AgentTurnExecutionRecord).where(
-                AgentTurnExecutionRecord.workspace_id == workspace_id
+                AgentTurnExecutionRecord.workspace_id == workspace_id,
+                AgentTurnExecutionRecord.status == "running",
             )
         )
         assert execution is not None
@@ -167,6 +264,83 @@ def _step_context_from_handle(
         auth_session_ref=handle.auth_session_ref,
         lease_fence=handle.lease_fence if lease_fence is None else lease_fence,
     )
+
+
+class _SmallState(TypedDict):
+    value: str
+
+
+def _small_node(state: _SmallState) -> dict[str, str]:
+    return {"value": state["value"] + "!"}
+
+
+def _small_graph(checkpointer: object) -> object:
+    builder = StateGraph(_SmallState)
+    builder.add_node("small_node", _small_node)
+    builder.add_edge(START, "small_node")
+    builder.add_edge("small_node", END)
+    return builder.compile(checkpointer=checkpointer)
+
+
+def _server_context(
+    factory: sessionmaker[Session],
+    workspace_id: UUID,
+) -> ServerExecutionContext:
+    with factory() as session:
+        record = session.scalar(
+            select(AgentTurnExecutionRecord).where(
+                AgentTurnExecutionRecord.workspace_id == workspace_id
+            )
+        )
+        assert record is not None
+        return ServerExecutionContext.from_record(record)
+
+
+def _checkpoint_settings(database_url: str) -> Settings:
+    schema = f"t33_checkpoint_{uuid4().hex[:12]}"
+    return Settings(
+        database_url=database_url,
+        checkpoint_migration_database_url=database_url,
+        checkpoint_database_url=database_url,
+        checkpoint_schema=schema,
+        orchestrator_mode="mixed",
+        langgraph_canary_percent=0,
+        _env_file=None,
+    )
+
+
+def _promote_real_end_head(
+    factory: sessionmaker[Session],
+    runtime: PostgresCheckpointRuntime,
+    service: TurnExecutionService,
+    handle,
+    agent_thread_id: UUID,
+) -> tuple[ServerExecutionContext, object, object]:
+    context = _server_context(factory, handle.workspace_id)
+    invocation = FencedPostgresSaverAdapter(runtime.saver).for_execution(context)
+    graph = _small_graph(invocation)
+    base_config = {
+        "configurable": {
+            "thread_id": context.checkpoint_thread_id,
+            "checkpoint_ns": "",
+        }
+    }
+    graph.invoke({"value": "a"}, base_config, durability="sync")
+    candidate = invocation.candidate
+    assert candidate is not None
+    verified = invocation.verify_candidate(
+        candidate,
+        graph_stopped=True,
+        graph_state_reader=graph.get_state,
+        state_validator=lambda state: not state.next,
+    )
+    with service.advisory_lock(agent_thread_id) as lock:
+        assert (
+            AcceptedCheckpointHeadStore().promote(lock.session, verified, lock=lock)
+            is True
+        )
+    updated_context = _server_context(factory, handle.workspace_id)
+    return updated_context, candidate, verified
 
 
 def test_concurrent_begin_input_second_conflict_without_new_facts() -> None:
@@ -236,13 +410,14 @@ def test_takeover_reuses_identity_increments_fence_and_stale_step_write_fails() 
         _expire_lease(factory, workspace_id)
         before_events = _count_events(factory, workspace_id)
 
-        with service.advisory_lock(agent_thread_id):
+        with service.advisory_lock(agent_thread_id) as lock:
             plan = service.takeover(
                 workspace_token=token,
                 graph_run_id=handle.graph_run_id,
                 input_seq=handle.input_seq,
                 auth_session_ref=auth_session_id,
                 actor_id="EMP-001",
+                lock=lock,
             )
 
         assert isinstance(plan, RecoveryPlan)
@@ -308,13 +483,14 @@ def test_takeover_with_accepted_head_plans_exact_checkpoint_recovery() -> None:
             execution.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
             session.commit()
 
-        with service.advisory_lock(agent_thread_id):
+        with service.advisory_lock(agent_thread_id) as lock:
             plan = service.takeover(
                 workspace_token=token,
                 graph_run_id=handle.graph_run_id,
                 input_seq=handle.input_seq,
                 auth_session_ref=auth_session_id,
                 actor_id="EMP-001",
+                lock=lock,
             )
 
         assert plan.source == "checkpoint"
@@ -336,7 +512,7 @@ def test_takeover_with_accepted_head_plans_exact_checkpoint_recovery() -> None:
 def test_t33_and_t32_write_paths_share_lock_order_no_deadlock() -> None:
     with _isolated_database() as database_url:
         factory = build_session_factory(build_engine(database_url))
-        token, workspace_id, _agent_thread_id, auth_session_id = _workspace_fixture(
+        token, workspace_id, agent_thread_id, auth_session_id = _workspace_fixture(
             factory
         )
         service = TurnExecutionService(factory)
@@ -386,11 +562,13 @@ def test_t33_and_t32_write_paths_share_lock_order_no_deadlock() -> None:
 
         def t33_complete() -> None:
             try:
-                service.complete_turn(
-                    handle,
-                    workspace_token=token,
-                    terminal_event_id=terminal_event_id,
-                )
+                with service.advisory_lock(agent_thread_id) as lock:
+                    service.complete_turn(
+                        handle,
+                        workspace_token=token,
+                        terminal_event_id=terminal_event_id,
+                        lock=lock,
+                    )
             except BaseException as error:  # pragma: no cover - failure path
                 errors.append(error)
 
@@ -413,4 +591,276 @@ def test_t33_and_t32_write_paths_share_lock_order_no_deadlock() -> None:
             assert execution is not None
             assert execution.status == "completed"
             assert execution.lease_expires_at is None
+        close_all_sessions()
+
+
+def test_real_checkpoint_exact_end_head_and_no_implicit_latest() -> None:
+    with _isolated_checkpoint_database() as settings:
+        runtime = PostgresCheckpointRuntime(settings)
+        runtime.start()
+        runtime.check_readiness()
+        factory = build_session_factory(build_engine(settings.database_url))
+        token, workspace_id, agent_thread_id, auth_session_id = _workspace_fixture(
+            factory
+        )
+        service = TurnExecutionService(factory)
+        handle = service.begin_input(
+            workspace_token=token,
+            auth_session_ref=auth_session_id,
+            actor_id="EMP-001",
+            safe_user_text="real checkpoint",
+        )
+        context, _candidate, _verified = _promote_real_end_head(
+            factory, runtime, service, handle, agent_thread_id
+        )
+        accepted_locator = context.accepted_locator
+        assert accepted_locator is not None
+        assert runtime.saver is not None
+        assert runtime.saver.get_tuple(accepted_locator.as_config()) is not None
+
+        _expire_lease(factory, workspace_id)
+        with service.advisory_lock(agent_thread_id) as lock:
+            plan = service.takeover(
+                workspace_token=token,
+                graph_run_id=handle.graph_run_id,
+                input_seq=handle.input_seq,
+                auth_session_ref=auth_session_id,
+                actor_id="EMP-001",
+                lock=lock,
+                saver=runtime.saver,
+            )
+
+        assert plan.source == "checkpoint"
+        assert plan.accepted_checkpoint_id == accepted_locator.checkpoint_id
+
+        new_context = _server_context(factory, workspace_id)
+        fresh_invocation = FencedPostgresSaverAdapter(runtime.saver).for_execution(
+            new_context
+        )
+        assert fresh_invocation.get_exact(accepted_locator) is not None
+        base_config = {
+            "configurable": {
+                "thread_id": new_context.checkpoint_thread_id,
+                "checkpoint_ns": "",
+            }
+        }
+        with pytest.raises(ExactCheckpointRequired):
+            fresh_invocation.get_tuple(base_config)
+        runtime.close()
+        close_all_sessions()
+
+
+def test_takeover_missing_accepted_head_fails_closed_with_real_saver() -> None:
+    with _isolated_checkpoint_database() as settings:
+        runtime = PostgresCheckpointRuntime(settings)
+        runtime.start()
+        runtime.check_readiness()
+        factory = build_session_factory(build_engine(settings.database_url))
+        token, workspace_id, agent_thread_id, auth_session_id = _workspace_fixture(
+            factory
+        )
+        service = TurnExecutionService(factory)
+        handle = service.begin_input(
+            workspace_token=token,
+            auth_session_ref=auth_session_id,
+            actor_id="EMP-001",
+            safe_user_text="missing head",
+        )
+        missing = "missing-head"
+        with factory() as session:
+            execution = session.scalar(
+                select(AgentTurnExecutionRecord).where(
+                    AgentTurnExecutionRecord.workspace_id == workspace_id
+                )
+            )
+            assert execution is not None
+            execution.accepted_checkpoint_id = missing
+            execution.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            session.commit()
+
+        with service.advisory_lock(agent_thread_id) as lock:
+            with pytest.raises(TurnExecutionError, match="accepted checkpoint head is missing"):
+                service.takeover(
+                    workspace_token=token,
+                    graph_run_id=handle.graph_run_id,
+                    input_seq=handle.input_seq,
+                    auth_session_ref=auth_session_id,
+                    actor_id="EMP-001",
+                    lock=lock,
+                    saver=runtime.saver,
+                )
+
+        with factory() as session:
+            execution = session.scalar(
+                select(AgentTurnExecutionRecord).where(
+                    AgentTurnExecutionRecord.workspace_id == workspace_id
+                )
+            )
+            assert execution is not None
+            assert execution.attempt == 1
+            assert execution.lease_fence == handle.lease_fence
+            workspace = session.get(WorkspaceRecord, workspace_id)
+            assert workspace is not None
+            assert workspace.lease_fence == handle.lease_fence
+        runtime.close()
+        close_all_sessions()
+
+
+def test_takeover_historical_accepted_head_forbids_input_event_fallback() -> None:
+    with _isolated_checkpoint_database() as settings:
+        runtime = PostgresCheckpointRuntime(settings)
+        runtime.start()
+        runtime.check_readiness()
+        factory = build_session_factory(build_engine(settings.database_url))
+        token, workspace_id, agent_thread_id, auth_session_id = _workspace_fixture(
+            factory
+        )
+        service = TurnExecutionService(factory)
+        first = service.begin_input(
+            workspace_token=token,
+            auth_session_ref=auth_session_id,
+            actor_id="EMP-001",
+            safe_user_text="first input",
+        )
+        first_context, _candidate, _verified = _promote_real_end_head(
+            factory, runtime, service, first, agent_thread_id
+        )
+        accepted_id = first_context.accepted_checkpoint_id
+        assert accepted_id is not None
+
+        with factory() as session:
+            terminal = WorkspaceEventRecord(
+                workspace_id=workspace_id,
+                event_type="message.completed",
+                payload={
+                    "turn_id": first.input_turn_id,
+                    "message_id": "msg-historical",
+                    "content": "ok",
+                },
+            )
+            session.add(terminal)
+            session.flush()
+            terminal_event_id = terminal.id
+            session.commit()
+        with service.advisory_lock(agent_thread_id) as lock:
+            service.complete_turn(
+                first,
+                workspace_token=token,
+                terminal_event_id=terminal_event_id,
+                lock=lock,
+            )
+
+        second = service.begin_input(
+            workspace_token=token,
+            auth_session_ref=auth_session_id,
+            actor_id="EMP-001",
+            safe_user_text="second input",
+        )
+        assert second.graph_run_id == first.graph_run_id
+        assert second.input_seq == first.input_seq + 1
+        assert second.accepted_checkpoint_id is None
+        _expire_lease(factory, workspace_id)
+
+        with service.advisory_lock(agent_thread_id) as lock:
+            plan = service.takeover(
+                workspace_token=token,
+                graph_run_id=second.graph_run_id,
+                input_seq=second.input_seq,
+                auth_session_ref=auth_session_id,
+                actor_id="EMP-001",
+                lock=lock,
+                saver=runtime.saver,
+            )
+
+        assert plan.source == "checkpoint"
+        assert plan.accepted_checkpoint_id == accepted_id
+        with factory() as session:
+            execution = session.scalar(
+                select(AgentTurnExecutionRecord).where(
+                    AgentTurnExecutionRecord.id == second.execution_id
+                )
+            )
+            assert execution is not None
+            assert execution.accepted_checkpoint_id == accepted_id
+        runtime.close()
+        close_all_sessions()
+
+
+def test_stale_owner_head_and_terminal_zero_write_after_takeover() -> None:
+    with _isolated_checkpoint_database() as settings:
+        runtime = PostgresCheckpointRuntime(settings)
+        runtime.start()
+        runtime.check_readiness()
+        factory = build_session_factory(build_engine(settings.database_url))
+        token, workspace_id, agent_thread_id, auth_session_id = _workspace_fixture(
+            factory
+        )
+        service = TurnExecutionService(factory)
+        old_handle = service.begin_input(
+            workspace_token=token,
+            auth_session_ref=auth_session_id,
+            actor_id="EMP-001",
+            safe_user_text="stale zero writes",
+        )
+        context, _candidate, old_verified = _promote_real_end_head(
+            factory, runtime, service, old_handle, agent_thread_id
+        )
+        accepted_id = context.accepted_checkpoint_id
+        assert accepted_id is not None
+        with factory() as session:
+            terminal = WorkspaceEventRecord(
+                workspace_id=workspace_id,
+                event_type="message.completed",
+                payload={
+                    "turn_id": old_handle.input_turn_id,
+                    "message_id": "msg-stale",
+                    "content": "ok",
+                },
+            )
+            session.add(terminal)
+            session.flush()
+            terminal_event_id = terminal.id
+            session.commit()
+        _expire_lease(factory, workspace_id)
+
+        with service.advisory_lock(agent_thread_id) as lock:
+            plan = service.takeover(
+                workspace_token=token,
+                graph_run_id=old_handle.graph_run_id,
+                input_seq=old_handle.input_seq,
+                auth_session_ref=auth_session_id,
+                actor_id="EMP-001",
+                lock=lock,
+                saver=runtime.saver,
+            )
+            assert plan.source == "checkpoint"
+
+            # Head promotion by the stale owner must be a zero-write.
+            assert (
+                AcceptedCheckpointHeadStore().promote(
+                    lock.session, old_verified, lock=lock
+                )
+                is False
+            )
+
+            # Terminal write by the stale owner must be a zero-write.
+            with pytest.raises(StaleTurnFenceError):
+                service.complete_turn(
+                    old_handle,
+                    workspace_token=token,
+                    terminal_event_id=terminal_event_id,
+                    lock=lock,
+                )
+
+        with factory() as session:
+            execution = session.scalar(
+                select(AgentTurnExecutionRecord).where(
+                    AgentTurnExecutionRecord.workspace_id == workspace_id
+                )
+            )
+            assert execution is not None
+            assert execution.accepted_checkpoint_id == accepted_id
+            assert execution.terminal_event_id is None
+            assert execution.status == "running"
+        runtime.close()
         close_all_sessions()
