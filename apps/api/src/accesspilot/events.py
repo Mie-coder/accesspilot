@@ -3,7 +3,7 @@
 import json
 import re
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
@@ -146,6 +146,17 @@ class TurnInterruptedPayload(BaseModel):
     retryable: bool = True
 
 
+class AgentInputRequiredPayload(BaseModel):
+    """持久化的申请人确认输入请求投影。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pending_input_id: str = Field(min_length=1, max_length=160)
+    kind: Literal["confirmation"] = "confirmation"
+    draft_revision: int = Field(ge=0)
+    turn_id: str = Field(min_length=1, max_length=120)
+
+
 SAFE_EVENT_MODELS: dict[str, type[BaseModel]] = {
     "turn.started": TurnStartedPayload,
     "intent.detected": IntentDetectedPayload,
@@ -160,6 +171,7 @@ SAFE_EVENT_MODELS: dict[str, type[BaseModel]] = {
     "security.notice": SecurityNoticePayload,
     "message.completed": MessageCompletedPayload,
     "turn.interrupted": TurnInterruptedPayload,
+    "agent.input.required": AgentInputRequiredPayload,
 }
 
 TERMINAL_EVENT_TYPES = frozenset(

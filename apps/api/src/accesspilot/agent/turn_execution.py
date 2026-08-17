@@ -25,7 +25,12 @@ from accesspilot.agent.advisory_lock import (
     _create_lock_handle,
     _LockState,
 )
-from accesspilot.agent.checkpoint import CheckpointLocator, SaverLike
+from accesspilot.agent.checkpoint import (
+    AcceptedCheckpointHeadStore,
+    CheckpointLocator,
+    SaverLike,
+    VerifiedCheckpointCandidate,
+)
 from accesspilot.agent.safety import redact_sensitive_content
 from accesspilot.db.models import (
     AgentPendingInputRecord,
@@ -36,7 +41,7 @@ from accesspilot.db.models import (
     utc_now,
 )
 from accesspilot.db.workspace_store import hash_workspace_token
-from accesspilot.events import stage_workspace_event
+from accesspilot.events import stage_workspace_event, validate_event_payload
 from accesspilot.workspaces import UnknownWorkspaceError
 
 
@@ -585,6 +590,287 @@ class TurnExecutionService:
             execution.updated_at = utc_now()
             session.flush()
             return terminal.id
+
+    # ------------------------------------------------------------------
+    # Interrupt / resume application transactions
+    # ------------------------------------------------------------------
+    def finalize_interrupt(
+        self,
+        handle: TurnExecutionHandle,
+        *,
+        workspace_token: str,
+        lock: AdvisoryLockHandle,
+        verified: VerifiedCheckpointCandidate,
+        pending_input_id: UUID,
+        draft_revision: int,
+    ) -> int:
+        """Atomically promote accepted head + pending + Cursor + terminal events.
+
+        This is the single fenced transaction that makes an interrupt visible:
+        the execution is validated, the verified candidate is promoted, the
+        ``AgentPendingInputRecord`` is inserted, the confirmation Cursor is
+        activated, and the unique terminal event chain is written together.
+        """
+        session = lock.session
+        with session.begin():
+            execution = session.scalar(
+                select(AgentTurnExecutionRecord)
+                .where(
+                    AgentTurnExecutionRecord.id == handle.execution_id,
+                    AgentTurnExecutionRecord.workspace_id == handle.workspace_id,
+                    AgentTurnExecutionRecord.graph_run_id == handle.graph_run_id,
+                    AgentTurnExecutionRecord.input_seq == handle.input_seq,
+                    AgentTurnExecutionRecord.input_turn_id == handle.input_turn_id,
+                    AgentTurnExecutionRecord.actor_id == handle.actor_id,
+                    AgentTurnExecutionRecord.auth_session_ref
+                    == handle.auth_session_ref,
+                    AgentTurnExecutionRecord.lease_fence == handle.lease_fence,
+                    AgentTurnExecutionRecord.status == "running",
+                )
+                .with_for_update()
+            )
+            if execution is None:
+                raise StaleTurnFenceError("execution is not owned by this handle")
+            now = datetime.now(UTC)
+            if execution.lease_expires_at is None or execution.lease_expires_at <= now:
+                raise StaleTurnFenceError("execution lease has expired")
+            workspace = session.scalar(
+                select(WorkspaceRecord)
+                .where(
+                    WorkspaceRecord.id == handle.workspace_id,
+                    WorkspaceRecord.token_hash == hash_workspace_token(workspace_token),
+                    WorkspaceRecord.actor_id == handle.actor_id,
+                    WorkspaceRecord.lease_fence == handle.lease_fence,
+                )
+                .with_for_update()
+            )
+            if workspace is None:
+                raise StaleTurnFenceError("workspace fence does not match execution")
+            lock.require_thread(workspace.agent_thread_id)
+            if not AcceptedCheckpointHeadStore().promote(session, verified):
+                raise StaleTurnFenceError("checkpoint head promotion failed")
+
+            session.add(
+                AgentPendingInputRecord(
+                    workspace_id=handle.workspace_id,
+                    agent_thread_id=workspace.agent_thread_id,
+                    graph_run_id=handle.graph_run_id,
+                    checkpoint_thread_id=execution.checkpoint_thread_id,
+                    pending_input_id=pending_input_id,
+                    kind="confirmation",
+                    draft_revision=draft_revision,
+                    auth_session_ref=handle.auth_session_ref,
+                    actor_id=handle.actor_id,
+                    engine="langgraph",
+                    checkpoint_ns="",
+                    accepted_checkpoint_id=execution.accepted_checkpoint_id,
+                    status="active",
+                    resume_input_seq=None,
+                )
+            )
+            workspace.cursor_actor_id = handle.actor_id
+            workspace.cursor_auth_session_id = str(handle.auth_session_ref)
+            workspace.cursor_expected_field = "confirmation"
+            workspace.cursor_last_question_kind = "confirmation"
+            workspace.cursor_issued_at = now
+            workspace.cursor_consumed_at = None
+
+            required_payload = validate_event_payload(
+                "agent.input.required",
+                {
+                    "pending_input_id": str(pending_input_id),
+                    "kind": "confirmation",
+                    "draft_revision": draft_revision,
+                    "turn_id": handle.input_turn_id,
+                },
+            )
+            status_payload = validate_event_payload(
+                "business.status",
+                {
+                    "status": "awaiting_confirmation",
+                    "turn_id": handle.input_turn_id,
+                },
+            )
+            completed_payload = validate_event_payload(
+                "message.completed",
+                {
+                    "turn_id": handle.input_turn_id,
+                    "message_id": f"msg-{uuid4()}",
+                    "content": "申请信息已完整。请明确回复“确认提交”后再创建正式申请。",
+                    "intent": "request_access",
+                    "business_status": "awaiting_confirmation",
+                    "draft_revision": draft_revision,
+                },
+            )
+            required_event = WorkspaceEventRecord(
+                workspace_id=handle.workspace_id,
+                event_type="agent.input.required",
+                payload=required_payload,
+            )
+            status_event = WorkspaceEventRecord(
+                workspace_id=handle.workspace_id,
+                event_type="business.status",
+                payload=status_payload,
+            )
+            completed_event = WorkspaceEventRecord(
+                workspace_id=handle.workspace_id,
+                event_type="message.completed",
+                payload=completed_payload,
+            )
+            session.add_all([required_event, status_event, completed_event])
+            session.flush()
+            execution.status = "waiting_input"
+            execution.lease_expires_at = None
+            execution.terminal_event_id = completed_event.id
+            execution.updated_at = utc_now()
+            session.flush()
+            return completed_event.id
+
+    def begin_resume(
+        self,
+        *,
+        workspace_token: str,
+        auth_session_ref: UUID,
+        actor_id: str,
+        safe_user_text: str,
+        pending_input_id: UUID,
+        lock: AdvisoryLockHandle,
+        saver: SaverLike,
+    ) -> TurnExecutionHandle:
+        """Accept one resume input and seed the exact accepted checkpoint head."""
+        safe_text = redact_sensitive_content(safe_user_text.strip())
+        if not safe_text:
+            raise ValueError("safe_user_text must not be empty after cleaning")
+        session = lock.session
+        with session.begin():
+            workspace = session.scalar(
+                select(WorkspaceRecord)
+                .where(WorkspaceRecord.token_hash == hash_workspace_token(workspace_token))
+                .with_for_update()
+            )
+            if workspace is None:
+                raise UnknownWorkspaceError(workspace_token)
+            now = datetime.now(UTC)
+            self._validate_auth_session(
+                session,
+                workspace_id=workspace.id,
+                auth_session_ref=auth_session_ref,
+                actor_id=actor_id,
+                now=now,
+            )
+            running = session.scalar(
+                select(AgentTurnExecutionRecord)
+                .where(
+                    AgentTurnExecutionRecord.workspace_id == workspace.id,
+                    AgentTurnExecutionRecord.status == "running",
+                )
+                .limit(1)
+            )
+            if running is not None:
+                raise TurnInProgressError("another turn is already running")
+            pending = session.scalar(
+                select(AgentPendingInputRecord)
+                .where(
+                    AgentPendingInputRecord.workspace_id == workspace.id,
+                    AgentPendingInputRecord.pending_input_id == pending_input_id,
+                    AgentPendingInputRecord.status == "active",
+                )
+                .with_for_update()
+            )
+            if pending is None:
+                raise TurnExecutionError("pending input is not active")
+            locator = CheckpointLocator(
+                pending.checkpoint_thread_id,
+                pending.checkpoint_ns,
+                pending.accepted_checkpoint_id,
+            )
+            if saver.get_tuple(locator.as_config()) is None:
+                raise TurnExecutionError("pending checkpoint head is missing")
+
+            latest = session.scalar(
+                select(AgentTurnExecutionRecord)
+                .where(AgentTurnExecutionRecord.workspace_id == workspace.id)
+                .order_by(
+                    AgentTurnExecutionRecord.input_seq.desc(),
+                    AgentTurnExecutionRecord.created_at.desc(),
+                )
+                .limit(1)
+            )
+            if latest is not None:
+                input_seq = latest.input_seq + 1
+            else:
+                input_seq = 0
+            workspace.lease_fence += 1
+            lease_fence = workspace.lease_fence
+            input_turn_id = f"turn-{uuid4()}"
+            lease_expires_at = now + timedelta(seconds=self._lease_seconds)
+
+            stage_workspace_event(
+                session,
+                workspace_token=workspace_token,
+                event_type="turn.started",
+                payload={
+                    "turn_id": input_turn_id,
+                    "lease_expires_at": lease_expires_at,
+                },
+            )
+            user_message = stage_workspace_event(
+                session,
+                workspace_token=workspace_token,
+                event_type="message.user",
+                payload={
+                    "content": safe_text,
+                    "turn_id": input_turn_id,
+                },
+            )
+            session.flush()
+            execution = AgentTurnExecutionRecord(
+                id=uuid4(),
+                workspace_id=workspace.id,
+                graph_run_id=pending.graph_run_id,
+                checkpoint_thread_id=pending.checkpoint_thread_id,
+                input_seq=input_seq,
+                input_turn_id=input_turn_id,
+                input_event_id=user_message.id,
+                auth_session_ref=auth_session_ref,
+                actor_id=actor_id,
+                engine="langgraph",
+                attempt=1,
+                lease_fence=lease_fence,
+                lease_expires_at=lease_expires_at,
+                status="running",
+                checkpoint_ns="",
+                accepted_checkpoint_id=pending.accepted_checkpoint_id,
+                terminal_event_id=None,
+            )
+            session.add(execution)
+            pending.status = "resuming"
+            pending.resume_input_seq = input_seq
+            session.flush()
+            execution_id = execution.id
+            workspace_id = workspace.id
+            agent_thread_id = workspace.agent_thread_id
+            graph_run_id = pending.graph_run_id
+            checkpoint_thread_id = pending.checkpoint_thread_id
+            accepted_checkpoint_id = pending.accepted_checkpoint_id
+            input_event_id = user_message.id
+
+        return TurnExecutionHandle(
+            execution_id=execution_id,
+            workspace_id=workspace_id,
+            agent_thread_id=agent_thread_id,
+            graph_run_id=graph_run_id,
+            checkpoint_thread_id=checkpoint_thread_id,
+            input_seq=input_seq,
+            input_turn_id=input_turn_id,
+            input_event_id=input_event_id,
+            attempt=1,
+            lease_fence=lease_fence,
+            lease_expires_at=lease_expires_at,
+            actor_id=actor_id,
+            auth_session_ref=auth_session_ref,
+            accepted_checkpoint_id=accepted_checkpoint_id,
+        )
 
     # ------------------------------------------------------------------
     # Helpers

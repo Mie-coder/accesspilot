@@ -10,8 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from accesspilot.agent.identity import operation_id
+from accesspilot.agent.identity import confirm_operation_id, operation_id
 from accesspilot.db.models import (
+    AgentPendingInputRecord,
     AgentStepExecutionRecord,
     AgentTurnExecutionRecord,
     AuthSessionRecord,
@@ -439,6 +440,83 @@ class AgentStepOperationService:
             return CompletedStepOperation(
                 operation_id=operation,
                 step_key=step_key,
+                committed_revision=committed_revision,
+                replayed=False,
+            )
+
+    def confirm_draft(
+        self,
+        context: AgentStepContext,
+        *,
+        workspace_token: str,
+        pending_input_id: UUID,
+        expected_revision: int,
+    ) -> CompletedStepOperation:
+        """Apply the one confirmation CAS using the stable confirm operation id."""
+        context = self._validated_context(context)
+        operation = confirm_operation_id(
+            workspace_id=context.workspace_id,
+            pending_input_id=pending_input_id,
+        )
+        with self._session_factory() as session, session.begin():
+            self._lock_execution(session, context)
+            step = session.scalar(
+                select(AgentStepExecutionRecord)
+                .where(
+                    AgentStepExecutionRecord.workspace_id == context.workspace_id,
+                    AgentStepExecutionRecord.operation_id == operation,
+                )
+                .with_for_update()
+            )
+            workspace = self._lock_workspace(
+                session,
+                context,
+                workspace_token=workspace_token,
+            )
+            if step is not None:
+                if step.status != "completed" or step.committed_revision is None:
+                    raise StepOperationConflict("confirmation operation is not completed")
+                return CompletedStepOperation(
+                    operation_id=operation,
+                    step_key="apply_confirmation",
+                    committed_revision=step.committed_revision,
+                    replayed=True,
+                )
+            if workspace.draft_revision != expected_revision:
+                raise DraftRevisionConflictError("confirmation revision has changed")
+            pending = session.scalar(
+                select(AgentPendingInputRecord)
+                .where(
+                    AgentPendingInputRecord.workspace_id == context.workspace_id,
+                    AgentPendingInputRecord.pending_input_id == pending_input_id,
+                    AgentPendingInputRecord.status.in_(("active", "resuming")),
+                )
+                .with_for_update()
+            )
+            if pending is None:
+                raise StepExecutionRejected("confirmation pending input is not active")
+            draft = dict(workspace.draft) if workspace.draft is not None else {}
+            if draft.get("confirmed") is not True:
+                draft["confirmed"] = True
+                workspace.draft = draft
+                workspace.draft_revision += 1
+            committed_revision = workspace.draft_revision
+            session.add(
+                AgentStepExecutionRecord(
+                    workspace_id=context.workspace_id,
+                    graph_run_id=context.graph_run_id,
+                    input_seq=context.input_seq,
+                    step_key="apply_confirmation",
+                    operation_id=operation,
+                    status="completed",
+                    committed_revision=committed_revision,
+                    completed_at=datetime.now(UTC),
+                )
+            )
+            session.flush()
+            return CompletedStepOperation(
+                operation_id=operation,
+                step_key="apply_confirmation",
                 committed_revision=committed_revision,
                 replayed=False,
             )
