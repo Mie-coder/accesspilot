@@ -61,8 +61,10 @@ class FencedGraphTurnRunner:
         heartbeat thread then keeps renewing while the synchronous graph call
         runs.
         """
-        # Pre-flight: this must fail before graph.invoke for expired/stale
-        # handles, leaving graph call count at zero.
+        # Pre-flight: the lock must still be active and own exactly this
+        # handle's workspace thread; then the lease must be valid.  This fails
+        # before graph.invoke for wrong-thread locks and expired/stale handles.
+        lock.require_thread(handle.agent_thread_id)
         self._turn_service.heartbeat(handle)
 
         stop = threading.Event()

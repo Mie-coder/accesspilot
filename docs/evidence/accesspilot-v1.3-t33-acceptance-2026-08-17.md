@@ -53,6 +53,7 @@
 
 ## 2. 独立复核问题修复记录
 
+第一轮修复：
 1. expired handle 现在在 `graph.invoke` 前由 runner 预检 `heartbeat()` 拒绝，`_CountingGraph.calls == 0`。
 2. takeover 改为必须携带不可伪造的 `AdvisoryLockHandle`；锁 handle 持有实际 Session，takeover/complete/head promotion 共用同一锁会话。
 3. takeover 会检查当前 execution、关联 pending 和同 `graph_run_id` 历史 execution 的 accepted head，任一存在即禁止回退 `input_event`。
@@ -60,12 +61,19 @@
 5. 新增真实 PostgresSaver + 小型 StateGraph 测试：accepted exact head、END head、missing head fail-closed、禁止 implicit latest。
 6. 新增 stale owner 的 step/head/terminal 三类零写入反证。
 
+第二轮 P1 修复：
+1. 锁句柄现在带 active 状态与目标 `agent_thread_id`，`runner.run()` 在任何图调用前执行 `lock.require_thread(handle.agent_thread_id)`；错误 Workspace 锁无法运行目标图。
+2. advisory lock 使用专用且保持 check-out 的 connection，支持多个应用事务：`takeover()` 提交后再进入 runner，runner heartbeat 能读到新 fence；`promote()`/finalize 各自提交后锁才释放。
+3. 删除 `AdvisoryLockHandle` 可公开取得的 `_create/_token` 绕过路径；context 退出后 handle 永久失效。
+4. 新增 `complete_turn_with_event()`：terminal 事件创建与 execution terminalize 在同一个 fenced 事务；stale owner 场景断言事件数不增加。
+5. 新增真实组合测试 `test_takeover_runner_promote_finalize_combined_real_checkpoint`：takeover → 精确 accepted interrupt head 恢复 invoke → promote → finalize 全程由服务方法提交，测试不手动 `commit()`。
+
 ## 3. 测试结果（本轮真实命令输出）
 
-- T33 定向：`16 passed`
-  - `apps/api/tests/agent/test_t33_turn_execution.py`：8 项
-  - `apps/api/tests/db/test_t33_postgres.py`（真实隔离 disposable PostgreSQL）：8 项
-- Agent 相关回归：`229 passed, 1 skipped`
+- T33 定向：`18 passed`
+  - `apps/api/tests/agent/test_t33_turn_execution.py`：9 项
+  - `apps/api/tests/db/test_t33_postgres.py`（真实隔离 disposable PostgreSQL）：9 项
+- Agent 相关回归：`230 passed, 1 skipped`
   - skip 为 T26 destructive-isolated PostgreSQL probe 的环境门禁。
 - 相关真实 PG 回归：`apps/api/tests/db/test_t29_postgres.py` 通过。
 - Ruff：`All checks passed!`

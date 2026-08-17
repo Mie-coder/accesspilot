@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from accesspilot.agent.advisory_lock import AdvisoryLockOwnershipError
 from accesspilot.agent.turn_execution import (
     StaleTurnFenceError,
     TurnExecutionService,
@@ -376,6 +377,32 @@ def test_runner_expired_handle_fails_before_graph_invoke(
         with service.advisory_lock(agent_thread_id) as lock:
             runner.run(handle, {}, context={}, lock=lock)  # type: ignore[arg-type]
     assert graph.calls == 0
+
+
+def test_runner_rejects_wrong_thread_lock_before_graph_invoke(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    token_a, workspace_id_a, _agent_thread_a, auth_session_a = _workspace_fixture(
+        database_session_factory
+    )
+    _token_b, _workspace_id_b, agent_thread_b, _auth_session_b = _workspace_fixture(
+        database_session_factory
+    )
+    service = TurnExecutionService(database_session_factory)
+    handle_a = service.begin_input(
+        workspace_token=token_a,
+        auth_session_ref=auth_session_a,
+        actor_id="EMP-001",
+        safe_user_text="workspace A",
+    )
+    graph = _CountingGraph()
+    runner = FencedGraphTurnRunner(graph, service, heartbeat_interval=0.05)
+
+    with service.advisory_lock(agent_thread_b) as wrong_lock:
+        with pytest.raises(AdvisoryLockOwnershipError):
+            runner.run(handle_a, {}, context={}, lock=wrong_lock)  # type: ignore[arg-type]
+    assert graph.calls == 0
+    assert workspace_id_a is not None
 
 
 def test_runner_holds_advisory_lock_during_graph_invoke(

@@ -515,7 +515,12 @@ class AcceptedCheckpointHeadStore:
                 )
             ),
         )
-        return result.rowcount == 1
+        promoted = result.rowcount == 1
+        if lock is not None:
+            # Close the transaction even on a stale/no-op CAS so the next
+            # fenced operation on the same lock session can begin cleanly.
+            session.commit()
+        return promoted
 
 
 def checkpoint_connection_kwargs(schema: str) -> dict[str, object]:

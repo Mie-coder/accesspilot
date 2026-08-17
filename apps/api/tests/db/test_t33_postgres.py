@@ -17,6 +17,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 from psycopg import sql
 from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
@@ -39,10 +40,12 @@ from accesspilot.agent.turn_execution import (
     RecoveryPlan,
     StaleTurnFenceError,
     TurnExecutionError,
+    TurnExecutionHandle,
     TurnExecutionService,
     TurnInProgressError,
     TurnRecoveryInProgressError,
 )
+from accesspilot.agent.turn_runner import FencedGraphTurnRunner
 from accesspilot.checkpoint_init import run_official_checkpoint_setup
 from accesspilot.config import Settings
 from accesspilot.db.models import (
@@ -282,6 +285,23 @@ def _small_graph(checkpointer: object) -> object:
     return builder.compile(checkpointer=checkpointer)
 
 
+class _InterruptState(TypedDict):
+    value: str
+
+
+def _interrupt_node(state: _InterruptState) -> dict[str, str]:
+    decision = interrupt({"kind": "test", "value": state["value"]})
+    return {"value": f"{state['value']}:{decision}"}
+
+
+def _interrupt_graph(checkpointer: object) -> object:
+    builder = StateGraph(_InterruptState)
+    builder.add_node("interrupt_node", _interrupt_node)
+    builder.add_edge(START, "interrupt_node")
+    builder.add_edge("interrupt_node", END)
+    return builder.compile(checkpointer=checkpointer)
+
+
 def _server_context(
     factory: sessionmaker[Session],
     workspace_id: UUID,
@@ -333,6 +353,40 @@ def _promote_real_end_head(
         graph_stopped=True,
         graph_state_reader=graph.get_state,
         state_validator=lambda state: not state.next,
+    )
+    with service.advisory_lock(agent_thread_id) as lock:
+        assert (
+            AcceptedCheckpointHeadStore().promote(lock.session, verified, lock=lock)
+            is True
+        )
+    updated_context = _server_context(factory, handle.workspace_id)
+    return updated_context, candidate, verified
+
+
+def _promote_real_interrupt_head(
+    factory: sessionmaker[Session],
+    runtime: PostgresCheckpointRuntime,
+    service: TurnExecutionService,
+    handle,
+    agent_thread_id: UUID,
+) -> tuple[ServerExecutionContext, object, object]:
+    context = _server_context(factory, handle.workspace_id)
+    invocation = FencedPostgresSaverAdapter(runtime.saver).for_execution(context)
+    graph = _interrupt_graph(invocation)
+    base_config = {
+        "configurable": {
+            "thread_id": context.checkpoint_thread_id,
+            "checkpoint_ns": "",
+        }
+    }
+    graph.invoke({"value": "a"}, base_config, durability="sync")
+    candidate = invocation.candidate
+    assert candidate is not None
+    verified = invocation.verify_candidate(
+        candidate,
+        graph_stopped=True,
+        graph_state_reader=graph.get_state,
+        state_validator=lambda state: any(task.interrupts for task in state.tasks),
     )
     with service.advisory_lock(agent_thread_id) as lock:
         assert (
@@ -807,20 +861,7 @@ def test_stale_owner_head_and_terminal_zero_write_after_takeover() -> None:
         )
         accepted_id = context.accepted_checkpoint_id
         assert accepted_id is not None
-        with factory() as session:
-            terminal = WorkspaceEventRecord(
-                workspace_id=workspace_id,
-                event_type="message.completed",
-                payload={
-                    "turn_id": old_handle.input_turn_id,
-                    "message_id": "msg-stale",
-                    "content": "ok",
-                },
-            )
-            session.add(terminal)
-            session.flush()
-            terminal_event_id = terminal.id
-            session.commit()
+        event_count_before = _count_events(factory, workspace_id)
         _expire_lease(factory, workspace_id)
 
         with service.advisory_lock(agent_thread_id) as lock:
@@ -843,15 +884,23 @@ def test_stale_owner_head_and_terminal_zero_write_after_takeover() -> None:
                 is False
             )
 
-            # Terminal write by the stale owner must be a zero-write.
+            # Terminal write by the stale owner must be a zero-write: the
+            # terminal event is created in the same fenced transaction as the
+            # execution terminalize, so a stale owner must not add any event.
             with pytest.raises(StaleTurnFenceError):
-                service.complete_turn(
+                service.complete_turn_with_event(
                     old_handle,
                     workspace_token=token,
-                    terminal_event_id=terminal_event_id,
                     lock=lock,
+                    event_type="message.completed",
+                    payload={
+                        "turn_id": old_handle.input_turn_id,
+                        "message_id": "msg-stale",
+                        "content": "ok",
+                    },
                 )
 
+        assert _count_events(factory, workspace_id) == event_count_before
         with factory() as session:
             execution = session.scalar(
                 select(AgentTurnExecutionRecord).where(
@@ -862,5 +911,110 @@ def test_stale_owner_head_and_terminal_zero_write_after_takeover() -> None:
             assert execution.accepted_checkpoint_id == accepted_id
             assert execution.terminal_event_id is None
             assert execution.status == "running"
+        runtime.close()
+        close_all_sessions()
+
+
+def test_takeover_runner_promote_finalize_combined_real_checkpoint() -> None:
+    with _isolated_checkpoint_database() as settings:
+        runtime = PostgresCheckpointRuntime(settings)
+        runtime.start()
+        runtime.check_readiness()
+        factory = build_session_factory(build_engine(settings.database_url))
+        token, workspace_id, agent_thread_id, auth_session_id = _workspace_fixture(
+            factory
+        )
+        service = TurnExecutionService(factory)
+        old_handle = service.begin_input(
+            workspace_token=token,
+            auth_session_ref=auth_session_id,
+            actor_id="EMP-001",
+            safe_user_text="combined",
+        )
+        _old_context, _old_candidate, _old_verified = _promote_real_interrupt_head(
+            factory, runtime, service, old_handle, agent_thread_id
+        )
+        _expire_lease(factory, workspace_id)
+
+        with service.advisory_lock(agent_thread_id) as lock:
+            plan = service.takeover(
+                workspace_token=token,
+                graph_run_id=old_handle.graph_run_id,
+                input_seq=old_handle.input_seq,
+                auth_session_ref=auth_session_id,
+                actor_id="EMP-001",
+                lock=lock,
+                saver=runtime.saver,
+            )
+            assert plan.source == "checkpoint"
+
+            new_handle = TurnExecutionHandle(
+                execution_id=plan.execution_id,
+                workspace_id=plan.workspace_id,
+                agent_thread_id=plan.agent_thread_id,
+                graph_run_id=plan.graph_run_id,
+                checkpoint_thread_id=plan.checkpoint_thread_id,
+                input_seq=plan.input_seq,
+                input_turn_id=plan.input_turn_id,
+                input_event_id=plan.input_event_id,
+                attempt=plan.attempt,
+                lease_fence=plan.lease_fence,
+                lease_expires_at=plan.lease_expires_at,
+                actor_id="EMP-001",
+                auth_session_ref=auth_session_id,
+                accepted_checkpoint_id=plan.accepted_checkpoint_id,
+            )
+
+            new_context = _server_context(factory, workspace_id)
+            accepted_locator = new_context.accepted_locator
+            assert accepted_locator is not None
+            invocation = FencedPostgresSaverAdapter(runtime.saver).for_execution(
+                new_context
+            )
+            graph = _interrupt_graph(invocation)
+            runner = FencedGraphTurnRunner(graph, service, heartbeat_interval=0.05)
+            runner.run(
+                new_handle,
+                Command(resume="ok"),
+                context={},
+                lock=lock,
+                config=accepted_locator.as_config(),
+            )
+
+            candidate = invocation.candidate
+            assert candidate is not None
+            verified = invocation.verify_candidate(
+                candidate,
+                graph_stopped=True,
+                graph_state_reader=graph.get_state,
+                state_validator=lambda state: not state.next,
+            )
+            assert (
+                AcceptedCheckpointHeadStore().promote(lock.session, verified, lock=lock)
+                is True
+            )
+            service.complete_turn_with_event(
+                new_handle,
+                workspace_token=token,
+                lock=lock,
+                event_type="message.completed",
+                payload={
+                    "turn_id": new_handle.input_turn_id,
+                    "message_id": "msg-combined",
+                    "content": "ok",
+                },
+            )
+
+        with factory() as session:
+            execution = session.scalar(
+                select(AgentTurnExecutionRecord).where(
+                    AgentTurnExecutionRecord.workspace_id == workspace_id
+                )
+            )
+            assert execution is not None
+            assert execution.status == "completed"
+            assert execution.lease_expires_at is None
+            assert execution.terminal_event_id is not None
+            assert execution.accepted_checkpoint_id == verified.locator.checkpoint_id
         runtime.close()
         close_all_sessions()
