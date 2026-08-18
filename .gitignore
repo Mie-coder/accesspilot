@@ -16,4 +16,6 @@ coverage/
 *.log
 *.tsbuildinfo
 .playwright-cli/
+.accesspilot-local/
+.codebase-map/
 postgres-data/
