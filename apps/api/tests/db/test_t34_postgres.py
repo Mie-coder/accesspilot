@@ -195,6 +195,8 @@ class StaticReplyModel:
 
 def _workspace_fixture(
     factory: sessionmaker[Session],
+    *,
+    draft: dict[str, object] | None = None,
 ) -> tuple[str, UUID, UUID, UUID]:
     token = f"t34-pg-{uuid4()}"
     auth_session_id = uuid4()
@@ -205,14 +207,8 @@ def _workspace_fixture(
             actor_id="EMP-001",
             flow_version=2,
             lease_fence=0,
-            draft={
-                "employee_id": "EMP-001",
-                "entitlement_id": "insighthub.dashboard_view",
-                "duration_days": 14,
-                "justification": "业务需要",
-                "confirmed": False,
-            },
-            draft_revision=1,
+            draft=draft,
+            draft_revision=1 if draft is not None else 0,
             model_call_limit=20,
         )
         session.add(workspace)
@@ -231,6 +227,17 @@ def _workspace_fixture(
         )
         session.commit()
     return token, workspace_id, agent_thread_id, auth_session_id
+
+
+def _revoke_auth_session(
+    factory: sessionmaker[Session],
+    auth_session_id: UUID,
+) -> None:
+    with factory() as session:
+        auth = session.get(AuthSessionRecord, auth_session_id)
+        assert auth is not None
+        auth.revoked_at = datetime.now(UTC)
+        session.commit()
 
 
 def _request_text() -> str:
@@ -1037,6 +1044,371 @@ def test_resume_field_edit_reinterrupts_and_replaces_pending_atomically() -> Non
         close_all_sessions()
 
 
+def test_resume_confirm_after_collection_in_same_turn_uses_pending_revision() -> None:
+    """P1-1 regression: the workspace starts with no draft (revision 0); the
+    graph's own persist_draft_cas advances it to 1 before the interrupt.
+    Resume must validate against the pending's recorded revision, not the
+    stale checkpoint base, so a normal confirmation succeeds."""
+    with _isolated_checkpoint_database() as settings:
+        runtime = PostgresCheckpointRuntime(settings)
+        runtime.start()
+        runtime.check_readiness()
+        factory = build_session_factory(build_engine(settings.database_url))
+        token, workspace_id, agent_thread_id, auth_session_id = _workspace_fixture(
+            factory
+        )
+        service = TurnExecutionService(factory)
+        pending_input_id = uuid4()
+        handle = service.begin_input(
+            workspace_token=token,
+            auth_session_ref=auth_session_id,
+            actor_id="EMP-001",
+            safe_user_text=_request_text(),
+        )
+        graph, invocation, payload, _context = _run_to_interrupt(
+            factory, runtime, service, handle, StaticReplyModel(_complete_reply()),
+            pending_input_id, workspace_token=token,
+        )
+        # The collection turn persisted the draft: revision 0 -> 1 and the
+        # interrupt must report the committed revision.
+        assert payload["draft_revision"] == 1
+        verified = _verify_interrupt_candidate(invocation, graph)
+        with service.advisory_lock(agent_thread_id) as lock:
+            service.finalize_interrupt(
+                handle,
+                workspace_token=token,
+                lock=lock,
+                verified=verified,
+                pending_input_id=pending_input_id,
+                draft_revision=1,
+            )
+
+        with service.advisory_lock(agent_thread_id) as lock:
+            resume_handle = service.begin_resume(
+                workspace_token=token,
+                auth_session_ref=auth_session_id,
+                actor_id="EMP-001",
+                safe_user_text="确认提交",
+                pending_input_id=pending_input_id,
+                lock=lock,
+                saver=runtime.saver,
+            )
+
+        resume_context = _server_context(factory, resume_handle.execution_id)
+        invocation_b = FencedPostgresSaverAdapter(runtime.saver).for_execution(
+            resume_context
+        )
+        graph_b = build_production_graph(checkpointer=invocation_b)
+        config = _config_for(
+            resume_context.checkpoint_thread_id,
+            resume_context.accepted_checkpoint_id,
+        )
+        runtime_context = _runtime_context(
+            factory,
+            resume_handle.workspace_id,
+            token,
+            str(resume_handle.auth_session_ref),
+            graph_run_id=resume_handle.graph_run_id,
+            input_turn_id=resume_handle.input_turn_id,
+            fence=resume_handle.lease_fence,
+            model=StaticReplyModel(_complete_reply()),
+            pending_input_id=pending_input_id,
+            input_seq=resume_handle.input_seq,
+        )
+        turn = graph_b.invoke(
+            Command(resume={"decision": "confirm", "safe_user_text": "确认提交"}),
+            config,
+            context=runtime_context,
+        )
+        # A normal confirmation after same-turn collection must NOT be a
+        # recoverable conflict.
+        assert turn.business_status == "ready_to_submit", turn.error_code
+        verified_b = _verify_end_candidate(invocation_b, graph_b)
+        with service.advisory_lock(agent_thread_id) as lock:
+            service.finalize_resume_outcome(
+                resume_handle,
+                workspace_token=token,
+                lock=lock,
+                verified=verified_b,
+                pending_input_id=pending_input_id,
+                event_type="message.completed",
+                payload={
+                    "turn_id": resume_handle.input_turn_id,
+                    "message_id": f"msg-{uuid4()}",
+                    "content": turn.assistant_message,
+                    "intent": "request_access",
+                    "business_status": "ready_to_submit",
+                    "draft_revision": 2,
+                },
+            )
+        with factory() as session:
+            workspace = session.get(WorkspaceRecord, workspace_id)
+            assert workspace is not None
+            assert workspace.draft_revision == 2
+            assert workspace.draft is not None
+            assert workspace.draft["confirmed"] is True
+        runtime.close()
+        close_all_sessions()
+
+
+def test_resume_confirm_after_field_edit_reinterrupt_uses_pending_revision() -> None:
+    """P1-1 regression: after a field edit re-interrupts (revision 1 -> 2),
+    the replacement pending records the new revision and a later confirmation
+    succeeds instead of reporting CONFIRMATION_CONFLICT."""
+    with _isolated_checkpoint_database() as settings:
+        runtime = PostgresCheckpointRuntime(settings)
+        runtime.start()
+        runtime.check_readiness()
+        factory = build_session_factory(build_engine(settings.database_url))
+        token, workspace_id, agent_thread_id, auth_session_id = _workspace_fixture(
+            factory,
+            draft={
+                "employee_id": "EMP-001",
+                "entitlement_id": "insighthub.dashboard_view",
+                "duration_days": 14,
+                "justification": "业务需要",
+                "confirmed": False,
+            },
+        )
+        service = TurnExecutionService(factory)
+        pending_input_id = uuid4()
+        handle = service.begin_input(
+            workspace_token=token,
+            auth_session_ref=auth_session_id,
+            actor_id="EMP-001",
+            safe_user_text=_request_text(),
+        )
+        graph, invocation, payload, _context = _run_to_interrupt(
+            factory, runtime, service, handle, StaticReplyModel(_complete_reply()),
+            pending_input_id, workspace_token=token,
+        )
+        assert payload["draft_revision"] == 1
+        verified = _verify_interrupt_candidate(invocation, graph)
+        with service.advisory_lock(agent_thread_id) as lock:
+            service.finalize_interrupt(
+                handle,
+                workspace_token=token,
+                lock=lock,
+                verified=verified,
+                pending_input_id=pending_input_id,
+                draft_revision=1,
+            )
+
+        # Field edit: same resume call re-routes, persists revision 1 -> 2 and
+        # re-interrupts; the replacement pending records revision 2.
+        with service.advisory_lock(agent_thread_id) as lock:
+            resume_handle = service.begin_resume(
+                workspace_token=token,
+                auth_session_ref=auth_session_id,
+                actor_id="EMP-001",
+                safe_user_text="改成 60 天",
+                pending_input_id=pending_input_id,
+                lock=lock,
+                saver=runtime.saver,
+            )
+        resume_context = _server_context(factory, resume_handle.execution_id)
+        invocation_b = FencedPostgresSaverAdapter(runtime.saver).for_execution(
+            resume_context
+        )
+        graph_b = build_production_graph(checkpointer=invocation_b)
+        config = _config_for(
+            resume_context.checkpoint_thread_id,
+            resume_context.accepted_checkpoint_id,
+        )
+        runtime_context = _runtime_context(
+            factory,
+            resume_handle.workspace_id,
+            token,
+            str(resume_handle.auth_session_ref),
+            graph_run_id=resume_handle.graph_run_id,
+            input_turn_id=resume_handle.input_turn_id,
+            fence=resume_handle.lease_fence,
+            model=StaticReplyModel(
+                ParsedReply(
+                    entitlement_id="insighthub.dashboard_view",
+                    duration_days=60,
+                    justification="业务需要",
+                )
+            ),
+            pending_input_id=pending_input_id,
+            input_seq=resume_handle.input_seq,
+        )
+        with pytest.raises(ConfirmationInterruptRaised) as raised:
+            graph_b.invoke(
+                Command(
+                    resume={
+                        "decision": "route_new_input",
+                        "safe_user_text": "改成 60 天",
+                    }
+                ),
+                config,
+                context=runtime_context,
+            )
+        assert raised.value.payload["draft_revision"] == 2
+        verified_b = _verify_interrupt_candidate(invocation_b, graph_b)
+        with service.advisory_lock(agent_thread_id) as lock:
+            service.finalize_interrupt(
+                resume_handle,
+                workspace_token=token,
+                lock=lock,
+                verified=verified_b,
+                pending_input_id=pending_input_id,
+                draft_revision=2,
+                previous_pending_input_id=pending_input_id,
+            )
+
+        # Second resume confirms against the pending-recorded revision 2.
+        with service.advisory_lock(agent_thread_id) as lock:
+            confirm_handle = service.begin_resume(
+                workspace_token=token,
+                auth_session_ref=auth_session_id,
+                actor_id="EMP-001",
+                safe_user_text="确认提交",
+                pending_input_id=pending_input_id,
+                lock=lock,
+                saver=runtime.saver,
+            )
+        confirm_context = _server_context(factory, confirm_handle.execution_id)
+        invocation_c = FencedPostgresSaverAdapter(runtime.saver).for_execution(
+            confirm_context
+        )
+        graph_c = build_production_graph(checkpointer=invocation_c)
+        config_c = _config_for(
+            confirm_context.checkpoint_thread_id,
+            confirm_context.accepted_checkpoint_id,
+        )
+        runtime_context_c = _runtime_context(
+            factory,
+            confirm_handle.workspace_id,
+            token,
+            str(confirm_handle.auth_session_ref),
+            graph_run_id=confirm_handle.graph_run_id,
+            input_turn_id=confirm_handle.input_turn_id,
+            fence=confirm_handle.lease_fence,
+            model=StaticReplyModel(_complete_reply()),
+            pending_input_id=pending_input_id,
+            input_seq=confirm_handle.input_seq,
+        )
+        turn_c = graph_c.invoke(
+            Command(resume={"decision": "confirm", "safe_user_text": "确认提交"}),
+            config_c,
+            context=runtime_context_c,
+        )
+        assert turn_c.business_status == "ready_to_submit", turn_c.error_code
+        verified_c = _verify_end_candidate(invocation_c, graph_c)
+        with service.advisory_lock(agent_thread_id) as lock:
+            service.finalize_resume_outcome(
+                confirm_handle,
+                workspace_token=token,
+                lock=lock,
+                verified=verified_c,
+                pending_input_id=pending_input_id,
+                event_type="message.completed",
+                payload={
+                    "turn_id": confirm_handle.input_turn_id,
+                    "message_id": f"msg-{uuid4()}",
+                    "content": turn_c.assistant_message,
+                    "intent": "request_access",
+                    "business_status": "ready_to_submit",
+                    "draft_revision": 3,
+                },
+            )
+        with factory() as session:
+            workspace = session.get(WorkspaceRecord, workspace_id)
+            assert workspace is not None
+            assert workspace.draft_revision == 3
+            assert workspace.draft is not None
+            assert workspace.draft["confirmed"] is True
+            assert workspace.draft["duration_days"] == 60
+        runtime.close()
+        close_all_sessions()
+
+
+def test_resume_after_session_expired_closes_safely_without_business_result() -> None:
+    """P1-2 regression: the AuthSession expires after begin_resume; the resume
+    must close safely with a recoverable terminal, not answer business."""
+    with _isolated_checkpoint_database() as settings:
+        runtime = PostgresCheckpointRuntime(settings)
+        runtime.start()
+        runtime.check_readiness()
+        factory = build_session_factory(build_engine(settings.database_url))
+        token, workspace_id, agent_thread_id, auth_session_id = _workspace_fixture(
+            factory
+        )
+        service = TurnExecutionService(factory)
+        pending_input_id = uuid4()
+        handle = service.begin_input(
+            workspace_token=token,
+            auth_session_ref=auth_session_id,
+            actor_id="EMP-001",
+            safe_user_text=_request_text(),
+        )
+        graph, invocation, _payload, _context = _run_to_interrupt(
+            factory, runtime, service, handle, StaticReplyModel(_complete_reply()),
+            pending_input_id, workspace_token=token,
+        )
+        verified = _verify_interrupt_candidate(invocation, graph)
+        with service.advisory_lock(agent_thread_id) as lock:
+            service.finalize_interrupt(
+                handle,
+                workspace_token=token,
+                lock=lock,
+                verified=verified,
+                pending_input_id=pending_input_id,
+                draft_revision=1,
+            )
+        with service.advisory_lock(agent_thread_id) as lock:
+            resume_handle = service.begin_resume(
+                workspace_token=token,
+                auth_session_ref=auth_session_id,
+                actor_id="EMP-001",
+                safe_user_text="确认提交",
+                pending_input_id=pending_input_id,
+                lock=lock,
+                saver=runtime.saver,
+            )
+        with factory() as session:
+            auth = session.get(AuthSessionRecord, auth_session_id)
+            assert auth is not None
+            auth.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            session.commit()
+
+        resume_context = _server_context(factory, resume_handle.execution_id)
+        invocation_b = FencedPostgresSaverAdapter(runtime.saver).for_execution(
+            resume_context
+        )
+        graph_b = build_production_graph(checkpointer=invocation_b)
+        config = _config_for(
+            resume_context.checkpoint_thread_id,
+            resume_context.accepted_checkpoint_id,
+        )
+        runtime_context = _runtime_context(
+            factory,
+            resume_handle.workspace_id,
+            token,
+            str(resume_handle.auth_session_ref),
+            graph_run_id=resume_handle.graph_run_id,
+            input_turn_id=resume_handle.input_turn_id,
+            fence=resume_handle.lease_fence,
+            model=StaticReplyModel(_complete_reply()),
+            pending_input_id=pending_input_id,
+            input_seq=resume_handle.input_seq,
+        )
+        turn = graph_b.invoke(
+            Command(resume={"decision": "confirm", "safe_user_text": "确认提交"}),
+            config,
+            context=runtime_context,
+        )
+        assert turn.business_status == "recoverable_error", turn.business_status
+        assert turn.error_code == "CONFIRMATION_CONFLICT"
+        with factory() as session:
+            workspace = session.get(WorkspaceRecord, workspace_id)
+            assert workspace is not None
+            assert workspace.draft["confirmed"] is False  # type: ignore[index]
+        runtime.close()
+        close_all_sessions()
+
+
 def test_resume_wrong_auth_session_fails_closed_with_zero_writes() -> None:
     """AC3: a resume with a mismatched auth session closes safely before any
     new fact is written."""
@@ -1095,6 +1467,127 @@ def test_resume_wrong_auth_session_fails_closed_with_zero_writes() -> None:
             )
             assert pending is not None
             assert pending.status == "active"
+        runtime.close()
+        close_all_sessions()
+
+
+def test_resume_after_session_revoked_closes_safely_without_business_result() -> None:
+    """P1-2 regression: the AuthSession is revoked after begin_resume; the
+    resume must close safely (recoverable, no read-only business result, no
+    confirmation) instead of answering and resolving the pending."""
+    with _isolated_checkpoint_database() as settings:
+        runtime = PostgresCheckpointRuntime(settings)
+        runtime.start()
+        runtime.check_readiness()
+        factory = build_session_factory(build_engine(settings.database_url))
+        token, workspace_id, agent_thread_id, auth_session_id = _workspace_fixture(
+            factory
+        )
+        service = TurnExecutionService(factory)
+        pending_input_id = uuid4()
+        handle = service.begin_input(
+            workspace_token=token,
+            auth_session_ref=auth_session_id,
+            actor_id="EMP-001",
+            safe_user_text=_request_text(),
+        )
+        graph, invocation, _payload, _context = _run_to_interrupt(
+            factory, runtime, service, handle, StaticReplyModel(_complete_reply()),
+            pending_input_id, workspace_token=token,
+        )
+        verified = _verify_interrupt_candidate(invocation, graph)
+        with service.advisory_lock(agent_thread_id) as lock:
+            service.finalize_interrupt(
+                handle,
+                workspace_token=token,
+                lock=lock,
+                verified=verified,
+                pending_input_id=pending_input_id,
+                draft_revision=1,
+            )
+        with service.advisory_lock(agent_thread_id) as lock:
+            resume_handle = service.begin_resume(
+                workspace_token=token,
+                auth_session_ref=auth_session_id,
+                actor_id="EMP-001",
+                safe_user_text="我现在有什么权限？",
+                pending_input_id=pending_input_id,
+                lock=lock,
+                saver=runtime.saver,
+            )
+
+        # Revoke the session between the resume transaction and the graph call.
+        _revoke_auth_session(factory, auth_session_id)
+
+        resume_context = _server_context(factory, resume_handle.execution_id)
+        invocation_b = FencedPostgresSaverAdapter(runtime.saver).for_execution(
+            resume_context
+        )
+        graph_b = build_production_graph(checkpointer=invocation_b)
+        config = _config_for(
+            resume_context.checkpoint_thread_id,
+            resume_context.accepted_checkpoint_id,
+        )
+        runtime_context = _runtime_context(
+            factory,
+            resume_handle.workspace_id,
+            token,
+            str(resume_handle.auth_session_ref),
+            graph_run_id=resume_handle.graph_run_id,
+            input_turn_id=resume_handle.input_turn_id,
+            fence=resume_handle.lease_fence,
+            model=StaticReplyModel(_complete_reply()),
+            pending_input_id=pending_input_id,
+            input_seq=resume_handle.input_seq,
+        )
+        turn = graph_b.invoke(
+            Command(
+                resume={
+                    "decision": "route_new_input",
+                    "safe_user_text": "我现在有什么权限？",
+                }
+            ),
+            config,
+            context=runtime_context,
+        )
+        # No read-only business result may be produced for a revoked session.
+        assert turn.business_status == "recoverable_error", turn.business_status
+        assert turn.intent == "request_access" or turn.error_code == "CONFIRMATION_CONFLICT"
+        assert turn.error_code == "CONFIRMATION_CONFLICT"
+
+        verified_b = _verify_end_candidate(invocation_b, graph_b)
+        with service.advisory_lock(agent_thread_id) as lock:
+            terminal_id = service.finalize_resume_outcome(
+                resume_handle,
+                workspace_token=token,
+                lock=lock,
+                verified=verified_b,
+                pending_input_id=pending_input_id,
+                event_type="error.recoverable",
+                payload={
+                    "turn_id": resume_handle.input_turn_id,
+                    "code": "CONFIRMATION_CONFLICT",
+                    "message": "确认状态已变化，请核对当前申请信息后重新确认。",
+                },
+            )
+        with factory() as session:
+            execution = session.get(
+                AgentTurnExecutionRecord, resume_handle.execution_id
+            )
+            assert execution is not None
+            assert execution.status == "recoverable_error"
+            assert execution.terminal_event_id == terminal_id
+            pending = session.scalar(
+                select(AgentPendingInputRecord).where(
+                    AgentPendingInputRecord.pending_input_id == pending_input_id
+                )
+            )
+            assert pending is not None
+            assert pending.status == "resolved"
+            workspace = session.get(WorkspaceRecord, workspace_id)
+            assert workspace is not None
+            assert workspace.draft is not None
+            assert workspace.draft["confirmed"] is False
         runtime.close()
         close_all_sessions()
 

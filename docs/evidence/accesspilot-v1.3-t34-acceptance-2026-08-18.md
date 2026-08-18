@@ -157,9 +157,48 @@
 - 未标记 `Verified`：需要独立只读 reviewer 复核（P0/P1=0）后才能更新。
 - 正式简历未修改。
 
-## 9. 本地提交
+## 9. 修复轮（独立验收 2 项 P1 闭环）
+
+第一轮独立验收发现 2 项 P1，均已修复并补充回归测试：
+
+1. **P1：正常补齐草稿后的确认恢复误报 revision 冲突**
+   - 根因：rehydrate 用 checkpoint 中的旧 `base_draft_revision` 校验权威
+     revision；收集轮本身把 revision 0→1 后，恢复必然 `CONFIRMATION_CONFLICT`。
+   - 修复：`_rehydrate_resume_snapshot` 改为以 pending 行记录的
+     interrupt 时权威 revision（`pending.draft_revision`）校验；
+     `apply_confirmation_cas` 的 `expected_revision` 使用 rehydrate 刷新后的
+     权威值。
+   - 同时修复次生路由缺陷：rehydrate 返回 recoverable 后 `_route_resume`
+     此前只看 `selected_route`，会把冲突状态继续送入业务分支；
+     现在 recoverable 固定路由 `compose_recoverable_answer`。
+   - 新增证据（真实 PG）：
+     `test_resume_confirm_after_collection_in_same_turn_uses_pending_revision`
+     （revision 0→1 后确认成功）、
+     `test_resume_confirm_after_field_edit_reinterrupt_uses_pending_revision`
+     （revision 1→2 再次 interrupt 后确认成功）；图级
+     `test_resume_confirm_after_same_turn_collection_advances_revision`。
+
+2. **P1：rehydrate 未重新验证 AuthSession（撤销/过期仍继续副作用）**
+   - 根因：rehydrate 只比较 session UUID，不检查 `revoked_at/expires_at`；
+     最终 fenced 事务也未重验。撤销后 resume 仍产生业务结果并 resolved pending。
+   - 修复：rehydrate 查询 `AuthSessionRecord`（Workspace/actor/未撤销/未过期），
+     无效即 recoverable 安全闭合；`finalize_resume_outcome` 最终事务用
+     `_validate_auth_session` 重验——仅 `error.recoverable` 允许在会话无效时
+     闭合，正常结果或确认一律回滚。
+   - 新增证据（真实 PG）：
+     `test_resume_after_session_revoked_closes_safely_without_business_result`、
+     `test_resume_after_session_expired_closes_safely_without_business_result`；
+     图级 `test_resume_revoked_session_routes_conflict_without_business_branch`
+     （断言 `route_intent`/`retrieve_policy_pgvector` 不进入）。
+
+修复轮实测：T34 定向 18 项（图级 7 + 真实隔离 PG 11）通过；完整 API
+`691 passed, 1 skipped`（skip 为 T26 环境门控）、1 deselected（基线遗留
+T30 PG 测试，与 T34 无关）；Ruff/MyPy/diff-check 全绿。
+仍保持 `Implemented`，等待第二轮独立验收。
+
+## 10. 本地提交
 
 实现、测试与证据文档已整理；提交信息（中文 Conventional Commits）：
-`feat(agent): 完成 T34 申请人确认中断恢复`
+`fix(agent): 修复 T34 确认恢复 revision 与会话重验两个 P1`
 （提交前已核对 `git diff --cached --name-only` 仅含 T34 授权文件，
 不夹带用户脏文件。）

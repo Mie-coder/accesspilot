@@ -827,6 +827,21 @@ class TurnExecutionService:
             if workspace is None:
                 raise StaleTurnFenceError("workspace fence does not match execution")
             lock.require_thread(workspace.agent_thread_id)
+            # The AuthSession must still be valid for the final fenced
+            # transaction.  A revoked/expired session may only close safely
+            # (error terminal), never commit a normal result or a
+            # confirmation; the whole transaction rolls back otherwise.
+            try:
+                self._validate_auth_session(
+                    session,
+                    workspace_id=handle.workspace_id,
+                    auth_session_ref=handle.auth_session_ref,
+                    actor_id=handle.actor_id,
+                    now=now,
+                )
+            except TurnExecutionError:
+                if event_type != "error.recoverable":
+                    raise
             if not AcceptedCheckpointHeadStore().promote(session, verified):
                 raise StaleTurnFenceError("checkpoint head promotion failed")
 
