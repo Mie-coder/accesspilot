@@ -12,14 +12,17 @@ from accesspilot.db.base import Base
 config = context.config
 
 # 数据库地址统一由 Settings/环境变量提供，不在 alembic.ini 中复制密码。
-config.set_main_option("sqlalchemy.url", Settings().database_url)
+# ConfigParser 把 ``%`` 当作插值语法；URL 编码凭据和 search_path
+# options 可以合法包含 ``%xx``，写入 Alembic Config 前必须转义。
+database_url = config.attributes.get("database_url") or Settings().database_url
+config.set_main_option("sqlalchemy.url", str(database_url).replace("%", "%%"))
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# 导入 models 后，12 张表会注册到 Base.metadata，供 autogenerate 比较差异。
+# 导入 models 后，所有应用表会注册到 Base.metadata，供 autogenerate 比较差异。
 target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,
@@ -44,6 +47,10 @@ def run_migrations_offline() -> None:
     context.configure(
         url=url,
         target_metadata=target_metadata,
+        # AccessPilot Alembic owns only its default application schema.  The
+        # separately named LangGraph checkpoint schema is never reflected or
+        # considered by autogenerate/check/downgrade.
+        include_schemas=False,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -66,7 +73,13 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            # Explicitly exclude every non-default schema, including the
+            # official checkpointer schema managed outside AccessPilot Alembic.
+            include_schemas=False,
+        )
 
         with context.begin_transaction():
             context.run_migrations()

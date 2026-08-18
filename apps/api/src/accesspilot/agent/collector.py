@@ -1,6 +1,6 @@
 from typing import Protocol
 
-from accesspilot.agent.state import ConversationPhase, GraphState
+from accesspilot.agent.state import CollectionGraphState, ConversationPhase
 
 
 class QuestionModel(Protocol):
@@ -11,10 +11,10 @@ class QuestionModel(Protocol):
 
 
 def run_collection_turn(
-    state: GraphState,
+    state: CollectionGraphState,
     user_reply: str | None,
     model: QuestionModel,
-) -> tuple[GraphState, str | None]:
+) -> tuple[CollectionGraphState, str | None]:
     """处理一轮收集：补一个字段，并最多提出下一个问题。"""
 
     # 第一轮尚无用户回复：保持草稿不变，只针对第一个缺失字段提问。
@@ -36,7 +36,7 @@ def run_collection_turn(
 
     # 草稿更新后重新计算仍缺的字段，供下一轮决定是否继续追问。
     updated_missing_fields = updated_draft.missing_fields()
-    updated_state: GraphState = {
+    updated_state: CollectionGraphState = {
         **state,
         "draft": updated_draft,
         "missing_fields": updated_missing_fields,

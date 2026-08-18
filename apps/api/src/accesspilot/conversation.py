@@ -1,7 +1,11 @@
 """模型配额保护下的申请对话、草稿合并与安全事件写入。"""
 
 import re
+from collections.abc import Callable
 from contextvars import ContextVar
+from dataclasses import dataclass, field
+from functools import partial
+from typing import Protocol
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,6 +20,7 @@ from accesspilot.agent.routing import (
     IntentRoutingFailed,
     route_with_validation,
 )
+from accesspilot.agent.safety import redact_sensitive_content
 from accesspilot.agent.state import ConversationPhase
 from accesspilot.agent.structured_reply import (
     ReplyParsingFailed,
@@ -76,6 +81,117 @@ class ConversationTurn(BaseModel):
     tool_results: list[ToolResult] = Field(default_factory=list)
     draft_revision: int = 0
     error_code: str | None = None
+
+
+def _noop_success_finalizer() -> None:
+    """Default finalizer for engines with no post-terminal business action."""
+
+
+@dataclass(frozen=True)
+class ConversationRunResult:
+    """Prepared turn plus its engine-owned post-terminal success action."""
+
+    turn: ConversationTurn
+    success_finalizer: Callable[[], None] = field(
+        default=_noop_success_finalizer,
+        repr=False,
+        compare=False,
+    )
+
+    def finalize_success(self) -> None:
+        """Apply engine-owned state only after the transport persisted success."""
+
+        self.success_finalizer()
+
+
+class ConversationOrchestrator(Protocol):
+    """Replaceable JSON/SSE conversation execution boundary."""
+
+    def handle(
+        self,
+        *,
+        workspace_token: str,
+        content: str,
+        auth_session_id: str | None,
+    ) -> ConversationTurn:
+        """Execute one JSON conversation turn."""
+
+    def prepare(
+        self,
+        *,
+        workspace_token: str,
+        content: str,
+        turn_id: str,
+        auth_session_id: str | None,
+    ) -> ConversationRunResult:
+        """Prepare one SSE turn without persisting its terminal event."""
+
+
+class LegacyConversationOrchestrator:
+    """Thin adapter over the existing procedural Legacy conversation service."""
+
+    def __init__(
+        self,
+        *,
+        session_factory: sessionmaker[Session],
+        workspace_service: WorkspaceService,
+        model: StructuredReplyModel,
+        router: IntentRouter | None = None,
+        policy_service: PolicyService | None = None,
+    ) -> None:
+        self.session_factory = session_factory
+        self.workspace_service = workspace_service
+        self.model = model
+        self.router = router
+        self.policy_service = policy_service
+
+    def handle(
+        self,
+        *,
+        workspace_token: str,
+        content: str,
+        auth_session_id: str | None,
+    ) -> ConversationTurn:
+        return handle_chat_message(
+            self.session_factory,
+            workspace_service=self.workspace_service,
+            workspace_token=workspace_token,
+            content=content,
+            model=self.model,
+            router=self.router,
+            policy_service=self.policy_service,
+            auth_session_id=auth_session_id,
+        )
+
+    def prepare(
+        self,
+        *,
+        workspace_token: str,
+        content: str,
+        turn_id: str,
+        auth_session_id: str | None,
+    ) -> ConversationRunResult:
+        turn = prepare_chat_message(
+            self.session_factory,
+            workspace_service=self.workspace_service,
+            workspace_token=workspace_token,
+            content=content,
+            model=self.model,
+            turn_id=turn_id,
+            router=self.router,
+            policy_service=self.policy_service,
+            auth_session_id=auth_session_id,
+        )
+        return ConversationRunResult(
+            turn=turn,
+            success_finalizer=partial(
+                apply_cursor_transition,
+                self.workspace_service,
+                workspace_token=workspace_token,
+                turn=turn,
+                auth_session_id=auth_session_id,
+            ),
+        )
 
 
 def _explicit_confirmation_from_text(content: str) -> bool | None:
@@ -199,27 +315,7 @@ SECURITY_MESSAGE = (
 )
 
 
-def _redact_sensitive_content(content: str) -> str:
-    """在事件回放与模型输入前隐藏常见密钥形态。"""
-
-    redacted = re.sub(
-        r"(?i)\b(?:sk|ds)-[a-z0-9_-]{8,}",
-        "[已隐藏疑似密钥]",
-        content,
-    )
-    redacted = re.sub(
-        (
-            r"(?i)(?:api[_ -]?key|client[_ -]?secret|access[_ -]?token|"
-            r"refresh[_ -]?token|private[_ -]?key|password)\s*[:=]\s*\S+"
-        ),
-        "[已隐藏凭证]",
-        redacted,
-    )
-    return re.sub(
-        r"(?i)bearer\s+\S+",
-        "[已隐藏 Bearer 凭证]",
-        redacted,
-    )
+_redact_sensitive_content = redact_sensitive_content
 
 
 _PROTECTED_INTERNAL_CONTENT_MARKERS = (
@@ -292,6 +388,28 @@ def _sanitize_model_text(content: str | None) -> str | None:
     ):
         return None
     return redacted
+
+
+def normalize_request_candidate(
+    parsed: ParsedReply,
+    *,
+    actor_id: str,
+    content: str,
+    security_probe: bool,
+) -> ParsedReply:
+    """Apply the server-owned identity, confirmation, and text safety rules."""
+
+    explicit_confirmation = _explicit_confirmation_from_text(content)
+    if security_probe and explicit_confirmation is None:
+        explicit_confirmation = False
+    return parsed.model_copy(
+        update={
+            "employee_id": actor_id,
+            "entitlement_id": _sanitize_model_text(parsed.entitlement_id),
+            "justification": _sanitize_model_text(parsed.justification),
+            "confirmed": explicit_confirmation,
+        }
+    )
 
 
 _QUESTION_WORD_MARKERS = (
@@ -380,7 +498,17 @@ def _is_safe_justification_cursor_reply(
     )
 
 
-def _tool_answer(route: IntentRoute, result: ToolResult | None) -> str:
+# Pure request-collection helpers shared by Legacy and the real graph nodes.
+merge_request_candidate = _merge_reply
+missing_field_question = _missing_field_question
+entitlement_resolution_message = _entitlement_resolution_message
+entitlement_resolution_status = _entitlement_resolution_status
+is_request_collection_follow_up = _is_request_collection_follow_up
+is_safe_justification_cursor_reply = _is_safe_justification_cursor_reply
+is_obvious_question = _is_obvious_question
+
+
+def compose_tool_answer(route: IntentRoute, result: ToolResult | None) -> str:
     """用确定性模板把工具事实转成用户可读回答。"""
 
     if route.intent == "policy_question":
@@ -418,6 +546,10 @@ def _tool_answer(route: IntentRoute, result: ToolResult | None) -> str:
     if route.intent == "unknown":
         return "我需要更多上下文才能理解这条数字消息，请说明它是期限、权限编号还是其他内容。"
     return "我可以帮你查询可申请权限、当前有效授权、申请状态，或发起权限申请。"
+
+
+# Keep the private alias while v1.2 callers migrate to the shared pure composer.
+_tool_answer = compose_tool_answer
 
 
 def _append_security_notice(
@@ -1043,17 +1175,11 @@ def _process_chat_message(
                 before_retry=consume_retry_quota,
             )
         )
-        explicit_confirmation = _explicit_confirmation_from_text(normalized_content)
-        if route.security_probe and explicit_confirmation is None:
-            explicit_confirmation = False
-        # 模型可以理解用户文本，但无权更改身份事实或把疑似密钥写入草稿。
-        parsed = parsed.model_copy(
-            update={
-                "employee_id": workspace.actor_id,
-                "entitlement_id": _sanitize_model_text(parsed.entitlement_id),
-                "justification": _sanitize_model_text(parsed.justification),
-                "confirmed": explicit_confirmation,
-            }
+        parsed = normalize_request_candidate(
+            parsed,
+            actor_id=workspace.actor_id,
+            content=normalized_content,
+            security_probe=route.security_probe,
         )
         if parsed.entitlement_id is not None:
             if parsed.entitlement_id.strip():

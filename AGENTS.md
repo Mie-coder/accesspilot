@@ -1,19 +1,19 @@
-# Repository Guidelines
+# 仓库协作规范
 
-## Project Structure & Module Organization
+## 项目结构与模块组织
 
-AccessPilot is a workspace with a React demo UI and a Python API.
+AccessPilot 是一个包含 React 演示界面和 Python API 的工作区。
 
-- `apps/api/src/accesspilot/` contains FastAPI code and domain logic. Keep business concepts in focused modules such as `domain/models.py` and `domain/workflow.py`.
-- `apps/api/tests/` mirrors API source areas; for example, domain tests belong in `apps/api/tests/domain/`.
-- `apps/web/src/` contains the Vite + React application. Place page-level UI in feature folders as the app grows; keep reusable UI and API clients separate.
-- `docs/plans/` holds product plans. `docs/superpowers/plans/` holds the learner-facing delivery schedule.
+- `apps/api/src/accesspilot/` 存放 FastAPI 代码和领域逻辑。业务概念应放在职责集中的模块中，例如 `domain/models.py` 和 `domain/workflow.py`。
+- `apps/api/tests/` 按 API 源码区域组织测试；例如领域测试应放在 `apps/api/tests/domain/`。
+- `apps/web/src/` 存放 Vite + React 应用。随着项目增长，页面级界面应按功能组织，可复用组件和 API 客户端应彼此分离。
+- `docs/plans/` 存放产品计划；`docs/specs/`、`docs/tickets/` 和 `docs/evidence/` 分别存放规格、Ticket 与验收证据。
 
-All employees, systems, policies, and approval data must remain fictional. Never add Midea data, internal URLs, or credentials.
+所有员工、系统、政策和审批数据都必须是虚构数据。严禁加入美的真实数据、内部地址或任何凭证。
 
-## Build, Test, and Development Commands
+## 构建、测试与开发命令
 
-Use Python 3.11 or later and create a local virtual environment:
+使用 Python 3.11 或更高版本，并创建本地虚拟环境：
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -23,36 +23,43 @@ ruff check apps/api/src apps/api/tests
 mypy apps/api/src
 ```
 
-For the web app, run `npm install` once, then use `npm run dev:web` for Vite, `npm run test:web` for Vitest, `npm run lint:web` for ESLint, and `npm run build:web` for the production build.
+Web 应用首次使用前运行一次 `npm install`。使用 `npm run dev:web` 启动 Vite，使用 `npm run test:web` 运行 Vitest，使用 `npm run lint:web` 运行 ESLint，使用 `npm run build:web` 构建生产版本。
 
-## Coding Style & Naming Conventions
+## 编码风格与命名约定
 
-Python uses four-space indentation, type annotations, Pydantic models, `snake_case` functions, and `PascalCase` classes. Ruff enforces imports and common correctness rules; MyPy runs in strict mode.
+Python 使用四空格缩进、类型注解和 Pydantic 模型；函数采用 `snake_case`，类采用 `PascalCase`。Ruff 负责导入与常见正确性规则，MyPy 使用严格模式。
 
-TypeScript uses two-space indentation, `PascalCase` React components, camelCase functions, and explicit interfaces for API payloads. Prefer domain names such as `AccessRequest`, `ApprovalCase`, and `AccessGrant` over vague names like `data` or `item`.
+TypeScript 使用两空格缩进；React 组件采用 `PascalCase`，函数采用 `camelCase`，API 载荷使用显式接口。优先使用 `AccessRequest`、`ApprovalCase`、`AccessGrant` 等领域名称，避免使用 `data`、`item` 等含义模糊的名称。
 
-## Testing Guidelines
+## 测试规范
 
-Use pytest for backend behavior and Vitest/Testing Library for UI interactions. Write one failing test before production behavior, verify the failure, then implement the smallest passing change. Name tests by observable behavior, e.g. `test_unconfirmed_request_cannot_be_submitted`. Cover state transitions, workspace isolation, and idempotent provisioning.
+后端行为使用 pytest，界面交互使用 Vitest 和 Testing Library。实现生产行为前先编写一个失败测试并确认失败原因，再完成最小通过实现。测试名称应描述可观察行为，例如 `test_unconfirmed_request_cannot_be_submitted`。重点覆盖状态转换、Workspace 隔离和幂等发放。
 
-## Commit & Pull Request Guidelines
+每张 Ticket 默认运行定向测试和受影响回归；只有当前 Ticket、共享合同变更或关键集成门禁明确要求时才运行全量测试。不得把环境门禁造成的预期 skip 写成通过，也不得把历史测试结果写成本轮实测。
 
-Follow the existing Conventional Commit pattern: `feat: add request draft contract`, `fix: prevent duplicate grant`, or `docs: explain policy retrieval`. Keep commits small and runnable. Pull requests should state the user-visible behavior, tests run, relevant API or schema changes, and include screenshots for UI changes.
+## 提交与合并请求规范
 
-## Security & Agent Boundaries
+提交信息必须使用中文，并遵循 Conventional Commits 规范：格式为 `<type>(<scope>): <中文摘要>`，其中 `type` 和可选的 `scope` 使用小写英文，摘要、正文与脚注说明使用中文；破坏性变更按规范使用 `!` 或 `BREAKING CHANGE:` 标记。例如 `feat(api): 新增请求草稿契约`、`fix: 防止重复发放权限` 或 `docs: 补充策略检索说明`。提交必须小而可运行，只包含当前授权范围内的文件。合并请求应说明用户可见行为、实际运行的测试、相关 API 或数据库结构变更；涉及界面时应附截图。
 
-Store keys only in `.env`; commit `.env.example` with placeholders. Do not expose model keys to React. Agents may explain, research, test, and review, but contributors must understand and be able to explain every merged change.
+没有用户明确授权，不得 push、merge、deploy、删除 Legacy/checkpoint 数据或修改正式简历。用户已有的未提交修改属于用户，不得擅自覆盖、暂存或带入当前 Ticket 提交。
 
-## 学习进度协议
+## 安全与智能体边界
 
-`$teach` 的教学 Workspace 固定为 `docs/learning/`。`MISSION.md`、`RESOURCES.md`、`NOTES.md`、`GLOSSARY.md`、`assets/`、`lessons/`、`learning-records/` 与 `reference/` 都从该目录读写，不得重新散落到项目根目录。
+密钥只能存放在 `.env` 中；`.env.example` 只能提交占位值。禁止把模型密钥暴露给 React。智能体可以解释、研究、测试和评审，但贡献者必须能够理解并说明每一项最终合入的改动。
 
-每次开始辅导前，先读取 `docs/superpowers/plans/2026-07-12-accesspilot-learning-schedule.md` 和 `git status`，明确告诉学习者：当前 Day、已完成检查点、下一项检查点。只有获得测试输出、运行结果、代码或提交记录后，才能将对应的 `[ ]` 改为 `[x]`；不得根据推测勾选。默认采用教学模式：学习者亲手编写核心业务逻辑，Agent 主动补充测试、运行 pytest/Ruff/MyPy 等验证并处理测试与规范问题。除非学习者明确要求，不得直接实现业务功能。要求学习者编码前，必须先用中文说明业务问题、文件职责、数据流、关键语法和面试表达，并用一个理解问题确认学习者明白后再给编码步骤。
+## 智能体范围纪律（HERO 思想，AccessPilot 定制）
 
-## 跨日复盘协议
+本项目采用 HERO Anti-OverDefense 的范围控制思想，并针对权限控制产品做了适配。参考仓库：https://github.com/wanshuiyin/HERO-Anti-OverDefense
 
-每次开始新的 Day 前，辅导 Agent 必须先回顾上一天：说明完成的业务能力、涉及的文件和数据流、关键 Python/FastAPI 语法、重要安全或架构决策，以及已验证的测试结果。然后提出 3–5 个由浅入深的问题，覆盖“是什么、为什么、异常时怎么办、面试如何表达”。确认学习者能用自己的话说明核心概念后，才开始当天的新检查点。复盘问题和答案不得作为勾选检查点的唯一证据，但应作为后续讲解深度的依据。
+这些规则只约束智能体提议和实施什么，不得压制真实、可达的问题。任何拥有仓库访问权限的开发或评审智能体，在开始工作前都必须完整阅读本文件。
 
-当学习者表示“不理解”、答案不完整或明确要求提示时，必须采用苏格拉底式引导：一次只提出一个更小的具体场景或问题，帮助学习者从已知事实推导答案；不得立刻给出完整答案。可按“具体场景 → 第一层提示 → 第二层提示 → 完整解释与小例子”的顺序推进，并在每一层等待学习者回应。只有学习者仍无法推导时，才给出完整解释。首次出现的新 Python 语法、类型注解或框架机制时，也必须先用普通语言和小例子解释，再要求学习者编码。
+1. **服从当前合同。** 当前规格（Spec）、当前任务卡（Ticket）及其验收标准是权威来源。一次只处理一张任务卡，独立验收前不得提前进入下一张。规格明确要求的鉴权、租户隔离、凭证保护、数据库迁移、审计、幂等、检查点（checkpoint）、中断与恢复（interrupt/resume）、租约与隔离栅栏（lease/fence）、崩溃恢复、回滚与发布门禁都属于必要工作，不得以“过度防御”为由删除或降级。
+2. **严重级别必须有证据。** P0/P1 必须同时指出：违反了哪条验收标准或不变量、通过受支持输入或操作可以到达的路径、具体后果，以及最小充分修复。无法同时说明时，应降为 P2 或普通观察。实现正确时必须直接判定通过，不得为了完成评审而制造问题。
+3. **没有当前需求就不建防御性脚手架。** 除非当前任务卡或既有项目合同明确要求、保护真实的安全或幂等边界，或者能替代明显更昂贵的操作并改变下一步行为，否则不得新增哈希、校验和、指纹、功能开关、迁移、兼容层、包装层、操作台账或额外守卫。规格已要求的令牌哈希、稳定操作/事件身份、精确检查点定位和迁移验证属于合法机制，不得套用本条删除。
+4. **验证真实可达的风险，不验证仅能理论构造的风险。** AccessPilot 明确支持不可信用户输入、跨工作区（Workspace）鉴权边界、并发请求、进程崩溃与重启、外部服务提供方失败和数据库结构迁移；这些路径上的缺陷即使罕见也必须报告。无法通过公开 API、持久化数据模型、部署模型或规格要求的故障边界到达的奇异状态，不得扩大为当前任务卡的实现范围。
+5. **评审必须有边界。** 只评审当前改动差异及受影响合同。相关代码没有变化、也没有新反证时，不得重新打开已经标记为 `Verified` 的任务卡。修复轮只复核未关闭的问题及其受影响回归面，不得从头重启全部审计。默认只进行一轮独立验收；只有用户明确选择交叉评审，或出现新的 P0/P1 证据时，才增加评审轮次。
+6. **采用与风险相称的验证。** 运行检查前，先明确它能发现哪类具体失败，以及失败后会改变什么。每张任务卡运行定向测试和受影响消费者回归；只有任务卡明确要求，或涉及迁移、共享序列化/状态、JSON/SSE 生产切流、最终验收等真实的广泛集成门禁时，才运行全量测试。没有仍待解决的不确定性时，不得重复运行未变化且已经通过的证据。
+7. **任务卡完成后立即停止。** 所有验收标准通过、证据已记录、独立评审无 P0/P1 后，应将任务卡标记为 `Verified`，只进行获准的本地提交，然后停止。除非任务卡另有规定，P2 不阻塞收口。子智能体或后台评审者交付结果后必须结束，不得长期保持“处理中”。
+8. **更高优先级边界始终优先。** 本节不覆盖用户指令、仓库约定、当前规格/任务卡，以及更高优先级的安全和合规要求。
 
-苏格拉底式引导只用于业务设计、代码逻辑、架构取舍和面试理解。安装依赖、启动服务、环境配置、格式化和工具故障等机械操作由 Agent 直接执行并简要说明结果，不得用连续反问拖慢学习进度。
+<!-- Git 变更显示测试备注 -->

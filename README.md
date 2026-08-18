@@ -129,6 +129,36 @@ pnpm --filter @accesspilot/web exec vite --host 127.0.0.1 --port 5173
 
 开发服务器会把 `/api` 和 `/health` 代理到 `http://127.0.0.1:8000`。浏览器使用 HttpOnly `accesspilot_session` cookie，CSRF 明文只保留在可读 cookie/内存中；开发 Origin 必须精确为 `http://127.0.0.1:5173`，不要混用 `localhost`。DeepSeek 与百炼密钥始终留在 FastAPI 的本地 `.env`。
 
+### 一键启动与重置模式
+
+正常启动并保留现有申请、审批等本地数据：
+
+```bash
+./scripts/start-local.sh
+```
+
+也可以显式写出 `start` 模式：
+
+```bash
+./scripts/start-local.sh start
+```
+
+需要清空所有本地业务数据后再启动时使用 `reset` 模式：
+
+```bash
+./scripts/start-local.sh reset
+```
+
+`reset` 模式要求再次输入 `RESET` 才会永久删除 AccessPilot 专用 PostgreSQL 数据卷。申请、审批、授权、聊天、Workspace、Session 和审计记录会被清空；源码、`.env`、依赖和 Docker 镜像不受影响。`start` 与 `reset` 模式都会启动 PostgreSQL、执行 Alembic 迁移与幂等基础目录初始化，并启动 API 和前端。
+
+完整关闭前端、后端和 PostgreSQL，同时保留本地数据：
+
+```bash
+./scripts/start-local.sh stop
+```
+
+脚本完成后会输出前端工作台、后端 API、API 文档、健康检查地址和各自用途。启动完成后，在当前终端输入 `stop` 并回车，或按 `Control + C`，都会完整关闭前端、后端和 PostgreSQL，同时保留本地数据。外部 `stop` 模式仍可用于启动终端丢失等异常场景。
+
 ## 固定评测与统一检查
 
 T08 历史清单在 `c683d84` 有 12 条；在 T19 阶段，`eval01/05/06` 明确延期到 T20/T22（完整四角色黄金路径由 T24 恢复），旧 Workspace 隔离 `eval11` 已由 T19 的 AuthSession 隔离证据取代。当前 runner 只将其余 8 条 compatible 案例作为通过证据，不收集延期/取代项，也不以 skip 计入结果。`eval07/08` 使用预置 approved Case 与确定性 Sequenced/Counting IAM，继续真实验证 timeout→recover 和单次幂等开通，不用 404/409 替代旧语义。

@@ -13,11 +13,13 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Identity,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     Uuid,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -68,6 +70,15 @@ class WorkspaceRecord(Base):
             "cursor_expected_field IS NULL OR cursor_auth_session_id IS NOT NULL",
             name="cursor_auth_session_required",
         ),
+        CheckConstraint(
+            "flow_version IN (1, 2)",
+            name="flow_version_valid",
+        ),
+        CheckConstraint(
+            "lease_fence >= 0",
+            name="lease_fence_non_negative",
+        ),
+        UniqueConstraint("id", "agent_thread_id"),
     )
     # Mapped[UUID] 是 Python 侧类型；Uuid 是数据库列类型。
     # default=uuid4 传入的是函数，SQLAlchemy 会在每条新记录创建时调用它。
@@ -75,6 +86,27 @@ class WorkspaceRecord(Base):
         Uuid,
         primary_key=True,
         default=uuid4,
+    )
+    # Agent runtime identity is generated inside the Workspace creation
+    # transaction and never crosses the public API/domain DTO boundary.
+    agent_thread_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
+        unique=True,
+        nullable=False,
+    )
+    flow_version: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default="1",
+        nullable=False,
+    )
+    lease_fence: Mapped[int] = mapped_column(
+        BigInteger,
+        default=0,
+        server_default="0",
+        nullable=False,
     )
     # 数据库只保存 Cookie Token 的 SHA-256 十六进制哈希，长度固定为 64。
     # unique 防止重复，index 加快每次请求按 Token 哈希查找 Workspace。
@@ -178,6 +210,11 @@ class AuthSessionRecord(Base):
     """
 
     __tablename__ = "auth_sessions"
+    __table_args__ = (
+        # Runtime ledgers use the three columns together so a caller cannot
+        # splice an actor or AuthSession from another Workspace.
+        UniqueConstraint("workspace_id", "id", "employee_id"),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     token_hash: Mapped[str] = mapped_column(
@@ -586,6 +623,22 @@ class WorkspaceEventRecord(Base):
     """保存允许前端回放的安全事件，不包含模型隐藏推理。"""
 
     __tablename__ = "workspace_events"
+    __table_args__ = (
+        # Execution locators use composite event FKs to prevent cross-Workspace
+        # input/terminal references even though ``id`` is globally unique.
+        UniqueConstraint("workspace_id", "id"),
+        CheckConstraint(
+            "event_key IS NULL OR event_key ~ '^evt_[0-9a-f]{64}$'",
+            name="event_key_format",
+        ),
+        Index(
+            "uq_workspace_events_workspace_event_key_not_null",
+            "workspace_id",
+            "event_key",
+            unique=True,
+            postgresql_where=text("event_key IS NOT NULL"),
+        ),
+    )
 
     # 全局递增 ID 可直接作为 SSE Last-Event-ID 游标。
     id: Mapped[int] = mapped_column(
@@ -598,9 +651,292 @@ class WorkspaceEventRecord(Base):
         index=True,
     )
     event_type: Mapped[str] = mapped_column(String(60), index=True)
+    event_key: Mapped[str | None] = mapped_column(String(68), nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
         index=True,
+    )
+
+
+class AgentTurnExecutionRecord(Base):
+    """One logical user input and its current fenced execution ownership."""
+
+    __tablename__ = "agent_turn_executions"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "graph_run_id", "input_seq"),
+        UniqueConstraint("input_turn_id"),
+        UniqueConstraint("input_event_id"),
+        UniqueConstraint("terminal_event_id"),
+        ForeignKeyConstraint(
+            ["workspace_id", "auth_session_ref", "actor_id"],
+            [
+                "auth_sessions.workspace_id",
+                "auth_sessions.id",
+                "auth_sessions.employee_id",
+            ],
+            name="fk_agent_turn_executions_auth_session",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "input_event_id"],
+            ["workspace_events.workspace_id", "workspace_events.id"],
+            name="fk_agent_turn_executions_input_event",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "terminal_event_id"],
+            ["workspace_events.workspace_id", "workspace_events.id"],
+            name="fk_agent_turn_executions_terminal_event",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("input_seq >= 0", name="input_seq_non_negative"),
+        CheckConstraint("attempt >= 1", name="attempt_positive"),
+        CheckConstraint("lease_fence >= 1", name="lease_fence_positive"),
+        CheckConstraint(
+            "engine IN ('legacy', 'langgraph')",
+            name="engine_valid",
+        ),
+        CheckConstraint(
+            "status IN ('running', 'waiting_input', 'completed', "
+            "'recoverable_error', 'interrupted')",
+            name="status_valid",
+        ),
+        CheckConstraint(
+            "checkpoint_ns = ''",
+            name="root_checkpoint_namespace",
+        ),
+        CheckConstraint(
+            "checkpoint_thread_id = 'accesspilot:v1.3:' || graph_run_id::text",
+            name="checkpoint_thread_for_run",
+        ),
+        CheckConstraint(
+            "accepted_checkpoint_id IS NULL OR length(accepted_checkpoint_id) > 0",
+            name="accepted_checkpoint_id_non_empty",
+        ),
+        CheckConstraint(
+            "((status = 'running' AND lease_expires_at IS NOT NULL "
+            "AND terminal_event_id IS NULL) OR "
+            "(status <> 'running' AND lease_expires_at IS NULL "
+            "AND terminal_event_id IS NOT NULL))",
+            name="lease_terminal_status_consistent",
+        ),
+        Index(
+            "uq_agent_turn_executions_running_workspace",
+            "workspace_id",
+            unique=True,
+            postgresql_where=text("status = 'running'"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    graph_run_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    checkpoint_thread_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    input_seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    input_turn_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    input_event_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    auth_session_ref: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(30), nullable=False)
+    engine: Mapped[str] = mapped_column(String(20), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    lease_fence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    checkpoint_ns: Mapped[str] = mapped_column(
+        String(200), default="", server_default="", nullable=False
+    )
+    accepted_checkpoint_id: Mapped[str | None] = mapped_column(
+        String(200), nullable=True
+    )
+    terminal_event_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class AgentPendingInputRecord(Base):
+    """Application projection of one accepted LangGraph input interrupt."""
+
+    __tablename__ = "agent_pending_inputs"
+    __table_args__ = (
+        UniqueConstraint("pending_input_id"),
+        ForeignKeyConstraint(
+            ["workspace_id", "agent_thread_id"],
+            ["workspaces.id", "workspaces.agent_thread_id"],
+            name="fk_agent_pending_inputs_workspace_thread",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "auth_session_ref", "actor_id"],
+            [
+                "auth_sessions.workspace_id",
+                "auth_sessions.id",
+                "auth_sessions.employee_id",
+            ],
+            name="fk_agent_pending_inputs_auth_session",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("kind = 'confirmation'", name="kind_valid"),
+        CheckConstraint("draft_revision >= 0", name="draft_revision_non_negative"),
+        CheckConstraint(
+            "resume_input_seq IS NULL OR resume_input_seq >= 0",
+            name="resume_input_seq_non_negative",
+        ),
+        CheckConstraint(
+            "engine IN ('legacy', 'langgraph')",
+            name="engine_valid",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'resuming', 'resolved', "
+            "'abandoned_to_legacy', 'abandoned_conflict')",
+            name="status_valid",
+        ),
+        CheckConstraint(
+            "checkpoint_ns = ''",
+            name="root_checkpoint_namespace",
+        ),
+        CheckConstraint(
+            "checkpoint_thread_id = 'accesspilot:v1.3:' || graph_run_id::text",
+            name="checkpoint_thread_for_run",
+        ),
+        CheckConstraint(
+            "length(accepted_checkpoint_id) > 0",
+            name="accepted_checkpoint_id_non_empty",
+        ),
+        CheckConstraint(
+            "((status IN ('active', 'abandoned_to_legacy', 'abandoned_conflict') "
+            "AND resume_input_seq IS NULL) OR "
+            "(status IN ('resuming', 'resolved') AND resume_input_seq IS NOT NULL))",
+            name="resume_sequence_status_consistent",
+        ),
+        CheckConstraint(
+            "((status IN ('abandoned_to_legacy', 'abandoned_conflict') "
+            "AND retired_at IS NOT NULL AND retirement_reason IS NOT NULL) OR "
+            "(status NOT IN ('abandoned_to_legacy', 'abandoned_conflict') "
+            "AND retired_at IS NULL AND retirement_reason IS NULL))",
+            name="retirement_status_consistent",
+        ),
+        CheckConstraint(
+            "retirement_reason IS NULL OR length(btrim(retirement_reason)) > 0",
+            name="retirement_reason_non_empty",
+        ),
+        Index(
+            "uq_agent_pending_inputs_live_workspace",
+            "workspace_id",
+            unique=True,
+            postgresql_where=text("status IN ('active', 'resuming')"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    agent_thread_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    graph_run_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    checkpoint_thread_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    pending_input_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    draft_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    auth_session_ref: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(30), nullable=False)
+    engine: Mapped[str] = mapped_column(String(20), nullable=False)
+    checkpoint_ns: Mapped[str] = mapped_column(
+        String(200), default="", server_default="", nullable=False
+    )
+    accepted_checkpoint_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    resume_input_seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    retired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    retirement_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class AgentStepExecutionRecord(Base):
+    """Application idempotency fact for one side-effecting logical step."""
+
+    __tablename__ = "agent_step_executions"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "operation_id"),
+        ForeignKeyConstraint(
+            ["workspace_id", "graph_run_id", "input_seq"],
+            [
+                "agent_turn_executions.workspace_id",
+                "agent_turn_executions.graph_run_id",
+                "agent_turn_executions.input_seq",
+            ],
+            name="fk_agent_step_executions_logical_input",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("input_seq >= 0", name="input_seq_non_negative"),
+        CheckConstraint(
+            "committed_revision IS NULL OR committed_revision >= 0",
+            name="committed_revision_non_negative",
+        ),
+        CheckConstraint(
+            "operation_id ~ '^op_[0-9a-f]{64}$'",
+            name="operation_id_format",
+        ),
+        CheckConstraint(
+            "length(btrim(step_key)) > 0",
+            name="step_key_non_empty",
+        ),
+        CheckConstraint(
+            "result_reference IS NULL OR length(btrim(result_reference)) > 0",
+            name="result_reference_non_empty",
+        ),
+        CheckConstraint(
+            "status IN ('reserved', 'completed')",
+            name="status_valid",
+        ),
+        CheckConstraint(
+            "((status = 'reserved' AND result_reference IS NULL "
+            "AND committed_revision IS NULL AND completed_at IS NULL) OR "
+            "(status = 'completed' AND completed_at IS NOT NULL "
+            "AND (NULLIF(btrim(result_reference), '') IS NOT NULL "
+            "OR committed_revision IS NOT NULL)))",
+            name="completion_facts_consistent",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    graph_run_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    input_seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    step_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    operation_id: Mapped[str] = mapped_column(String(67), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    # References are deliberately scalar and size bounded: raw provider/tool
+    # results never belong in this idempotency ledger.
+    result_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    committed_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )

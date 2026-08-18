@@ -5,11 +5,11 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from accesspilot.agent.collector import QuestionModel, run_collection_turn
-from accesspilot.agent.state import GraphState
+from accesspilot.agent.state import CollectionGraphState
 
 
 def ask_next_question_node(
-    state: GraphState,
+    state: CollectionGraphState,
     model: QuestionModel,
 ) -> dict[str, str | None]:
     """根据当前缺项生成下一句追问，不修改申请草稿。"""
@@ -20,7 +20,7 @@ def ask_next_question_node(
 
 
 def apply_reply_and_ask_node(
-    state: GraphState,
+    state: CollectionGraphState,
     user_reply: str,
     model: QuestionModel,
 ) -> dict[str, object]:
@@ -44,10 +44,15 @@ def apply_reply_and_ask_node(
 def build_initial_question_graph(
     model: QuestionModel,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
-) -> CompiledStateGraph[GraphState, None, GraphState, GraphState]:
+) -> CompiledStateGraph[
+    CollectionGraphState,
+    None,
+    CollectionGraphState,
+    CollectionGraphState,
+]:
     """构建新申请第一轮的提问流程。"""
 
-    graph = StateGraph(GraphState)
+    graph = StateGraph(CollectionGraphState)
 
     # 图节点只接收 state；lambda 从外层带入运行时的 model。
     graph.add_node(
