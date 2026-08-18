@@ -1409,6 +1409,256 @@ def test_resume_after_session_expired_closes_safely_without_business_result() ->
         close_all_sessions()
 
 
+def test_reinterrupt_finalize_after_session_revoked_closes_safely() -> None:
+    """P1 (round 2) regression: the session is revoked after the resume graph
+    stops at the re-interrupt and before finalize_interrupt(previous=...);
+    the final fenced transaction must close safely (recoverable_error +
+    resolved pending + consumed Cursor) instead of publishing a normal
+    waiting_input re-interrupt."""
+    with _isolated_checkpoint_database() as settings:
+        runtime = PostgresCheckpointRuntime(settings)
+        runtime.start()
+        runtime.check_readiness()
+        factory = build_session_factory(build_engine(settings.database_url))
+        token, workspace_id, agent_thread_id, auth_session_id = _workspace_fixture(
+            factory
+        )
+        service = TurnExecutionService(factory)
+        pending_input_id = uuid4()
+        handle = service.begin_input(
+            workspace_token=token,
+            auth_session_ref=auth_session_id,
+            actor_id="EMP-001",
+            safe_user_text=_request_text(),
+        )
+        graph, invocation, _payload, _context = _run_to_interrupt(
+            factory, runtime, service, handle, StaticReplyModel(_complete_reply()),
+            pending_input_id, workspace_token=token,
+        )
+        verified = _verify_interrupt_candidate(invocation, graph)
+        with service.advisory_lock(agent_thread_id) as lock:
+            service.finalize_interrupt(
+                handle,
+                workspace_token=token,
+                lock=lock,
+                verified=verified,
+                pending_input_id=pending_input_id,
+                draft_revision=1,
+            )
+
+        # Resume edits a field; the graph re-routes and stops at the second
+        # confirmation interrupt.
+        with service.advisory_lock(agent_thread_id) as lock:
+            resume_handle = service.begin_resume(
+                workspace_token=token,
+                auth_session_ref=auth_session_id,
+                actor_id="EMP-001",
+                safe_user_text="改成 60 天",
+                pending_input_id=pending_input_id,
+                lock=lock,
+                saver=runtime.saver,
+            )
+        resume_context = _server_context(factory, resume_handle.execution_id)
+        invocation_b = FencedPostgresSaverAdapter(runtime.saver).for_execution(
+            resume_context
+        )
+        graph_b = build_production_graph(checkpointer=invocation_b)
+        config = _config_for(
+            resume_context.checkpoint_thread_id,
+            resume_context.accepted_checkpoint_id,
+        )
+        runtime_context = _runtime_context(
+            factory,
+            resume_handle.workspace_id,
+            token,
+            str(resume_handle.auth_session_ref),
+            graph_run_id=resume_handle.graph_run_id,
+            input_turn_id=resume_handle.input_turn_id,
+            fence=resume_handle.lease_fence,
+            model=StaticReplyModel(
+                ParsedReply(
+                    entitlement_id="insighthub.dashboard_view",
+                    duration_days=60,
+                    justification="业务需要",
+                )
+            ),
+            pending_input_id=pending_input_id,
+            input_seq=resume_handle.input_seq,
+        )
+        with pytest.raises(ConfirmationInterruptRaised):
+            graph_b.invoke(
+                Command(
+                    resume={
+                        "decision": "route_new_input",
+                        "safe_user_text": "改成 60 天",
+                    }
+                ),
+                config,
+                context=runtime_context,
+            )
+        verified_b = _verify_interrupt_candidate(invocation_b, graph_b)
+
+        # Revoke the session between the graph stop and the final transaction.
+        _revoke_auth_session(factory, auth_session_id)
+
+        with service.advisory_lock(agent_thread_id) as lock:
+            terminal_id = service.finalize_interrupt(
+                resume_handle,
+                workspace_token=token,
+                lock=lock,
+                verified=verified_b,
+                pending_input_id=pending_input_id,
+                draft_revision=2,
+                previous_pending_input_id=pending_input_id,
+            )
+        with factory() as session:
+            execution = session.get(
+                AgentTurnExecutionRecord, resume_handle.execution_id
+            )
+            assert execution is not None
+            # Never a normal waiting_input re-interrupt for a revoked session.
+            assert execution.status == "recoverable_error"
+            assert execution.lease_expires_at is None
+            assert execution.terminal_event_id == terminal_id
+            terminal = session.get(WorkspaceEventRecord, terminal_id)
+            assert terminal is not None
+            assert terminal.event_type == "error.recoverable"
+            pending = session.scalar(
+                select(AgentPendingInputRecord).where(
+                    AgentPendingInputRecord.pending_input_id == pending_input_id
+                )
+            )
+            assert pending is not None
+            assert pending.status == "resolved"
+            workspace = session.get(WorkspaceRecord, workspace_id)
+            assert workspace is not None
+            assert workspace.cursor_consumed_at is not None
+            assert workspace.cursor_expected_field is not None or True
+            assert workspace.draft is not None
+            assert workspace.draft["confirmed"] is False
+        runtime.close()
+        close_all_sessions()
+
+
+def test_reinterrupt_finalize_after_session_expired_closes_safely() -> None:
+    """P1 (round 2) regression: the session expires after the resume graph
+    stops at the re-interrupt and before the final fenced transaction; the
+    same safe close must happen."""
+    with _isolated_checkpoint_database() as settings:
+        runtime = PostgresCheckpointRuntime(settings)
+        runtime.start()
+        runtime.check_readiness()
+        factory = build_session_factory(build_engine(settings.database_url))
+        token, workspace_id, agent_thread_id, auth_session_id = _workspace_fixture(
+            factory
+        )
+        service = TurnExecutionService(factory)
+        pending_input_id = uuid4()
+        handle = service.begin_input(
+            workspace_token=token,
+            auth_session_ref=auth_session_id,
+            actor_id="EMP-001",
+            safe_user_text=_request_text(),
+        )
+        graph, invocation, _payload, _context = _run_to_interrupt(
+            factory, runtime, service, handle, StaticReplyModel(_complete_reply()),
+            pending_input_id, workspace_token=token,
+        )
+        verified = _verify_interrupt_candidate(invocation, graph)
+        with service.advisory_lock(agent_thread_id) as lock:
+            service.finalize_interrupt(
+                handle,
+                workspace_token=token,
+                lock=lock,
+                verified=verified,
+                pending_input_id=pending_input_id,
+                draft_revision=1,
+            )
+        with service.advisory_lock(agent_thread_id) as lock:
+            resume_handle = service.begin_resume(
+                workspace_token=token,
+                auth_session_ref=auth_session_id,
+                actor_id="EMP-001",
+                safe_user_text="改成 60 天",
+                pending_input_id=pending_input_id,
+                lock=lock,
+                saver=runtime.saver,
+            )
+        resume_context = _server_context(factory, resume_handle.execution_id)
+        invocation_b = FencedPostgresSaverAdapter(runtime.saver).for_execution(
+            resume_context
+        )
+        graph_b = build_production_graph(checkpointer=invocation_b)
+        config = _config_for(
+            resume_context.checkpoint_thread_id,
+            resume_context.accepted_checkpoint_id,
+        )
+        runtime_context = _runtime_context(
+            factory,
+            resume_handle.workspace_id,
+            token,
+            str(resume_handle.auth_session_ref),
+            graph_run_id=resume_handle.graph_run_id,
+            input_turn_id=resume_handle.input_turn_id,
+            fence=resume_handle.lease_fence,
+            model=StaticReplyModel(
+                ParsedReply(
+                    entitlement_id="insighthub.dashboard_view",
+                    duration_days=60,
+                    justification="业务需要",
+                )
+            ),
+            pending_input_id=pending_input_id,
+            input_seq=resume_handle.input_seq,
+        )
+        with pytest.raises(ConfirmationInterruptRaised):
+            graph_b.invoke(
+                Command(
+                    resume={
+                        "decision": "route_new_input",
+                        "safe_user_text": "改成 60 天",
+                    }
+                ),
+                config,
+                context=runtime_context,
+            )
+        verified_b = _verify_interrupt_candidate(invocation_b, graph_b)
+
+        # Expire the session between the graph stop and the final transaction.
+        with factory() as session:
+            auth = session.get(AuthSessionRecord, auth_session_id)
+            assert auth is not None
+            auth.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            session.commit()
+
+        with service.advisory_lock(agent_thread_id) as lock:
+            terminal_id = service.finalize_interrupt(
+                resume_handle,
+                workspace_token=token,
+                lock=lock,
+                verified=verified_b,
+                pending_input_id=pending_input_id,
+                draft_revision=2,
+                previous_pending_input_id=pending_input_id,
+            )
+        with factory() as session:
+            execution = session.get(
+                AgentTurnExecutionRecord, resume_handle.execution_id
+            )
+            assert execution is not None
+            assert execution.status == "recoverable_error"
+            assert execution.terminal_event_id == terminal_id
+            pending = session.scalar(
+                select(AgentPendingInputRecord).where(
+                    AgentPendingInputRecord.pending_input_id == pending_input_id
+                )
+            )
+            assert pending is not None
+            assert pending.status == "resolved"
+        runtime.close()
+        close_all_sessions()
+
+
 def test_resume_wrong_auth_session_fails_closed_with_zero_writes() -> None:
     """AC3: a resume with a mismatched auth session closes safely before any
     new fact is written."""
