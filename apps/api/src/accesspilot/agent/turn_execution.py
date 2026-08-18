@@ -613,9 +613,11 @@ class TurnExecutionService:
         activated, and the unique terminal event chain is written together.
 
         When ``previous_pending_input_id`` is given (a re-interrupt after a
-        non-confirm resume re-route), that pending is first closed as
-        ``resolved`` inside the same transaction, so the workspace never holds
-        two active/resuming rows and the replacement is atomic.
+        non-confirm resume re-route), the AuthSession is re-validated inside
+        the same transaction: an invalid session closes safely (resolved
+        pending + consumed Cursor + ``error.recoverable`` terminal), never a
+        normal ``waiting_input``.  Otherwise the previous pending is replaced
+        atomically, so the workspace never holds two active/resuming rows.
         """
         session = lock.session
         with session.begin():
@@ -671,6 +673,43 @@ class TurnExecutionService:
                     raise TurnExecutionError(
                         "previous pending input is not active/resuming"
                     )
+                # AC3: the final fenced transaction of a resume re-route must
+                # re-validate the AuthSession.  A revoked/expired session may
+                # only close safely — resolve the previous pending, consume
+                # the Cursor and write a single error.recoverable terminal —
+                # it must never publish a normal waiting_input re-interrupt.
+                try:
+                    self._validate_auth_session(
+                        session,
+                        workspace_id=handle.workspace_id,
+                        auth_session_ref=handle.auth_session_ref,
+                        actor_id=handle.actor_id,
+                        now=now,
+                    )
+                except TurnExecutionError:
+                    previous.status = "resolved"
+                    workspace.cursor_consumed_at = now
+                    safe_payload = validate_event_payload(
+                        "error.recoverable",
+                        {
+                            "turn_id": handle.input_turn_id,
+                            "code": "AUTH_SESSION_INVALID",
+                            "message": "登录会话无效或已过期，请重新登录后再继续。",
+                        },
+                    )
+                    terminal = WorkspaceEventRecord(
+                        workspace_id=handle.workspace_id,
+                        event_type="error.recoverable",
+                        payload=safe_payload,
+                    )
+                    session.add(terminal)
+                    session.flush()
+                    execution.status = "recoverable_error"
+                    execution.lease_expires_at = None
+                    execution.terminal_event_id = terminal.id
+                    execution.updated_at = utc_now()
+                    session.flush()
+                    return terminal.id
                 # Replacement: the pending row is unique per pending_input_id,
                 # so the re-interrupt re-arms the same row with the new
                 # revision and accepted head in the same transaction.
