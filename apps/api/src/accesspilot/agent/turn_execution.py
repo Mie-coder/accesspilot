@@ -603,6 +603,7 @@ class TurnExecutionService:
         verified: VerifiedCheckpointCandidate,
         pending_input_id: UUID,
         draft_revision: int,
+        previous_pending_input_id: UUID | None = None,
     ) -> int:
         """Atomically promote accepted head + pending + Cursor + terminal events.
 
@@ -610,6 +611,11 @@ class TurnExecutionService:
         the execution is validated, the verified candidate is promoted, the
         ``AgentPendingInputRecord`` is inserted, the confirmation Cursor is
         activated, and the unique terminal event chain is written together.
+
+        When ``previous_pending_input_id`` is given (a re-interrupt after a
+        non-confirm resume re-route), that pending is first closed as
+        ``resolved`` inside the same transaction, so the workspace never holds
+        two active/resuming rows and the replacement is atomic.
         """
         session = lock.session
         with session.begin():
@@ -650,24 +656,52 @@ class TurnExecutionService:
             if not AcceptedCheckpointHeadStore().promote(session, verified):
                 raise StaleTurnFenceError("checkpoint head promotion failed")
 
-            session.add(
-                AgentPendingInputRecord(
-                    workspace_id=handle.workspace_id,
-                    agent_thread_id=workspace.agent_thread_id,
-                    graph_run_id=handle.graph_run_id,
-                    checkpoint_thread_id=execution.checkpoint_thread_id,
-                    pending_input_id=pending_input_id,
-                    kind="confirmation",
-                    draft_revision=draft_revision,
-                    auth_session_ref=handle.auth_session_ref,
-                    actor_id=handle.actor_id,
-                    engine="langgraph",
-                    checkpoint_ns="",
-                    accepted_checkpoint_id=execution.accepted_checkpoint_id,
-                    status="active",
-                    resume_input_seq=None,
+            if previous_pending_input_id is not None:
+                previous = session.scalar(
+                    select(AgentPendingInputRecord)
+                    .where(
+                        AgentPendingInputRecord.workspace_id == handle.workspace_id,
+                        AgentPendingInputRecord.pending_input_id
+                        == previous_pending_input_id,
+                        AgentPendingInputRecord.status.in_(("active", "resuming")),
+                    )
+                    .with_for_update()
                 )
-            )
+                if previous is None:
+                    raise TurnExecutionError(
+                        "previous pending input is not active/resuming"
+                    )
+                # Replacement: the pending row is unique per pending_input_id,
+                # so the re-interrupt re-arms the same row with the new
+                # revision and accepted head in the same transaction.
+                new_head = execution.accepted_checkpoint_id
+                if new_head is None:
+                    raise TurnExecutionError(
+                        "re-interrupt accepted head is missing"
+                    )
+                previous.status = "active"
+                previous.draft_revision = draft_revision
+                previous.accepted_checkpoint_id = new_head
+                previous.resume_input_seq = None
+            else:
+                session.add(
+                    AgentPendingInputRecord(
+                        workspace_id=handle.workspace_id,
+                        agent_thread_id=workspace.agent_thread_id,
+                        graph_run_id=handle.graph_run_id,
+                        checkpoint_thread_id=execution.checkpoint_thread_id,
+                        pending_input_id=pending_input_id,
+                        kind="confirmation",
+                        draft_revision=draft_revision,
+                        auth_session_ref=handle.auth_session_ref,
+                        actor_id=handle.actor_id,
+                        engine="langgraph",
+                        checkpoint_ns="",
+                        accepted_checkpoint_id=execution.accepted_checkpoint_id,
+                        status="active",
+                        resume_input_seq=None,
+                    )
+                )
             workspace.cursor_actor_id = handle.actor_id
             workspace.cursor_auth_session_id = str(handle.auth_session_ref)
             workspace.cursor_expected_field = "confirmation"
@@ -725,6 +759,107 @@ class TurnExecutionService:
             execution.updated_at = utc_now()
             session.flush()
             return completed_event.id
+
+    def finalize_resume_outcome(
+        self,
+        handle: TurnExecutionHandle,
+        *,
+        workspace_token: str,
+        lock: AdvisoryLockHandle,
+        verified: VerifiedCheckpointCandidate,
+        pending_input_id: UUID,
+        event_type: Literal[
+            "message.completed", "error.recoverable", "turn.interrupted"
+        ],
+        payload: dict[str, object],
+    ) -> int:
+        """Atomically close one resume turn in a single fenced transaction.
+
+        Promotes the verified resume head, closes the resuming/active pending
+        as ``resolved``, consumes the confirmation Cursor, writes the single
+        unique terminal event and terminalizes the execution.  Any failure
+        rolls the whole transaction back: no terminal-only or Cursor-only
+        window is possible, and the confirmation write stays exactly-once.
+        """
+        from accesspilot.events import validate_event_payload
+
+        if event_type not in self._TERMINAL_STATUS_BY_EVENT:
+            raise ValueError("unsupported terminal event type")
+        safe_payload = validate_event_payload(event_type, payload)
+        if safe_payload.get("turn_id") != handle.input_turn_id:
+            raise TurnExecutionError(
+                "terminal event turn_id does not match the execution turn"
+            )
+        status = self._TERMINAL_STATUS_BY_EVENT[event_type]
+        session = lock.session
+        with session.begin():
+            execution = session.scalar(
+                select(AgentTurnExecutionRecord)
+                .where(
+                    AgentTurnExecutionRecord.id == handle.execution_id,
+                    AgentTurnExecutionRecord.workspace_id == handle.workspace_id,
+                    AgentTurnExecutionRecord.graph_run_id == handle.graph_run_id,
+                    AgentTurnExecutionRecord.input_seq == handle.input_seq,
+                    AgentTurnExecutionRecord.input_turn_id == handle.input_turn_id,
+                    AgentTurnExecutionRecord.actor_id == handle.actor_id,
+                    AgentTurnExecutionRecord.auth_session_ref
+                    == handle.auth_session_ref,
+                    AgentTurnExecutionRecord.lease_fence == handle.lease_fence,
+                    AgentTurnExecutionRecord.status == "running",
+                )
+                .with_for_update()
+            )
+            if execution is None:
+                raise StaleTurnFenceError("execution is not owned by this handle")
+            now = datetime.now(UTC)
+            if execution.lease_expires_at is None or execution.lease_expires_at <= now:
+                raise StaleTurnFenceError("execution lease has expired")
+            workspace = session.scalar(
+                select(WorkspaceRecord)
+                .where(
+                    WorkspaceRecord.id == handle.workspace_id,
+                    WorkspaceRecord.token_hash == hash_workspace_token(workspace_token),
+                    WorkspaceRecord.actor_id == handle.actor_id,
+                    WorkspaceRecord.lease_fence == handle.lease_fence,
+                )
+                .with_for_update()
+            )
+            if workspace is None:
+                raise StaleTurnFenceError("workspace fence does not match execution")
+            lock.require_thread(workspace.agent_thread_id)
+            if not AcceptedCheckpointHeadStore().promote(session, verified):
+                raise StaleTurnFenceError("checkpoint head promotion failed")
+
+            pending = session.scalar(
+                select(AgentPendingInputRecord)
+                .where(
+                    AgentPendingInputRecord.workspace_id == handle.workspace_id,
+                    AgentPendingInputRecord.pending_input_id == pending_input_id,
+                    AgentPendingInputRecord.status.in_(("active", "resuming")),
+                )
+                .with_for_update()
+            )
+            if pending is None:
+                raise TurnExecutionError("pending input is not active/resuming")
+            pending.status = "resolved"
+
+            # The confirmation Cursor is answered by this resume turn (either
+            # confirmed or re-routed); consume it so no stale Cursor remains.
+            workspace.cursor_consumed_at = now
+
+            terminal = WorkspaceEventRecord(
+                workspace_id=handle.workspace_id,
+                event_type=event_type,
+                payload=safe_payload,
+            )
+            session.add(terminal)
+            session.flush()
+            execution.status = status
+            execution.lease_expires_at = None
+            execution.terminal_event_id = terminal.id
+            execution.updated_at = utc_now()
+            session.flush()
+            return terminal.id
 
     def begin_resume(
         self,

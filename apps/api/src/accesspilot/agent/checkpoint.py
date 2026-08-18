@@ -384,20 +384,15 @@ class FencedSaverInvocation:
         task_id: str,
         task_path: str = "",
     ) -> None:
-        locator = CheckpointLocator.from_config(config)
         self._validate_thread(config)
-        if locator.checkpoint_id not in self._owned_candidate_ids and (
-            locator.checkpoint_id != self.context.accepted_checkpoint_id
-        ):
-            # LangGraph records the brand-new input task against a complete,
-            # generated checkpoint coordinate before its first checkpoint put.
-            # It remains invocation-local and cannot become accepted by itself.
-            if self.context.accepted_checkpoint_id is None and not self._owned_candidate_ids:
-                self._owned_write_ids.add(locator.checkpoint_id)
-            else:
-                raise ExactCheckpointRequired(
-                    "writes require an accepted or invocation candidate head"
-                )
+        # LangGraph emits task writes against the next generated head before
+        # its corresponding checkpoint put, and against the candidate head
+        # after an interrupt put.  Writes can never become an accepted head by
+        # themselves — promotion requires a verified candidate inside the
+        # fenced finalize transaction — so task writes are allowed for the
+        # invocation's thread; the strict chain (parent == accepted head or
+        # the immediate candidate) is enforced by ``put``, and only a verified
+        # candidate may be promoted.
         self._saver.put_writes(config, writes, task_id, task_path)
 
     def verify_candidate(

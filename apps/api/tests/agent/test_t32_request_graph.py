@@ -14,12 +14,15 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from accesspilot.agent.embeddings import DeterministicEmbeddingModel
 from accesspilot.agent.production_graph import (
+    ConfirmationInterruptRaised,
     GraphInput,
     GraphRuntimeContext,
     ProductionGraph,
+    ProductionGraphRunResult,
     build_production_graph,
 )
 from accesspilot.agent.routing import DeterministicIntentRouter
+from accesspilot.agent.state import ConversationPhase
 from accesspilot.agent.step_operations import StepExecutionRejected
 from accesspilot.agent.structured_reply import (
     CORRECTION_PROMPT,
@@ -211,6 +214,9 @@ def _request_graph_fixture(
         "cookie": "runtime-cookie",
         "csrf_token": "runtime-csrf",
         "api_key": "runtime-key",
+        # T34: the caller pre-allocates the confirmation pending id into the
+        # runtime context; the interrupt node only reads it.
+        "pending_input_id": str(uuid4()),
     }
     return RequestGraphFixture(
         token,
@@ -264,7 +270,10 @@ def _stream_path(
     path: list[str] = []
     for update in graph.stream(graph_input, context=context, stream_mode="updates"):
         assert isinstance(update, dict) and len(update) == 1
-        path.append(next(iter(update)))
+        name = next(iter(update))
+        # T34: a stopped confirmation interrupt surfaces as __interrupt__ and
+        # belongs to the await_requester_confirmation node in the path contract.
+        path.append("await_requester_confirmation" if name == "__interrupt__" else name)
     return path
 
 
@@ -297,7 +306,6 @@ _PARITY_PATH_AWAIT_CONFIRMATION = (
     "persist_draft_cas",
     "validate_draft",
     "await_requester_confirmation",
-    "finalize_public_outcome",
 )
 _PARITY_PATH_AWAIT_NO_RESOLVE = (
     "hydrate_authoritative_snapshot",
@@ -307,7 +315,6 @@ _PARITY_PATH_AWAIT_NO_RESOLVE = (
     "persist_draft_cas",
     "validate_draft",
     "await_requester_confirmation",
-    "finalize_public_outcome",
 )
 _PARITY_PATH_RECOVERABLE = (
     "hydrate_authoritative_snapshot",
@@ -571,10 +578,29 @@ def test_request_collection_normalized_outcome_phase_quota_and_cursor_parity_twi
             path_fixture.context,
         ) == list(scenario.expected_path)
 
-        graph_result = build_production_graph(checkpointer=False).prepare(
-            graph_input,
-            context=fixture.context,
-        )
+        graph_result: ProductionGraphRunResult | None = None
+        if scenario.expected_path[-1] == "await_requester_confirmation":
+            # T34: a complete draft stops at the confirmation interrupt; the
+            # pending/Cursor projection is a caller-side fenced transaction.
+            with pytest.raises(ConfirmationInterruptRaised) as raised:
+                build_production_graph(checkpointer=False).prepare(
+                    graph_input,
+                    context=fixture.context,
+                )
+            payload = raised.value.payload
+            assert payload["kind"] == "confirmation"
+            assert payload["pending_input_id"]
+            # The interrupt reports the authoritative revision committed by the
+            # upstream T32 draft CAS (persist may have advanced it).
+            with database_session_factory() as session:
+                workspace = session.get(WorkspaceRecord, fixture.workspace_id)
+                assert workspace is not None
+            assert payload["draft_revision"] == workspace.draft_revision
+        else:
+            graph_result = build_production_graph(checkpointer=False).prepare(
+                graph_input,
+                context=fixture.context,
+            )
         legacy_result = legacy.prepare(
             workspace_token=legacy_token,
             content=scenario.content,
@@ -582,9 +608,14 @@ def test_request_collection_normalized_outcome_phase_quota_and_cursor_parity_twi
             auth_session_id="t32-legacy-auth",
         )
 
-        assert normalized_outcome(graph_result.turn) == normalized_outcome(legacy_result.turn)
-        assert graph_result.turn.phase == legacy_result.turn.phase
-        assert graph_result.turn.quota == legacy_result.turn.quota
+        if graph_result is None:
+            # Legacy parity at the await boundary: the confirmation card.
+            assert legacy_result.turn.business_status == "awaiting_confirmation"
+            assert legacy_result.turn.phase == ConversationPhase.AWAITING_CONFIRMATION
+        else:
+            assert normalized_outcome(graph_result.turn) == normalized_outcome(legacy_result.turn)
+            assert graph_result.turn.phase == legacy_result.turn.phase
+            assert graph_result.turn.quota == legacy_result.turn.quota
         # The correction argument is provable: only the second attempt after a
         # malformed primary carries CORRECTION_PROMPT; every other call is None.
         expected_corrections: list[str | None] = []
@@ -611,17 +642,9 @@ def test_request_collection_normalized_outcome_phase_quota_and_cursor_parity_twi
             fixture.workspace_id,
         )
 
-        graph_result.finalize_success()
-        if graph_result.turn.business_status == "collecting":
-            assert _cursor_projection(
-                fixture.workspace_service,
-                fixture.token,
-                fixture.context["auth_session_id"],
-            ) == (
-                graph_result.turn.missing_fields[0],
-                graph_result.turn.draft_revision,
-            )
-        else:
+        if graph_result is None:
+            # No Cursor is projected before the caller's fenced interrupt
+            # finalize transaction (T34 AC2) and the graph created none.
             assert (
                 _cursor_projection(
                     fixture.workspace_service,
@@ -630,6 +653,26 @@ def test_request_collection_normalized_outcome_phase_quota_and_cursor_parity_twi
                 )
                 is None
             )
+        else:
+            graph_result.finalize_success()
+            if graph_result.turn.business_status == "collecting":
+                assert _cursor_projection(
+                    fixture.workspace_service,
+                    fixture.token,
+                    fixture.context["auth_session_id"],
+                ) == (
+                    graph_result.turn.missing_fields[0],
+                    graph_result.turn.draft_revision,
+                )
+            else:
+                assert (
+                    _cursor_projection(
+                        fixture.workspace_service,
+                        fixture.token,
+                        fixture.context["auth_session_id"],
+                    )
+                    is None
+                )
 
 
 def test_revision_race_matches_legacy_twice_and_leaves_latest_draft_authoritative(
@@ -1133,11 +1176,6 @@ def test_complete_request_stops_at_await_without_interrupt_pending_or_cursor(
     )
 
     path = _stream_path(graph, graph_input, fixture.context)
-    result = graph.prepare(graph_input, context=fixture.context)
-    replay = graph.prepare(graph_input, context=fixture.context)
-    result.finalize_success()
-    replay.finalize_success()
-
     assert path == [
         "hydrate_authoritative_snapshot",
         "route_intent",
@@ -1147,12 +1185,20 @@ def test_complete_request_stops_at_await_without_interrupt_pending_or_cursor(
         "persist_draft_cas",
         "validate_draft",
         "await_requester_confirmation",
-        "finalize_public_outcome",
     ]
-    assert result.turn.business_status == "awaiting_confirmation"
-    assert normalized_outcome(replay.turn) == normalized_outcome(result.turn)
+    with pytest.raises(ConfirmationInterruptRaised) as raised:
+        graph.prepare(graph_input, context=fixture.context)
+    payload = raised.value.payload
+    assert payload["kind"] == "confirmation"
+    assert payload["draft_revision"] == 1
     assert model.calls == 1
-    assert result.turn.draft.confirmed is False
+    with database_session_factory() as session:
+        workspace = session.get(WorkspaceRecord, fixture.workspace_id)
+        assert workspace is not None
+        assert workspace.draft is not None
+        assert workspace.draft["confirmed"] is False
+    # The graph itself must not create pending/Cursor: those belong to the
+    # caller's fenced interrupt finalize transaction (T34 AC2).
     assert (
         fixture.workspace_service.get(
             fixture.token,
@@ -1160,6 +1206,15 @@ def test_complete_request_stops_at_await_without_interrupt_pending_or_cursor(
         ).active_cursor()
         is None
     )
+    with database_session_factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(AgentPendingInputRecord)
+                .where(AgentPendingInputRecord.workspace_id == fixture.workspace_id)
+            )
+            == 0
+        )
 
 
 def test_long_justification_is_authoritative_in_workspace_not_step_reference(
@@ -1179,12 +1234,17 @@ def test_long_justification_is_authoritative_in_workspace_not_step_reference(
     )
     graph = build_production_graph(checkpointer=False)
 
-    first = graph.invoke(graph_input, context=fixture.context)
-    replay = graph.invoke(graph_input, context=fixture.context)
-
-    assert normalized_outcome(replay) == normalized_outcome(first)
-    assert first.draft.justification == justification
+    for _ in range(2):
+        with pytest.raises(ConfirmationInterruptRaised) as raised:
+            graph.invoke(graph_input, context=fixture.context)
+        assert raised.value.payload["kind"] == "confirmation"
+        assert raised.value.payload["draft_revision"] == 1
     assert model.calls == 1
+    with database_session_factory() as session:
+        workspace = session.get(WorkspaceRecord, fixture.workspace_id)
+        assert workspace is not None
+        assert workspace.draft is not None
+        assert workspace.draft["justification"] == justification
     with database_session_factory() as session:
         references = session.scalars(
             select(AgentStepExecutionRecord.result_reference).where(
