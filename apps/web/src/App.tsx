@@ -22,6 +22,7 @@ import {
   resetAuthClientState,
 } from './api'
 import { AccessCards } from './AccessCards'
+import { AgentTrajectory } from './AgentTrajectory'
 import { ChatThread } from './ChatThread'
 import { ConfirmationSummary } from './ConfirmationSummary'
 import { DraftCard } from './DraftCard'
@@ -138,6 +139,7 @@ function WorkbenchPage({ onLogout }: { onLogout: () => Promise<void> }) {
   const approvalRole = approvalRoleFor(workbench.identity)
   const [showOperations, setShowOperations] = useState(false)
   const [activeView, setActiveView] = useState<'assistant' | 'access' | 'policy' | 'request'>('assistant')
+  const [assistantView, setAssistantView] = useState<'conversation' | 'trajectory'>('conversation')
   const [logoutBusy, setLogoutBusy] = useState(false)
   const [logoutError, setLogoutError] = useState<string | null>(null)
   const [isConfirming, setIsConfirming] = useState(false)
@@ -270,6 +272,30 @@ function WorkbenchPage({ onLogout }: { onLogout: () => Promise<void> }) {
                 <p>由 FastAPI、PostgreSQL 与安全事件回放驱动</p>
               </div>
             </div>
+            <div className="assistant-view-tabs" role="tablist" aria-label="助手视图切换">
+              <button
+                id="conversation-tab"
+                type="button"
+                role="tab"
+                aria-selected={assistantView === 'conversation'}
+                aria-controls="conversation-panel"
+                className={assistantView === 'conversation' ? 'is-active' : ''}
+                onClick={() => setAssistantView('conversation')}
+              >
+                对话
+              </button>
+              <button
+                id="trajectory-tab"
+                type="button"
+                role="tab"
+                aria-selected={assistantView === 'trajectory'}
+                aria-controls="trajectory-panel"
+                className={assistantView === 'trajectory' ? 'is-active' : ''}
+                onClick={() => setAssistantView('trajectory')}
+              >
+                轨迹
+              </button>
+            </div>
           </div>
 
           {workbench.error ? (
@@ -278,17 +304,35 @@ function WorkbenchPage({ onLogout }: { onLogout: () => Promise<void> }) {
               <span>{workbench.error}</span>
             </div>
           ) : null}
-          <ChatThread
-            confirmation={(
-              <ConfirmationSummary
-                identity={workbench.identity}
-                draft={workbench.draft}
-                entitlementName={entitlementName}
-                isBusy={isRunning || isConfirming}
-                onConfirm={confirm}
+          {assistantView === 'conversation' ? (
+            <div
+              className="assistant-view-panel conversation-view-panel"
+              id="conversation-panel"
+              role="tabpanel"
+              aria-labelledby="conversation-tab"
+            >
+              <ChatThread
+                confirmation={(
+                  <ConfirmationSummary
+                    identity={workbench.identity}
+                    draft={workbench.draft}
+                    entitlementName={entitlementName}
+                    isBusy={isRunning || isConfirming}
+                    onConfirm={confirm}
+                  />
+                )}
               />
-            )}
-          />
+            </div>
+          ) : (
+            <div
+              className="assistant-view-panel trajectory-view-panel"
+              id="trajectory-panel"
+              role="tabpanel"
+              aria-labelledby="trajectory-tab"
+            >
+              <AgentTrajectory events={workbench.events} />
+            </div>
+          )}
         </section>
 
         <aside className="right-rail" aria-label="申请状态">

@@ -30,8 +30,16 @@ vi.mock('./ChatThread', () => ({
     confirmation?: ReactElement<{ onConfirm: () => void }>
   }) => {
     appMocks.chatConfirm = confirmation?.props.onConfirm ?? null
-    return confirmation ?? null
+    return (
+      <>
+        <div>对话视图内容</div>
+        {confirmation ?? null}
+      </>
+    )
   },
+}))
+vi.mock('./AgentTrajectory', () => ({
+  AgentTrajectory: () => <div>轨迹视图内容</div>,
 }))
 vi.mock('./AccessCards', () => ({ AccessCards: () => null }))
 vi.mock('./DraftCard', () => ({
@@ -135,6 +143,22 @@ describe('application confirmation facts', () => {
 })
 
 describe('App authentication state machine', () => {
+  it('switches between conversation and the read-only trajectory at the assistant header', async () => {
+    vi.stubGlobal('fetch', authenticatedFetch())
+
+    render(<App />)
+
+    const trajectoryTab = await screen.findByRole('tab', { name: '轨迹' })
+    expect(screen.getByRole('tab', { name: '对话' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByText('对话视图内容')).toBeInTheDocument()
+
+    act(() => trajectoryTab.click())
+
+    expect(trajectoryTab).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByText('轨迹视图内容')).toBeInTheDocument()
+    expect(screen.queryByText('对话视图内容')).not.toBeInTheDocument()
+  })
+
   it('allows only one same-frame explicit confirmation across both confirmation buttons', async () => {
     appMocks.draft = {
       employee_id: 'EMP-003',
