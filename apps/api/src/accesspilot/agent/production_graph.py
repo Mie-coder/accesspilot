@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Hashable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, NotRequired, TypedDict, cast
 from uuid import UUID
 
@@ -73,7 +74,11 @@ from accesspilot.conversation import (
     missing_field_question,
     normalize_request_candidate,
 )
-from accesspilot.db.models import AgentPendingInputRecord, EntitlementRecord
+from accesspilot.db.models import (
+    AgentPendingInputRecord,
+    AuthSessionRecord,
+    EntitlementRecord,
+)
 from accesspilot.domain.models import ConversationCursor, ParsedReply, RequestDraft
 from accesspilot.events import ModelQuota, get_model_quota
 from accesspilot.tools.catalog import ToolResult, validate_access_request
@@ -275,6 +280,7 @@ PRODUCTION_CONDITIONAL_PATHS: dict[str, dict[Hashable, str]] = {
     "rehydrate_resume_snapshot": {
         "confirm": "apply_confirmation_cas",
         "non_confirm_input": "route_intent",
+        "conflict": "compose_recoverable_answer",
     },
     "apply_confirmation_cas": {
         "success": "ready_to_submit",
@@ -1741,7 +1747,11 @@ def _rehydrate_resume_snapshot(
     The checkpoint's derived fields belong to the previous input; only the
     server-side pending/Cursor/workspace facts may decide the resume outcome.
     Any Principal/Session/pending/Cursor/revision mismatch closes safely with a
-    recoverable conflict instead of confirming a stale draft.
+    recoverable conflict instead of confirming a stale draft.  The revision
+    check compares the authoritative Workspace revision against the revision
+    recorded on the pending row (the interrupt-time committed revision), not
+    the stale checkpoint base: the collection turn itself may have advanced
+    the revision before interrupting.
     """
     snapshot = _read_authoritative_snapshot(
         state.workspace_ref,
@@ -1762,6 +1772,7 @@ def _rehydrate_resume_snapshot(
         raise GraphRuntimeContractError(
             "graph execution binding failed"
         ) from None
+    now = datetime.now(UTC)
     with session_factory() as session:
         pending = session.scalar(
             select(AgentPendingInputRecord).where(
@@ -1770,15 +1781,31 @@ def _rehydrate_resume_snapshot(
                 AgentPendingInputRecord.status.in_(("active", "resuming")),
             )
         )
+        # The AuthSession must still be valid for this Workspace/actor:
+        # a revoked or expired session only closes safely, it never reads
+        # results or confirms (Spec §6.2).
+        auth = session.scalar(
+            select(AuthSessionRecord).where(
+                AuthSessionRecord.id == auth_session_ref,
+                AuthSessionRecord.workspace_id == state.workspace_ref,
+                AuthSessionRecord.employee_id == principal.employee_id,
+                AuthSessionRecord.revoked_at.is_(None),
+                AuthSessionRecord.expires_at > now,
+            )
+        )
     cursor = snapshot.cursor
     if (
         pending is None
+        or auth is None
         or pending.auth_session_ref != auth_session_ref
         or pending.actor_id != principal.employee_id
         or cursor is None
         or cursor.expected_field != "confirmation"
         or cursor.auth_session_id != auth_session_id
-        or snapshot.workspace.draft_revision != state.base_draft_revision
+        # The authoritative revision must equal the interrupt-time committed
+        # revision recorded on the pending row; the checkpoint base may be
+        # older because the collection turn itself advanced the revision.
+        or snapshot.workspace.draft_revision != pending.draft_revision
     ):
         return _confirmation_conflict_update(state, runtime)
     confirmed = _explicit_confirmation_from_text(state.safe_user_text)
@@ -1907,6 +1934,14 @@ def _route_draft_validation(state: GraphState) -> str:
 
 
 def _route_resume(state: GraphState) -> str:
+    if (
+        state.recoverable_error is not None
+        or state.phase == "recoverable_error"
+        or state.business_status == "recoverable_error"
+    ):
+        # Rehydration closed safely (revoked/expired session, pending/Cursor/
+        # revision mismatch): never continue into business branches.
+        return "conflict"
     return "confirm" if state.selected_route == "resume_confirm" else "non_confirm_input"
 
 

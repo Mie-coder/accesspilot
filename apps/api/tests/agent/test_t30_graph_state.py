@@ -100,6 +100,7 @@ EXPECTED_CONDITIONAL_PATHS = {
     "rehydrate_resume_snapshot": {
         "confirm": "apply_confirmation_cas",
         "non_confirm_input": "route_intent",
+        "conflict": "compose_recoverable_answer",
     },
     "apply_confirmation_cas": {
         "success": "ready_to_submit",

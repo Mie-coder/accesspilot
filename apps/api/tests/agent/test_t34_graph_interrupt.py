@@ -87,6 +87,8 @@ def _t34_graph_fixture(
     expected_field: str | None = None,
     pending_input_id: UUID | None = None,
     pending: bool = False,
+    revoke_auth: bool = False,
+    pending_draft_revision: int | None = None,
 ) -> T34GraphFixture:
     token = f"t34-graph-{uuid4()}"
     graph_run_id = uuid4()
@@ -152,6 +154,10 @@ def _t34_graph_fixture(
                 checkpoint_ns="",
             )
         )
+        if revoke_auth:
+            auth = session.get(AuthSessionRecord, auth_session_id)
+            assert auth is not None
+            auth.revoked_at = datetime.now(UTC)
         if pending:
             session.add(
                 AgentPendingInputRecord(
@@ -162,7 +168,11 @@ def _t34_graph_fixture(
                     checkpoint_thread_id=f"accesspilot:v1.3:{graph_run_id}",
                     pending_input_id=pending_id,
                     kind="confirmation",
-                    draft_revision=1 if draft is not None else 0,
+                    draft_revision=(
+                        pending_draft_revision
+                        if pending_draft_revision is not None
+                        else (1 if draft is not None else 0)
+                    ),
                     auth_session_ref=auth_session_id,
                     actor_id="EMP-001",
                     engine="langgraph",
@@ -480,11 +490,13 @@ def test_resume_field_edit_reachieves_interrupt_without_confirming(
             confirmed=False,
         ),
         pending=True,
+        pending_draft_revision=2,
     )
     graph = build_production_graph(checkpointer=InMemorySaver())
     config = _config_for(fixture.graph_input.graph_run_id)
     with pytest.raises(ConfirmationInterruptRaised):
         graph.invoke(_with_request_text(fixture), config, context=fixture.context)
+    _restore_confirmation_cursor(database_session_factory, fixture)
 
     path = _stream_path(
         graph,
@@ -544,3 +556,97 @@ def test_resume_explicit_rejection_is_not_a_confirmation(
         assert workspace is not None
         assert workspace.draft["confirmed"] is False  # type: ignore[index]
         assert workspace.draft_revision == 1
+
+
+def _restore_confirmation_cursor(
+    factory: sessionmaker[Session],
+    fixture: T34GraphFixture,
+) -> None:
+    """Simulate the caller's fenced finalize transaction: after the graph's
+    collection turn persisted a draft change, the confirmation Cursor is
+    re-projected (the graph itself never writes Cursor columns)."""
+    with factory() as session:
+        workspace = session.get(WorkspaceRecord, fixture.workspace_id)
+        assert workspace is not None
+        workspace.cursor_actor_id = "EMP-001"
+        workspace.cursor_auth_session_id = fixture.context["auth_session_id"]
+        workspace.cursor_expected_field = "confirmation"
+        workspace.cursor_last_question_kind = "confirmation"
+        workspace.cursor_issued_at = datetime.now(UTC)
+        workspace.cursor_consumed_at = None
+        session.commit()
+
+
+def test_resume_confirm_after_same_turn_collection_advances_revision(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    """P1-1 graph-level: no prior draft (revision 0); the collection turn
+    persists revision 1 before interrupting, and confirm must succeed."""
+    fixture = _t34_graph_fixture(
+        database_session_factory,
+        model=StaticReplyModel(_complete_reply()),
+        pending=True,
+        pending_draft_revision=1,
+    )
+    graph = build_production_graph(checkpointer=InMemorySaver())
+    config = _config_for(fixture.graph_input.graph_run_id)
+    with pytest.raises(ConfirmationInterruptRaised) as raised:
+        graph.invoke(_with_request_text(fixture), config, context=fixture.context)
+    assert raised.value.payload["draft_revision"] == 1
+    _restore_confirmation_cursor(database_session_factory, fixture)
+
+    path = _stream_path(
+        graph,
+        Command(resume={"decision": "confirm", "safe_user_text": "确认提交"}),
+        fixture.context,
+        config,
+    )
+    assert "apply_confirmation_cas" in path
+    assert "compose_recoverable_answer" not in path
+    final_state = graph.get_state(config)
+    assert final_state.values["business_status"] == "ready_to_submit"
+    with database_session_factory() as session:
+        workspace = session.get(WorkspaceRecord, fixture.workspace_id)
+        assert workspace is not None
+        assert workspace.draft["confirmed"] is True  # type: ignore[index]
+        assert workspace.draft_revision == 2
+
+
+def test_resume_revoked_session_routes_conflict_without_business_branch(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    """P1-2 graph-level: a revoked AuthSession at resume time closes through
+    the recoverable branch; the business route is never entered."""
+    fixture = _t34_graph_fixture(
+        database_session_factory,
+        model=StaticReplyModel(_complete_reply()),
+        draft=_complete_draft(),
+        pending=True,
+    )
+    graph = build_production_graph(checkpointer=InMemorySaver())
+    config = _config_for(fixture.graph_input.graph_run_id)
+    with pytest.raises(ConfirmationInterruptRaised):
+        graph.invoke(_with_request_text(fixture), config, context=fixture.context)
+    # Revoke the session between the interrupt and the resume call.
+    with database_session_factory() as session:
+        auth = session.scalar(select(AuthSessionRecord).where(
+            AuthSessionRecord.workspace_id == fixture.workspace_id
+        ))
+        assert auth is not None
+        auth.revoked_at = datetime.now(UTC)
+        session.commit()
+
+    path = _stream_path(
+        graph,
+        Command(resume={"decision": "route_new_input", "safe_user_text": "查一下政策"}),
+        fixture.context,
+        config,
+    )
+    assert path[0] == "await_requester_confirmation"
+    assert path[1] == "rehydrate_resume_snapshot"
+    assert "compose_recoverable_answer" in path
+    assert "route_intent" not in path
+    assert "retrieve_policy_pgvector" not in path
+    final_state = graph.get_state(config)
+    assert final_state.values["business_status"] == "recoverable_error"
+    assert final_state.values["recoverable_error"].code == "CONFIRMATION_CONFLICT"
