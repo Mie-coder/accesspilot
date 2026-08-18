@@ -1533,7 +1533,9 @@ def test_reinterrupt_finalize_after_session_revoked_closes_safely() -> None:
             workspace = session.get(WorkspaceRecord, workspace_id)
             assert workspace is not None
             assert workspace.cursor_consumed_at is not None
-            assert workspace.cursor_expected_field is not None or True
+            # The route_new_input field CAS already cleared the Cursor fields;
+            # the safe close must never re-arm a confirmation Cursor.
+            assert workspace.cursor_expected_field is None
             assert workspace.draft is not None
             assert workspace.draft["confirmed"] is False
         runtime.close()
