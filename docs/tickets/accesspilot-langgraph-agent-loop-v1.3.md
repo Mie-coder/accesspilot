@@ -1,7 +1,7 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Tickets
 
-**状态：** 用户已确认串行实施；T26–T33 `Verified`，T34 `In progress`（服务原语已实现，图接入待完成），T35–T42 尚未开始；未授权推送、合并、部署或修改正式简历
-**更新时间：** 2026-08-17
+**状态：** 用户已确认串行实施；T26–T33 `Verified`，T34 `Implemented`（图接入、恢复语义与定向/回归测试已落地，待独立验收），T35–T42 尚未开始；未授权推送、合并、部署或修改正式简历
+**更新时间：** 2026-08-18
 **继承基线：** AccessPilot v1.2，`product_verified=true`；T32 实现基线 HEAD `7ad8a01`，历史证据不自动证明 v1.3
 **Canonical Spec：** `docs/specs/accesspilot-langgraph-agent-loop-v1.3.md`
 **双评审裁决：** `docs/reviews/accesspilot-v1.3-spec-review-decisions-2026-08-16.md`
@@ -216,7 +216,7 @@
 
 ## T34 — 申请人确认 Interrupt/Resume 与原子投影
 
-**状态：** `In progress`（服务原语已实现，图接入待完成）；`agent.input.required` 事件、`finalize_interrupt`/`begin_resume`/`confirm_draft` 原语与 3 项服务测试已落地；尚未完成生产图 interrupt/resume 接线与独立复核
+**状态：** `Implemented`（图接入完成，待独立验收）；`agent.input.required` 事件、`finalize_interrupt`/`begin_resume`/`confirm_draft` 原语与 3 项服务测试已落地；生产图已接入真实 `interrupt()`/单次 `Command(resume)`，`rehydrate_resume_snapshot`/`apply_confirmation_cas` 已实现，`finalize_resume_outcome` 与 pending 原子替换已落地；T34 定向 12 项（图级 5 + 真实隔离 PG 7）、完整 API 685 项通过；验收证据见 [T34 验收证据包](../evidence/accesspilot-v1.3-t34-acceptance-2026-08-18.md)；尚未独立只读复核，未标记 `Verified`
 
 **目标：** 在图内完成唯一 P0 业务 interrupt，关闭 terminal/Cursor 窗口，并保证 resume 中的新输入不丢失。
 
@@ -416,4 +416,4 @@
 
 - T26–T40 分层建立 AC-01–AC-12；T41 在同一 revision 汇总判定 AC-01–AC-13；T42 单独完成 AC-14；
 - 数据库、checkpoint、Graph State、JSON、SSE、UI 和证据按依赖串行，不并发修改共享权威源；
-- **当前停点：T34 `In progress`，继续完成图接入与验收。** 仍不推送、合并、部署或修改正式简历。
+- **当前停点：T34 `Implemented`，等待独立只读验收；通过后标记 `Verified` 再进入 T35。** 仍不推送、合并、部署或修改正式简历。

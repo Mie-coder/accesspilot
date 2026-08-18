@@ -15,6 +15,7 @@ from langgraph.constants import END, START
 from langgraph.graph import StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
+from langgraph.types import Command, interrupt
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -25,6 +26,7 @@ from pydantic import (
     ValidationError,
     field_validator,
 )
+from sqlalchemy import select
 
 from accesspilot.agent.routing import (
     ConversationIntent,
@@ -51,6 +53,8 @@ from accesspilot.agent.state import (
 from accesspilot.agent.step_operations import (
     AgentStepContext,
     AgentStepOperationService,
+    StepExecutionRejected,
+    StepOperationConflict,
 )
 from accesspilot.agent.structured_reply import (
     CORRECTION_PROMPT,
@@ -59,6 +63,7 @@ from accesspilot.agent.structured_reply import (
 from accesspilot.auth import Principal
 from accesspilot.conversation import (
     SECURITY_MESSAGE,
+    _explicit_confirmation_from_text,
     compose_tool_answer,
     entitlement_resolution_message,
     is_obvious_question,
@@ -68,7 +73,7 @@ from accesspilot.conversation import (
     missing_field_question,
     normalize_request_candidate,
 )
-from accesspilot.db.models import EntitlementRecord
+from accesspilot.db.models import AgentPendingInputRecord, EntitlementRecord
 from accesspilot.domain.models import ConversationCursor, ParsedReply, RequestDraft
 from accesspilot.events import ModelQuota, get_model_quota
 from accesspilot.tools.catalog import ToolResult, validate_access_request
@@ -213,6 +218,8 @@ class GraphRuntimeContext(TypedDict):
     cookie: str
     csrf_token: str
     api_key: str
+    pending_input_id: NotRequired[str]
+    current_input_seq: NotRequired[int]
     _invocation_facts: NotRequired[_InvocationFacts]
 
 
@@ -268,6 +275,10 @@ PRODUCTION_CONDITIONAL_PATHS: dict[str, dict[Hashable, str]] = {
     "rehydrate_resume_snapshot": {
         "confirm": "apply_confirmation_cas",
         "non_confirm_input": "route_intent",
+    },
+    "apply_confirmation_cas": {
+        "success": "ready_to_submit",
+        "conflict": "compose_recoverable_answer",
     },
 }
 
@@ -362,8 +373,6 @@ REPRESENTATIVE_PATHS = {
         "persist_draft_cas",
         "validate_draft",
         "await_requester_confirmation",
-        "finalize_public_outcome",
-        END,
     ),
 }
 
@@ -375,6 +384,19 @@ ValidatedStateNode = Callable[[GraphState, Runtime[GraphRuntimeContext]], GraphS
 
 class UnsafeGraphStateUpdateError(RuntimeError):
     """A node returned data outside the durable state contract."""
+
+
+class ConfirmationInterruptRaised(RuntimeError):
+    """The graph stopped at the confirmation interrupt.
+
+    Carries the plain JSON interrupt value; the caller must verify the exact
+    candidate checkpoint and persist pending/Cursor/terminal atomically before
+    any resume may proceed.
+    """
+
+    def __init__(self, payload: dict[str, object]) -> None:
+        super().__init__("graph stopped at the confirmation interrupt")
+        self.payload = payload
 
 
 class GraphRuntimeContractError(RuntimeError):
@@ -1618,16 +1640,217 @@ def _ask_missing_field(
 def _await_requester_confirmation(
     state: GraphState,
     runtime: Runtime[GraphRuntimeContext],
-) -> StateUpdate:
-    del runtime
-    message = "申请信息已完整。请明确回复“确认提交”后再创建正式申请。"
-    if state.security_flagged:
-        message = f"{SECURITY_MESSAGE}\n\n{message}"
-    return {
-        "assistant_message": message,
-        "business_status": "awaiting_confirmation",
-        "phase": "awaiting_confirmation",
+) -> Command[Any]:
+    """T34: the single P0 dynamic confirmation interrupt.
+
+    This node itself performs no business writes: no pending row, no Cursor, no
+    quota, no model/tool calls and no formal request creation.  The caller
+    pre-allocates ``pending_input_id`` into the runtime context so the interrupt
+    payload (which must be plain JSON data) can reference it; the fenced
+    application transaction that persists the pending projection runs later in
+    the caller.
+
+    On resume the node re-runs and ``interrupt()`` returns the value of the
+    single ``Command(resume=...)``; the node then routes to rehydration instead
+    of ending the graph, so the new input is processed inside this same call.
+    """
+    if state.pending_input_id is None:
+        raw = runtime.context.get("pending_input_id")
+        if not isinstance(raw, str):
+            raise GraphRuntimeContractError("confirmation pending id is unavailable")
+        try:
+            pending_input_id = UUID(raw)
+        except ValueError:
+            raise GraphRuntimeContractError(
+                "confirmation pending id is unavailable"
+            ) from None
+    else:
+        pending_input_id = state.pending_input_id
+    draft_revision = state.committed_draft_revision
+    if draft_revision is None:
+        draft_revision = state.base_draft_revision
+    payload: dict[str, object] = {
+        "kind": "confirmation",
+        "pending_input_id": str(pending_input_id),
+        "draft_revision": draft_revision,
+        "summary": "申请信息已完整。请明确回复“确认提交”后再创建正式申请。",
+        "allowed_decisions": ["confirm", "route_new_input"],
     }
+    resume_value = interrupt(payload)
+    if not isinstance(resume_value, dict):
+        raise GraphRuntimeContractError("confirmation resume payload is invalid")
+    decision = resume_value.get("decision")
+    safe_user_text = resume_value.get("safe_user_text")
+    if not isinstance(safe_user_text, str) or not safe_user_text.strip():
+        raise GraphRuntimeContractError("confirmation resume input is empty")
+    selected_route = (
+        "resume_confirm" if decision == "confirm" else "resume_new_input"
+    )
+    resume_update: dict[str, object] = {
+        "selected_route": selected_route,
+        "safe_user_text": safe_user_text,
+        "pending_input_id": pending_input_id,
+        "pending_input_kind": "confirmation",
+    }
+    # The resume turn owns a new HTTP turn/input_seq (allocated by the
+    # accept-resume transaction); refresh the durable state so downstream
+    # step facts belong to the current execution, not the first input.
+    current_turn = runtime.context.get("current_turn_id")
+    if isinstance(current_turn, str) and current_turn:
+        resume_update["input_turn_id"] = current_turn
+    current_seq = runtime.context.get("current_input_seq")
+    if type(current_seq) is int and current_seq >= 0:
+        resume_update["input_seq"] = current_seq
+    update = validate_state_update(state, resume_update)
+    return Command(
+        update=update.model_dump(mode="python"),
+        goto="rehydrate_resume_snapshot",
+    )
+
+
+def _confirmation_conflict_update(
+    state: GraphState,
+    runtime: Runtime[GraphRuntimeContext],
+) -> StateUpdate:
+    """Stable recoverable close for any confirmation binding mismatch."""
+    snapshot = _read_authoritative_snapshot(
+        state.workspace_ref,
+        runtime,
+        include_quota=False,
+    )
+    message = "确认状态已变化，请核对当前申请信息后重新确认。"
+    return {
+        "committed_draft_revision": snapshot.workspace.draft_revision,
+        "missing_fields": cast(list[MissingField], snapshot.draft.missing_fields()),
+        "assistant_message": message,
+        "business_status": "recoverable_error",
+        "phase": "recoverable_error",
+        "recoverable_error": {
+            "code": "CONFIRMATION_CONFLICT",
+            "message": message,
+        },
+    }
+
+
+def _rehydrate_resume_snapshot(
+    state: GraphState,
+    runtime: Runtime[GraphRuntimeContext],
+) -> StateUpdate:
+    """T34: re-authorize and re-read authoritative facts after every resume.
+
+    The checkpoint's derived fields belong to the previous input; only the
+    server-side pending/Cursor/workspace facts may decide the resume outcome.
+    Any Principal/Session/pending/Cursor/revision mismatch closes safely with a
+    recoverable conflict instead of confirming a stale draft.
+    """
+    snapshot = _read_authoritative_snapshot(
+        state.workspace_ref,
+        runtime,
+        include_quota=False,
+    )
+    session_factory = _context_value(runtime, "session_factory")
+    auth_session_id = _context_value(runtime, "auth_session_id")
+    principal = _context_value(runtime, "principal")
+    if not callable(session_factory) or not isinstance(principal, Principal):
+        raise GraphRuntimeContractError("database service is unavailable")
+    pending_input_id = state.pending_input_id
+    if pending_input_id is None:
+        raise GraphRuntimeContractError("confirmation pending id is missing")
+    try:
+        auth_session_ref = UUID(str(auth_session_id))
+    except ValueError:
+        raise GraphRuntimeContractError(
+            "graph execution binding failed"
+        ) from None
+    with session_factory() as session:
+        pending = session.scalar(
+            select(AgentPendingInputRecord).where(
+                AgentPendingInputRecord.workspace_id == state.workspace_ref,
+                AgentPendingInputRecord.pending_input_id == pending_input_id,
+                AgentPendingInputRecord.status.in_(("active", "resuming")),
+            )
+        )
+    cursor = snapshot.cursor
+    if (
+        pending is None
+        or pending.auth_session_ref != auth_session_ref
+        or pending.actor_id != principal.employee_id
+        or cursor is None
+        or cursor.expected_field != "confirmation"
+        or cursor.auth_session_id != auth_session_id
+        or snapshot.workspace.draft_revision != state.base_draft_revision
+    ):
+        return _confirmation_conflict_update(state, runtime)
+    confirmed = _explicit_confirmation_from_text(state.safe_user_text)
+    return {
+        "selected_route": (
+            "resume_confirm" if confirmed is True else "resume_new_input"
+        ),
+        "base_draft_revision": snapshot.workspace.draft_revision,
+        "committed_draft_revision": None,
+        "draft_patch": _draft_patch(snapshot.draft),
+        "missing_fields": cast(list[MissingField], snapshot.draft.missing_fields()),
+        "phase": "routing",
+        "tool_name": None,
+        "safe_tool_result": None,
+        "policy_status": None,
+        "policy_evidence_codes": [],
+        "policy_match_count": 0,
+        "business_status": "pending",
+        "assistant_message": None,
+        "recoverable_error": None,
+    }
+
+
+def _apply_confirmation_cas(
+    state: GraphState,
+    runtime: Runtime[GraphRuntimeContext],
+) -> StateUpdate:
+    """T34: the one confirmation CAS, keyed by the stable pending_input_id.
+
+    Only the existing confirmation function (checked in rehydration) reaches
+    this node; the CAS service is idempotent across HTTP retries and closes
+    safely on revision/pending mismatches.
+    """
+    if (
+        state.recoverable_error is not None
+        or state.business_status == "recoverable_error"
+    ):
+        return {}
+    if state.pending_input_id is None:
+        raise GraphRuntimeContractError("confirmation pending id is missing")
+    service = _step_service(runtime)
+    context = _step_context(state, runtime)
+    workspace_token = _context_value(runtime, "workspace_token")
+    if not isinstance(workspace_token, str):
+        raise GraphRuntimeContractError("workspace binding is unavailable")
+    try:
+        completed = service.confirm_draft(
+            context,
+            workspace_token=workspace_token,
+            pending_input_id=state.pending_input_id,
+            expected_revision=state.base_draft_revision,
+        )
+    except (DraftRevisionConflictError, StepExecutionRejected, StepOperationConflict):
+        return _confirmation_conflict_update(state, runtime)
+    return {
+        "committed_draft_revision": completed.committed_revision,
+        "business_status": "ready_to_submit",
+        "phase": "ready_to_submit",
+        "assistant_message": "已确认。申请草稿已就绪，可以提交正式申请。",
+        "tool_name": None,
+        "safe_tool_result": None,
+    }
+
+
+def _route_confirmation_result(state: GraphState) -> str:
+    if (
+        state.recoverable_error is not None
+        or state.phase == "recoverable_error"
+        or state.business_status == "recoverable_error"
+    ):
+        return "conflict"
+    return "success"
 
 
 def _finalize_public_outcome(
@@ -1758,7 +1981,8 @@ def _compile_production_graph(
         "persist_draft_cas": _persist_draft_cas,
         "validate_draft": _validate_draft,
         "ask_missing_field": _ask_missing_field,
-        "await_requester_confirmation": _await_requester_confirmation,
+        "rehydrate_resume_snapshot": _rehydrate_resume_snapshot,
+        "apply_confirmation_cas": _apply_confirmation_cas,
         "finalize_public_outcome": _finalize_public_outcome,
     }
     for node_name in PRODUCTION_NODE_NAMES:
@@ -1766,6 +1990,7 @@ def _compile_production_graph(
             "hydrate_authoritative_snapshot",
             "route_intent",
             "compose_safe_answer",
+            "await_requester_confirmation",
         }:
             continue
         builder.add_node(
@@ -1775,6 +2000,13 @@ def _compile_production_graph(
                 validated_state_node(implemented_nodes.get(node_name, _passthrough_stub)),
             ),
         )
+    # The confirmation interrupt node is registered unwrapped: on first run it
+    # stops the graph via interrupt() (no business write), on resume it returns
+    # Command(update, goto=rehydrate) whose update is validated inside the node.
+    builder.add_node(
+        "await_requester_confirmation",
+        cast(Any, _await_requester_confirmation),
+    )
 
     builder.add_edge(START, "hydrate_authoritative_snapshot")
     builder.add_edge("hydrate_authoritative_snapshot", "route_intent")
@@ -1804,15 +2036,19 @@ def _compile_production_graph(
         _route_draft_validation,
         PRODUCTION_CONDITIONAL_PATHS["validate_draft"],
     )
-    # T32 stops safely at the confirmation boundary. T34 will replace this
-    # direct terminal edge with interrupt/pending resume semantics.
-    builder.add_edge("await_requester_confirmation", "finalize_public_outcome")
+    # T34: the confirmation interrupt node has no static outgoing edge; the
+    # graph stops at interrupt() and resume re-enters the node, which routes to
+    # rehydrate_resume_snapshot via Command(goto=...).
     builder.add_conditional_edges(
         "rehydrate_resume_snapshot",
         _route_resume,
         PRODUCTION_CONDITIONAL_PATHS["rehydrate_resume_snapshot"],
     )
-    builder.add_edge("apply_confirmation_cas", "ready_to_submit")
+    builder.add_conditional_edges(
+        "apply_confirmation_cas",
+        _route_confirmation_result,
+        PRODUCTION_CONDITIONAL_PATHS["apply_confirmation_cas"],
+    )
     for node_name in (
         "compose_safe_answer",
         "handle_numeric_followup",
@@ -1847,30 +2083,82 @@ class ProductionGraph:
         prepared["_invocation_facts"] = invocation
         return cast(GraphRuntimeContext, prepared), invocation
 
+    @staticmethod
+    def _interrupt_payload(result: object) -> dict[str, object] | None:
+        """Extract the confirmation interrupt value from a stopped run result.
+
+        LangGraph 1.2.11 keeps the dynamic interrupt inside the returned state
+        as ``__interrupt__`` (a tuple/list of Interrupt objects) instead of
+        raising; the value must be plain JSON-serializable data.
+        """
+        if not isinstance(result, dict):
+            return None
+        interrupts = result.get("__interrupt__")
+        if not interrupts:
+            return None
+        value = interrupts[0].value
+        if not isinstance(value, dict):
+            raise GraphRuntimeContractError("confirmation interrupt payload is invalid")
+        return value
+
     def invoke(
         self,
-        graph_input: GraphInput | Mapping[str, object],
+        graph_input: GraphInput | Command[Any] | Mapping[str, object],
         config: RunnableConfig | None = None,
         *,
         context: GraphRuntimeContext,
         **kwargs: Any,
     ) -> GraphOutput:
-        """Validate raw input before the compiled graph can call its checkpointer."""
+        """Validate raw input before the compiled graph can call its checkpointer.
 
-        validated_input = GraphInput.model_validate(graph_input)
+        ``Command(resume=...)`` inputs bypass the GraphInput contract: their
+        authoritative input facts were already persisted by the accept-resume
+        application transaction, and the graph continues from the exact
+        checkpoint seeded into the execution.  When the graph stops at the
+        confirmation interrupt the caller receives
+        :class:`ConfirmationInterruptRaised` carrying the plain JSON payload.
+        """
+        is_resume = isinstance(graph_input, Command)
+        if is_resume:
+            validated_input: GraphInput | None = None
+            resume_command = graph_input
+        else:
+            validated_input = GraphInput.model_validate(graph_input)
+            resume_command = None
         prepared_context, invocation = self._prepare_context(context)
+        invoke_input = cast(
+            GraphInput | Command[Any] | None,
+            resume_command if is_resume else validated_input,
+        )
         result = cast(
             Any,
             self.compiled.invoke(
-                validated_input,
+                invoke_input,
                 config,
                 context=prepared_context,
                 **kwargs,
             ),
         )
+        payload = self._interrupt_payload(result)
+        if payload is not None:
+            raise ConfirmationInterruptRaised(payload)
         node_output = _GraphNodeOutput.model_validate(result)
+        if is_resume:
+            # Resume continues from the seeded checkpoint; its durable state
+            # carries the workspace reference (GraphInput was not re-supplied).
+            if config is None:
+                raise GraphRuntimeContractError("resume requires an exact config")
+            resumed = self.compiled.get_state(config)
+            workspace_ref = resumed.values.get("workspace_ref")
+            if not isinstance(workspace_ref, UUID):
+                raise GraphRuntimeContractError(
+                    "resume state lacks the workspace reference"
+                )
+        else:
+            assert validated_input is not None
+            workspace_ref = validated_input.workspace_ref
         snapshot = _read_authoritative_snapshot(
-            validated_input.workspace_ref,
+            workspace_ref,
             Runtime(context=prepared_context),
             include_quota=True,
         )
@@ -1952,22 +2240,43 @@ class ProductionGraph:
 
     def stream(
         self,
-        graph_input: GraphInput | Mapping[str, object],
+        graph_input: GraphInput | Command[Any] | Mapping[str, object],
         config: RunnableConfig | None = None,
         *,
         context: GraphRuntimeContext,
         **kwargs: Any,
     ) -> Iterator[object]:
-        """Preflight input, then expose the compiled graph's real stream."""
+        """Preflight input, then expose the compiled graph's real stream.
 
-        validated_input = GraphInput.model_validate(graph_input)
+        ``Command(resume=...)`` inputs bypass the GraphInput contract exactly
+        like :meth:`invoke`; the graph continues from the seeded checkpoint.
+        """
+
+        is_resume = isinstance(graph_input, Command)
+        validated_input = (
+            None if is_resume else GraphInput.model_validate(graph_input)
+        )
         prepared_context, _ = self._prepare_context(context)
+        stream_input = cast(
+            GraphInput | Command[Any] | None,
+            graph_input if is_resume else validated_input,
+        )
         yield from self.compiled.stream(
-            validated_input,
+            stream_input,
             config,
             context=prepared_context,
             **kwargs,
         )
+
+    def get_state(
+        self,
+        config: RunnableConfig,
+        *,
+        subgraphs: bool = False,
+    ) -> Any:
+        """Expose the compiled graph's exact state for a given locator."""
+
+        return self.compiled.get_state(config, subgraphs=subgraphs)
 
 
 def build_production_graph(*, checkpointer: Checkpointer) -> ProductionGraph:

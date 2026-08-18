@@ -101,6 +101,10 @@ EXPECTED_CONDITIONAL_PATHS = {
         "confirm": "apply_confirmation_cas",
         "non_confirm_input": "route_intent",
     },
+    "apply_confirmation_cas": {
+        "success": "ready_to_submit",
+        "conflict": "compose_recoverable_answer",
+    },
 }
 
 EXPECTED_UNCONDITIONAL_EDGES = {
@@ -112,7 +116,10 @@ EXPECTED_UNCONDITIONAL_EDGES = {
     ("resolve_entitlement", "merge_candidate"),
     ("merge_candidate", "persist_draft_cas"),
     ("persist_draft_cas", "validate_draft"),
-    ("await_requester_confirmation", "finalize_public_outcome"),
+    # T34: the confirmation interrupt node has no static outgoing edge; resume
+    # re-enters it and routes via Command(goto=rehydrate_resume_snapshot).
+    # LangGraph renders the node's implicit terminal edge to END.
+    ("await_requester_confirmation", "__end__"),
     ("compose_safe_answer", "finalize_public_outcome"),
     ("handle_numeric_followup", "finalize_public_outcome"),
     ("compose_grounded_answer", "finalize_public_outcome"),
@@ -473,6 +480,7 @@ def test_production_graph_has_exact_nodes_condition_maps_and_representative_path
         "parse_request_patch": EXPECTED_CONDITIONAL_PATHS["request_needs_entitlement_resolution"],
         "validate_draft": EXPECTED_CONDITIONAL_PATHS["validate_draft"],
         "rehydrate_resume_snapshot": EXPECTED_CONDITIONAL_PATHS["rehydrate_resume_snapshot"],
+        "apply_confirmation_cas": EXPECTED_CONDITIONAL_PATHS["apply_confirmation_cas"],
     }
     actual_edges = {(edge["source"], edge["target"]) for edge in rendered["edges"]}
     for path in REPRESENTATIVE_PATHS.values():
