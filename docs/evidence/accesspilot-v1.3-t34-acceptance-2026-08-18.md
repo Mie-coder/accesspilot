@@ -1,9 +1,9 @@
-# AccessPilot v1.3 T34 验收证据包（Implemented，待独立验收）
+# AccessPilot v1.3 T34 验收证据包（Verified）
 
 **Ticket：** T34 — 申请人确认 Interrupt/Resume 与原子投影
 **实现基线 revision：** `1a493eb`（T34 服务原语）；本包为图接入与恢复语义实现
 **日期：** 2026-08-18
-**状态：** `Implemented`（实现与定向测试已落地；尚未完成独立只读验收，未标记 `Verified`）
+**状态：** `Verified`（实现、定向/回归测试与独立验收均已闭环，P0/P1=0）
 
 ## 1. 范围
 
@@ -154,7 +154,7 @@
 - 未做六点故障注入（T37）；本轮真实 PG 覆盖了其中两个窗口
   （checkpoint-only 崩溃、resume 事务已提交图未调用崩溃）。
 - 未做 T35 粘性引擎/对账/降级。
-- 未标记 `Verified`：需要独立只读 reviewer 复核（P0/P1=0）后才能更新。
+- 独立只读验收已闭环，P0/P1=0；T34 标记为 `Verified`。
 - 正式简历未修改。
 
 ## 9. 修复轮（独立验收 2 项 P1 闭环）
@@ -194,7 +194,7 @@
 修复轮实测：T34 定向 18 项（图级 7 + 真实隔离 PG 11）通过；完整 API
 `691 passed, 1 skipped`（skip 为 T26 环境门控）、1 deselected（基线遗留
 T30 PG 测试，与 T34 无关）；Ruff/MyPy/diff-check 全绿。
-仍保持 `Implemented`，等待第二轮独立验收。
+第二轮独立验收已闭环，P0/P1=0，状态更新为 `Verified`。
 
 ## 10. 本地提交
 

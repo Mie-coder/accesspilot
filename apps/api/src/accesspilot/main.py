@@ -40,6 +40,7 @@ from accesspilot.agent.embeddings import (
     DeterministicEmbeddingModel,
     EmbeddingModel,
 )
+from accesspilot.agent.engine_binding import allocate_flow_version
 from accesspilot.agent.structured_reply import StructuredReplyModel
 from accesspilot.approvals import (
     ApprovalActorMismatchError,
@@ -313,7 +314,16 @@ def create_app(
     if store is None:
         # 实际启动时默认用 PostgreSQL，所以 API 重启不会丢失 Workspace。
         # 测试需要纯内存存储时，会通过 store= 显式注入。
-        store = SqlAlchemyWorkspaceStore(active_session_factory)
+        # T35: 新 Workspace 的 flow 绑定来自服务端配置 (legacy/mixed/
+        # langgraph + canary)，在创建事务内一次性写入；客户端无法覆盖。
+        store = SqlAlchemyWorkspaceStore(
+            active_session_factory,
+            flow_allocator=lambda agent_thread_id: allocate_flow_version(
+                agent_thread_id,
+                mode=active_settings.orchestrator_mode,
+                canary_percent=active_settings.langgraph_canary_percent,
+            ),
+        )
     if embedding_model is None:
         if active_settings.dashscope_api_key is None:
             embedding_model = DeterministicEmbeddingModel()

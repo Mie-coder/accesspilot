@@ -431,9 +431,29 @@ class TurnExecutionService:
             ):
                 raise TurnLeaseActiveError("lease has not expired")
 
+            # T35: any accepted head that an abandoned_* retirement tombstone
+            # references exactly is retired and must never be rehydrated.  The
+            # exclusion covers all three recovery sources uniformly: the
+            # current execution, historical executions of the same run, and
+            # the pending fallback.
+            tombstoned_heads = set(
+                session.scalars(
+                    select(AgentPendingInputRecord.accepted_checkpoint_id)
+                    .where(
+                        AgentPendingInputRecord.workspace_id == workspace_id,
+                        AgentPendingInputRecord.accepted_checkpoint_id.is_not(None),
+                        AgentPendingInputRecord.status.in_(
+                            ("abandoned_to_legacy", "abandoned_conflict")
+                        ),
+                    )
+                )
+            )
+
             accepted = execution.accepted_checkpoint_id
+            if accepted is not None and accepted in tombstoned_heads:
+                accepted = None
             if accepted is None:
-                historical = session.scalar(
+                historical_query = (
                     select(AgentTurnExecutionRecord.accepted_checkpoint_id)
                     .where(
                         AgentTurnExecutionRecord.workspace_id == workspace_id,
@@ -446,6 +466,13 @@ class TurnExecutionService:
                     )
                     .limit(1)
                 )
+                if tombstoned_heads:
+                    historical_query = historical_query.where(
+                        AgentTurnExecutionRecord.accepted_checkpoint_id.not_in(
+                            tombstoned_heads
+                        )
+                    )
+                historical = session.scalar(historical_query)
                 if historical is not None:
                     accepted = historical
                 else:
@@ -455,6 +482,12 @@ class TurnExecutionService:
                             AgentPendingInputRecord.workspace_id == workspace_id,
                             AgentPendingInputRecord.graph_run_id == graph_run_id,
                             AgentPendingInputRecord.accepted_checkpoint_id.is_not(None),
+                            # T35: abandoned_* retirement tombstones are
+                            # immutable and never resume; a tombstoned head is
+                            # deliberately excluded from rehydration sources.
+                            AgentPendingInputRecord.status.notin_(
+                                ("abandoned_to_legacy", "abandoned_conflict")
+                            ),
                         )
                         .order_by(AgentPendingInputRecord.created_at.desc())
                         .limit(1)

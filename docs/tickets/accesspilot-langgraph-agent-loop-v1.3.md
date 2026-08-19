@@ -1,7 +1,7 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Tickets
 
-**状态：** 用户已确认串行实施；T26–T33 `Verified`，T34 `Implemented`（图接入、恢复语义与定向/回归测试已落地，待独立验收），T35–T42 尚未开始；未授权推送、合并、部署或修改正式简历
-**更新时间：** 2026-08-18
+**状态：** 用户已确认串行实施；T26–T35 `Verified`，T36–T42 尚未开始；未授权推送、合并、部署或修改正式简历
+**更新时间：** 2026-08-19
 **继承基线：** AccessPilot v1.2，`product_verified=true`；T32 实现基线 HEAD `7ad8a01`，历史证据不自动证明 v1.3
 **Canonical Spec：** `docs/specs/accesspilot-langgraph-agent-loop-v1.3.md`
 **双评审裁决：** `docs/reviews/accesspilot-v1.3-spec-review-decisions-2026-08-16.md`
@@ -216,7 +216,7 @@
 
 ## T34 — 申请人确认 Interrupt/Resume 与原子投影
 
-**状态：** `Implemented`（图接入完成，待独立验收）；`agent.input.required` 事件、`finalize_interrupt`/`begin_resume`/`confirm_draft` 原语与 3 项服务测试已落地；生产图已接入真实 `interrupt()`/单次 `Command(resume)`，`rehydrate_resume_snapshot`/`apply_confirmation_cas` 已实现，`finalize_resume_outcome` 与 pending 原子替换已落地；T34 定向 12 项（图级 5 + 真实隔离 PG 7）、完整 API 685 项通过；验收证据见 [T34 验收证据包](../evidence/accesspilot-v1.3-t34-acceptance-2026-08-18.md)；尚未独立只读复核，未标记 `Verified`
+**状态：** `Verified`；图接入、恢复语义、定向/回归测试与独立验收均已闭环，P0/P1=0；验收证据见 [T34 验收证据包](../evidence/accesspilot-v1.3-t34-acceptance-2026-08-18.md)
 
 **目标：** 在图内完成唯一 P0 业务 interrupt，关闭 terminal/Cursor 窗口，并保证 resume 中的新输入不丢失。
 
@@ -238,7 +238,58 @@
 
 ## T35 — Workspace Sticky Engine、Pending 对账与 Legacy 降级桥
 
-**状态：** 尚未开始
+**状态：** `Verified`；第 2 轮独立验收已批准，R01–R05 全部关闭，P0/P1=0
+
+**T35 实现摘要（2026-08-19）：**
+
+- `agent/engine_binding.py`：服务端 flow 分配（legacy/mixed/langgraph + 稳定
+  `agent_thread_id` SHA-256 分桶）、固定解析顺序
+  running execution → active/resuming pending → Workspace flow、不一致固定
+  `409 ENGINE_BINDING_CONFLICT`、DB 版 `WorkspaceEngineResolver`；
+- `agent/rollback.py`：精确三元 head 的 `CheckpointTaskReader`、全局/限定
+  Workspace 的 `PublishPreflightGate`（live pending=0、unfinished
+  execution=0、live accepted checkpoint task=0 且 retained task 全可分类）、
+  `LegacyRollbackBridge`（clean confirmation → `abandoned_to_legacy` + 保留
+  Cursor；Principal/revision 不匹配 → `abandoned_conflict` + 清 Cursor；无
+  pending → flow 1；缺失/不可读/未知 kind/孤立 head → 阻断零写入；dry run
+  只报告不写入）；
+- `config.py` 强制 mixed canary 在 T38/T40 双入口门禁前保持 0；
+- `workspace_store.py`/`main.py`：新 Workspace 在创建事务内由服务端绑定
+  `agent_thread_id + flow_version`，默认入口继续 Legacy；
+- `turn_execution.py`：takeover 的 current/historical/pending 三类恢复源统一
+  排除被 `abandoned_*` tombstone 精确引用的 head。
+
+**第 2 轮独立评审修复（R01–R05，2026-08-19）：**
+
+- R01 原子性：`LegacyRollbackBridge` 的 plan/execute 现在持有与
+  `begin_input`/`begin_resume`/`takeover` 相同的 agent-thread advisory
+  lock，并在锁内按 Workspace 行锁 → pending 行锁顺序重新读取全部事实后
+  才写（execution 只读，避免与 takeover 的 execution→workspace 顺序死
+  锁）；新增真实 PostgreSQL 顺序竞态（resume 先提交 → rollback 因
+  unfinished/resuming 阻断；rollback 先提交 → resume 因 tombstone 失败）
+  与并发双启动顺序测试，任一交错都不产生新输入丢失、running execution +
+  flow 1 或部分写；
+- R02 门禁 fail-closed：resolved 状态本身不再放行 retained interrupt
+  task；只有同一 run 存在 resume_input_seq 对应的终态 execution、其
+  accepted head 前进到不同且无 interrupt 的 END head（可证明 supersession）
+  才通过，否则 preflight 与 rollback 均阻断；报告新增
+  `superseded_task_count`，并用真实 T34 成功 resume 链覆盖；
+- R03 多 interrupt：reader 读取 exact head 的全部 `__interrupt__`
+  writes，数量不是 0 或 1 即阻断；新增 first valid + second unknown 反证
+  测试（preflight 与 rollback 均零写阻断）；
+- R04 tombstone 永不 resume：takeover 的 current/historical/pending 三类
+  恢复源统一排除 tombstone head；新增双 execution 结构回归（agent 级 +
+  真实 PG）；
+- R05 Cursor 绑定：仅当 actor、auth session、expected field、question
+  kind 与 active 状态全部匹配已验证 pending 时才 kept，否则原子改写为正确
+  confirmation Cursor；新增错误 actor/session/kind 回归。
+
+**定向/回归验证：** Pi 本轮报告完整 API 756 项通过、3 项历史环境门控跳过；
+Codex 第 2 轮独立实测 T35 定向 64 项（含 8 项隔离真实 PostgreSQL
+回滚/门禁/竞态证明）与受影响 T28/T33/T34/Conversation/Workspace 回归
+168 项全部通过、均无跳过；Ruff、MyPy（55 个源码文件）和
+`git diff --check` 通过。默认生产/本地入口仍为 Legacy，未切真实 flow 2
+canary。
 
 **目标：** 在切流前建立不可被 endpoint 分裂的 Workspace 引擎绑定、发布对账和无业务反向同步的降级路径。
 
@@ -416,4 +467,4 @@
 
 - T26–T40 分层建立 AC-01–AC-12；T41 在同一 revision 汇总判定 AC-01–AC-13；T42 单独完成 AC-14；
 - 数据库、checkpoint、Graph State、JSON、SSE、UI 和证据按依赖串行，不并发修改共享权威源；
-- **当前停点：T34 `Implemented`，等待独立只读验收；通过后标记 `Verified` 再进入 T35。** 仍不推送、合并、部署或修改正式简历。
+- **当前停点：T35 `Verified`；尚未获准进入 T36。** 仍不推送、合并、部署或修改正式简历。

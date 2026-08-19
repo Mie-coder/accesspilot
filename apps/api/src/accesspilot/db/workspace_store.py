@@ -1,7 +1,9 @@
 """将领域层 Workspace 保存到 PostgreSQL 的存储适配器。"""
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from hashlib import sha256
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -17,12 +19,27 @@ def hash_workspace_token(token: str) -> str:
     return sha256(token.encode("utf-8")).hexdigest()
 
 
+def _legacy_flow_allocator(agent_thread_id: UUID) -> int:
+    """默认分配器：新 Workspace 永远绑定 Legacy flow 1。"""
+
+    del agent_thread_id
+    return 1
+
+
 class SqlAlchemyWorkspaceStore:
     """使用 PostgreSQL 保存 Workspace，但不承担创建或重置等业务规则。"""
 
-    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        *,
+        flow_allocator: Callable[[UUID], int] | None = None,
+    ) -> None:
         # Session 工厂可以按需创建独立数据库会话。
         self._session_factory = session_factory
+        # T35: 新 Workspace 的 server-side flow 分配器；默认永远 flow 1
+        # (Legacy)，与“默认生产/本地入口继续 legacy”一致。
+        self._flow_allocator = flow_allocator or _legacy_flow_allocator
 
     def get(self, token: str) -> Workspace | None:
         """根据 Token 获取 Workspace，并将数据库记录还原为领域对象。"""
@@ -95,10 +112,15 @@ class SqlAlchemyWorkspaceStore:
             )
 
             if record is None:
-                # 第一次保存：创建一条新的数据库记录。
+                # 第一次保存：创建一条新的数据库记录。agent_thread_id 与
+                # flow_version 在同一创建事务内由服务端一次性生成和绑定，
+                # 客户端永远无法覆盖或指定它们。
+                agent_thread_id = uuid4()
                 session.add(
                     WorkspaceRecord(
                         token_hash=token_hash,
+                        agent_thread_id=agent_thread_id,
+                        flow_version=self._flow_allocator(agent_thread_id),
                         actor_id=workspace.actor_id,
                         demo_actor_id=workspace.demo_actor_id,
                         demo_session_active=workspace.demo_session_active,
