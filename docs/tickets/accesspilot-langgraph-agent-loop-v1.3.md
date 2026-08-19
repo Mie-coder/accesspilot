@@ -1,6 +1,6 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Tickets
 
-**状态：** 用户已确认串行实施；T26–T35 `Verified`，T36–T42 尚未开始；未授权推送、合并、部署或修改正式简历
+**状态：** 用户已确认串行实施；T26–T35 `Verified`，T36–T42 尚未开始；T35 已提交并推送，未授权合并、部署或修改正式简历
 **更新时间：** 2026-08-19
 **继承基线：** AccessPilot v1.2，`product_verified=true`；T32 实现基线 HEAD `7ad8a01`，历史证据不自动证明 v1.3
 **Canonical Spec：** `docs/specs/accesspilot-langgraph-agent-loop-v1.3.md`
@@ -467,4 +467,4 @@ canary。
 
 - T26–T40 分层建立 AC-01–AC-12；T41 在同一 revision 汇总判定 AC-01–AC-13；T42 单独完成 AC-14；
 - 数据库、checkpoint、Graph State、JSON、SSE、UI 和证据按依赖串行，不并发修改共享权威源；
-- **当前停点：T35 `Verified`；尚未获准进入 T36。** 仍不推送、合并、部署或修改正式简历。
+- **当前停点：T35 `Verified`，提交 `8ef9e36` 已推送；尚未获准进入 T36。** 仍不合并、部署或修改正式简历。
