@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from accesspilot.db.models import WorkspaceEventRecord, WorkspaceRecord
@@ -43,6 +43,98 @@ class TurnStartedPayload(BaseModel):
 
     turn_id: str = Field(min_length=1, max_length=120)
     lease_expires_at: datetime | None = None
+    # T36 §8.1：LangGraph 入口额外记录最终解析引擎与版本；Legacy 保持 v1.2。
+    orchestrator: str | None = Field(default=None, min_length=1, max_length=40)
+    flow_version: int | None = Field(default=None, ge=1, le=2)
+    graph_version: str | None = Field(default=None, min_length=1, max_length=60)
+
+
+class NodeStartedPayload(BaseModel):
+    """真实 LangGraph 节点开始事实。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str = Field(min_length=1, max_length=120)
+    step_id: str = Field(min_length=1, max_length=64)
+    node_code: str = Field(min_length=1, max_length=80)
+    public_label: str = Field(min_length=1, max_length=100)
+    status: Literal["running"] = "running"
+
+
+class NodeCompletedPayload(BaseModel):
+    """真实 LangGraph 节点完成事实；status 只表达成功/失败，无异常细节。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str = Field(min_length=1, max_length=120)
+    step_id: str = Field(min_length=1, max_length=64)
+    node_code: str = Field(min_length=1, max_length=80)
+    public_label: str = Field(min_length=1, max_length=100)
+    status: Literal["success", "error"]
+
+
+class RouteSelectedPayload(BaseModel):
+    """意图路由器选出的单一分支。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str = Field(min_length=1, max_length=120)
+    step_id: str = Field(min_length=1, max_length=64)
+    route_code: str = Field(min_length=1, max_length=80)
+
+
+class ModelStartedPayload(BaseModel):
+    """真实模型调用开始事实；attempt 从 1 开始。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str = Field(min_length=1, max_length=120)
+    step_id: str = Field(min_length=1, max_length=64)
+    operation: str = Field(min_length=1, max_length=80)
+    provider_mode: Literal["mock", "api"]
+    attempt: int = Field(ge=1, le=9)
+
+
+class ModelCompletedPayload(ModelStartedPayload):
+    """模型调用完成事实；extracted_fields 只含字段名，不含原始输出。"""
+
+    status: Literal["parsed", "malformed", "unavailable"]
+    extracted_fields: list[str] = Field(default_factory=list, max_length=8)
+
+
+class RetrievalStartedPayload(BaseModel):
+    """pgvector 政策检索开始事实。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str = Field(min_length=1, max_length=120)
+    step_id: str = Field(min_length=1, max_length=64)
+    retriever: Literal["pgvector"] = "pgvector"
+
+
+class RetrievalCompletedPayload(BaseModel):
+    """pgvector 政策检索完成事实；只含证据编码与数量，不含向量。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str = Field(min_length=1, max_length=120)
+    step_id: str = Field(min_length=1, max_length=64)
+    retriever: Literal["pgvector"] = "pgvector"
+    status: Literal["grounded", "insufficient", "unavailable"]
+    match_count: int = Field(ge=0, le=100)
+    evidence_codes: list[str] = Field(default_factory=list, max_length=8)
+
+
+class AgentInputResumedPayload(BaseModel):
+    """申请人确认输入恢复事实。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str = Field(min_length=1, max_length=120)
+    step_id: str = Field(min_length=1, max_length=64)
+    pending_input_id: str = Field(min_length=1, max_length=160)
+    kind: Literal["confirmation"] = "confirmation"
+    decision: Literal["confirm", "route_new_input"]
 
 
 class IntentDetectedPayload(BaseModel):
@@ -72,12 +164,16 @@ class ToolStartedPayload(BaseModel):
     turn_id: str = Field(min_length=1, max_length=120)
     tool: str = Field(min_length=1, max_length=100)
     tool_call_id: str = Field(min_length=1, max_length=120)
+    # T36 §8.1：LangGraph 入口新增步骤身份；Legacy 保持 v1.2 合同。
+    step_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class ToolCompletedPayload(ToolSummaryPayload):
     """只读工具完成事实。"""
 
     tool_call_id: str = Field(min_length=1, max_length=120)
+    # T36 §8.1：LangGraph 入口新增步骤身份；Legacy 保持 v1.2 合同。
+    step_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class DraftUpdatedPayload(BaseModel):
@@ -155,6 +251,8 @@ class AgentInputRequiredPayload(BaseModel):
     kind: Literal["confirmation"] = "confirmation"
     draft_revision: int = Field(ge=0)
     turn_id: str = Field(min_length=1, max_length=120)
+    # T36 §8.1：LangGraph 入口新增步骤身份；Legacy 保持 v1.2 合同。
+    step_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 SAFE_EVENT_MODELS: dict[str, type[BaseModel]] = {
@@ -172,6 +270,14 @@ SAFE_EVENT_MODELS: dict[str, type[BaseModel]] = {
     "message.completed": MessageCompletedPayload,
     "turn.interrupted": TurnInterruptedPayload,
     "agent.input.required": AgentInputRequiredPayload,
+    "agent.input.resumed": AgentInputResumedPayload,
+    "agent.node.started": NodeStartedPayload,
+    "agent.node.completed": NodeCompletedPayload,
+    "agent.route.selected": RouteSelectedPayload,
+    "model.started": ModelStartedPayload,
+    "model.completed": ModelCompletedPayload,
+    "retrieval.started": RetrievalStartedPayload,
+    "retrieval.completed": RetrievalCompletedPayload,
 }
 
 TERMINAL_EVENT_TYPES = frozenset(
@@ -501,6 +607,86 @@ def format_sse_event(event: WorkspaceEventRecord) -> str:
         separators=(",", ":"),
     )
     return f"id: {event.id}\nevent: {event.event_type}\ndata: {data}\n\n"
+
+
+class PublicEventProjection(BaseModel):
+    """浏览器可见事件 envelope：只有全局 ID、类型、安全 payload 与发生时间。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    event_type: str
+    payload: dict[str, Any]
+    occurred_at: datetime
+
+
+class PublicTurnProjection(BaseModel):
+    """一轮对话的全部可读事件；按全局数据库事件 ID 组内升序。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str
+    events: list[PublicEventProjection]
+
+
+def list_recent_turns(
+    session: Session,
+    *,
+    workspace_token: str,
+    max_turns: int = 3,
+) -> list[PublicTurnProjection]:
+    """按全局事件 ID 选择/排序最近几轮，只返回通过安全 Schema 的投影。
+
+    Unknown/Legacy 事件安全降级：无法通过对应 Schema 校验的原始 payload
+    绝不返回；事件没有 turn_id 的事实不属于任何一轮，直接忽略。
+    """
+
+    if type(max_turns) is not int or not 1 <= max_turns <= 20:
+        raise ValueError("max_turns must be an integer between 1 and 20")
+    workspace = _load_workspace(session, workspace_token)
+    turn_column = WorkspaceEventRecord.payload["turn_id"].astext
+    rows = session.execute(
+        select(turn_column.label("turn_id"), func.max(WorkspaceEventRecord.id).label("max_id"))
+        .where(
+            WorkspaceEventRecord.workspace_id == workspace.id,
+            turn_column.is_not(None),
+        )
+        .group_by(turn_column)
+        .order_by(func.max(WorkspaceEventRecord.id).desc())
+        .limit(max_turns)
+    ).all()
+    projections: list[PublicTurnProjection] = []
+    for row in rows:
+        turn_id = row.turn_id
+        if not isinstance(turn_id, str) or not turn_id:
+            continue
+        records = session.scalars(
+            select(WorkspaceEventRecord)
+            .where(
+                WorkspaceEventRecord.workspace_id == workspace.id,
+                WorkspaceEventRecord.payload["turn_id"].astext == turn_id,
+            )
+            .order_by(WorkspaceEventRecord.id)
+        ).all()
+        safe_events: list[PublicEventProjection] = []
+        for record in records:
+            try:
+                safe_payload = validate_event_payload(record.event_type, record.payload)
+            except UnsafeEventError:
+                continue
+            safe_events.append(
+                PublicEventProjection(
+                    id=record.id,
+                    event_type=record.event_type,
+                    payload=safe_payload,
+                    occurred_at=record.created_at,
+                )
+            )
+        if safe_events:
+            projections.append(
+                PublicTurnProjection(turn_id=turn_id, events=safe_events)
+            )
+    return projections
 
 
 def _quota(workspace: WorkspaceRecord) -> ModelQuota:

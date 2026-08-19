@@ -31,7 +31,18 @@ from accesspilot.agent.checkpoint import (
     SaverLike,
     VerifiedCheckpointCandidate,
 )
+from accesspilot.agent.identity import (
+    event_key as identity_event_key,
+)
+from accesspilot.agent.identity import (
+    step_id as identity_step_id,
+)
 from accesspilot.agent.safety import redact_sensitive_content
+from accesspilot.agent.trace import (
+    INPUT_STEP_KEY,
+    LANGGRAPH_GRAPH_VERSION,
+    terminal_step_key,
+)
 from accesspilot.db.models import (
     AgentPendingInputRecord,
     AgentTurnExecutionRecord,
@@ -221,6 +232,10 @@ class TurnExecutionService:
                 payload={
                     "turn_id": input_turn_id,
                     "lease_expires_at": lease_expires_at,
+                    # T36：LangGraph 入口记录最终解析引擎与图版本。
+                    "orchestrator": "langgraph",
+                    "flow_version": workspace.flow_version,
+                    "graph_version": LANGGRAPH_GRAPH_VERSION,
                 },
             )
             user_message = stage_workspace_event(
@@ -574,6 +589,14 @@ class TurnExecutionService:
                 "terminal event turn_id does not match the execution turn"
             )
         status = self._TERMINAL_STATUS_BY_EVENT[event_type]
+        terminal_key = identity_event_key(
+            workspace_id=handle.workspace_id,
+            graph_run_id=handle.graph_run_id,
+            input_seq=handle.input_seq,
+            step_key=terminal_step_key(event_type),
+            lifecycle_phase="terminal",
+            ordinal=0,
+        )
         session = lock.session
         with session.begin():
             execution = session.scalar(
@@ -613,6 +636,7 @@ class TurnExecutionService:
             terminal = WorkspaceEventRecord(
                 workspace_id=handle.workspace_id,
                 event_type=event_type,
+                event_key=terminal_key,
                 payload=safe_payload,
             )
             session.add(terminal)
@@ -733,6 +757,14 @@ class TurnExecutionService:
                     terminal = WorkspaceEventRecord(
                         workspace_id=handle.workspace_id,
                         event_type="error.recoverable",
+                        event_key=identity_event_key(
+                            workspace_id=handle.workspace_id,
+                            graph_run_id=handle.graph_run_id,
+                            input_seq=handle.input_seq,
+                            step_key=terminal_step_key("error.recoverable"),
+                            lifecycle_phase="terminal",
+                            ordinal=0,
+                        ),
                         payload=safe_payload,
                     )
                     session.add(terminal)
@@ -788,6 +820,13 @@ class TurnExecutionService:
                     "kind": "confirmation",
                     "draft_revision": draft_revision,
                     "turn_id": handle.input_turn_id,
+                    # T36：真实中断边界携带确定性步骤身份。
+                    "step_id": identity_step_id(
+                        workspace_id=handle.workspace_id,
+                        graph_run_id=handle.graph_run_id,
+                        input_seq=handle.input_seq,
+                        step_key=INPUT_STEP_KEY,
+                    ),
                 },
             )
             status_payload = validate_event_payload(
@@ -811,6 +850,14 @@ class TurnExecutionService:
             required_event = WorkspaceEventRecord(
                 workspace_id=handle.workspace_id,
                 event_type="agent.input.required",
+                event_key=identity_event_key(
+                    workspace_id=handle.workspace_id,
+                    graph_run_id=handle.graph_run_id,
+                    input_seq=handle.input_seq,
+                    step_key=INPUT_STEP_KEY,
+                    lifecycle_phase="required",
+                    ordinal=0,
+                ),
                 payload=required_payload,
             )
             status_event = WorkspaceEventRecord(
@@ -821,6 +868,14 @@ class TurnExecutionService:
             completed_event = WorkspaceEventRecord(
                 workspace_id=handle.workspace_id,
                 event_type="message.completed",
+                event_key=identity_event_key(
+                    workspace_id=handle.workspace_id,
+                    graph_run_id=handle.graph_run_id,
+                    input_seq=handle.input_seq,
+                    step_key=terminal_step_key("message.completed"),
+                    lifecycle_phase="terminal",
+                    ordinal=0,
+                ),
                 payload=completed_payload,
             )
             session.add_all([required_event, status_event, completed_event])
@@ -937,6 +992,14 @@ class TurnExecutionService:
             terminal = WorkspaceEventRecord(
                 workspace_id=handle.workspace_id,
                 event_type=event_type,
+                event_key=identity_event_key(
+                    workspace_id=handle.workspace_id,
+                    graph_run_id=handle.graph_run_id,
+                    input_seq=handle.input_seq,
+                    step_key=terminal_step_key(event_type),
+                    lifecycle_phase="terminal",
+                    ordinal=0,
+                ),
                 payload=safe_payload,
             )
             session.add(terminal)
@@ -1034,6 +1097,10 @@ class TurnExecutionService:
                 payload={
                     "turn_id": input_turn_id,
                     "lease_expires_at": lease_expires_at,
+                    # T36：LangGraph 入口记录最终解析引擎与图版本。
+                    "orchestrator": "langgraph",
+                    "flow_version": workspace.flow_version,
+                    "graph_version": LANGGRAPH_GRAPH_VERSION,
                 },
             )
             user_message = stage_workspace_event(

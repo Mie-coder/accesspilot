@@ -29,6 +29,7 @@ from pydantic import (
 )
 from sqlalchemy import select
 
+from accesspilot.agent.deepseek import DeepSeekStructuredReplyModel
 from accesspilot.agent.routing import (
     ConversationIntent,
     IntentRoute,
@@ -60,6 +61,11 @@ from accesspilot.agent.step_operations import (
 from accesspilot.agent.structured_reply import (
     CORRECTION_PROMPT,
     MalformedStructuredOutputError,
+)
+from accesspilot.agent.trace import (
+    DRAFT_CAS_STEP_KEY,
+    NUMERIC_DRAFT_STEP_KEY,
+    GraphTraceRecorder,
 )
 from accesspilot.auth import Principal
 from accesspilot.conversation import (
@@ -181,6 +187,7 @@ class _InvocationFacts:
     tool_result: ToolResult | None = None
     policy_answer: PolicyAnswer | None = None
     error_code: str | None = None
+    trace: GraphTraceRecorder | None = None
 
 
 @dataclass(frozen=True)
@@ -225,6 +232,8 @@ class GraphRuntimeContext(TypedDict):
     api_key: str
     pending_input_id: NotRequired[str]
     current_input_seq: NotRequired[int]
+    # T36：入口适配器在真实调用时显式启用轨迹记录；不改变图语义。
+    trace_enabled: NotRequired[bool]
     _invocation_facts: NotRequired[_InvocationFacts]
 
 
@@ -500,6 +509,142 @@ def validated_state_node(stub: StateStub) -> ValidatedStateNode:
     return validated
 
 
+def _optional_trace(
+    runtime: Runtime[GraphRuntimeContext],
+) -> GraphTraceRecorder | None:
+    facts = _optional_invocation_facts(runtime)
+    return facts.trace if facts is not None else None
+
+
+def _trace_turn_context(
+    state: GraphState,
+    runtime: Runtime[GraphRuntimeContext],
+) -> tuple[str, int]:
+    """轨迹坐标：优先当前执行（resume 轮），否则使用 checkpoint 中的输入事实。"""
+
+    turn_id = state.input_turn_id
+    input_seq = state.input_seq
+    raw_turn = runtime.context.get("current_turn_id")
+    raw_seq = runtime.context.get("current_input_seq")
+    if isinstance(raw_turn, str) and raw_turn:
+        turn_id = raw_turn
+    if type(raw_seq) is int and raw_seq >= 0:
+        input_seq = raw_seq
+    return turn_id, input_seq
+
+
+def _provider_mode(model: object) -> str:
+    """真实 Provider 边界只区分 api/mock 两种公开模式。"""
+
+    return "api" if isinstance(model, DeepSeekStructuredReplyModel) else "mock"
+
+
+def traced_validated_state_node(
+    stub: StateStub,
+    *,
+    node_code: str,
+) -> ValidatedStateNode:
+    """Validate and trace one real node execution boundary.
+
+    ``node_code`` is the registered production node name (the real graph
+    path); trace emission is a side channel that never changes graph
+    semantics, and a missing recorder degrades to the plain validated node.
+    """
+
+    validated = validated_state_node(stub)
+
+    def traced(
+        state: GraphState,
+        runtime: Runtime[GraphRuntimeContext],
+    ) -> GraphState:
+        trace = _optional_trace(runtime)
+        if trace is not None:
+            turn_id, input_seq = _trace_turn_context(state, runtime)
+            trace.node_started(
+                workspace_id=state.workspace_ref,
+                graph_run_id=state.graph_run_id,
+                input_seq=input_seq,
+                turn_id=turn_id,
+                node_code=node_code,
+            )
+        try:
+            result = validated(state, runtime)
+        except BaseException:
+            if trace is not None:
+                turn_id, input_seq = _trace_turn_context(state, runtime)
+                trace.node_completed(
+                    workspace_id=state.workspace_ref,
+                    graph_run_id=state.graph_run_id,
+                    input_seq=input_seq,
+                    turn_id=turn_id,
+                    node_code=node_code,
+                    status="error",
+                )
+            raise
+        if trace is not None:
+            turn_id, input_seq = _trace_turn_context(state, runtime)
+            trace.node_completed(
+                workspace_id=state.workspace_ref,
+                graph_run_id=state.graph_run_id,
+                input_seq=input_seq,
+                turn_id=turn_id,
+                node_code=node_code,
+                status="success",
+            )
+        return result
+
+    traced.__name__ = node_code
+    return traced
+
+
+def _traced_hydrate_node(
+    stub: Callable[[GraphInput, Runtime[GraphRuntimeContext]], GraphState],
+) -> Callable[[GraphInput, Runtime[GraphRuntimeContext]], GraphState]:
+    """Trace the GraphInput-seeded hydrate boundary before it can validate."""
+
+    node_code = "hydrate_authoritative_snapshot"
+
+    def traced(
+        graph_input: GraphInput,
+        runtime: Runtime[GraphRuntimeContext],
+    ) -> GraphState:
+        trace = _optional_trace(runtime)
+        if trace is not None:
+            trace.node_started(
+                workspace_id=graph_input.workspace_ref,
+                graph_run_id=graph_input.graph_run_id,
+                input_seq=graph_input.input_seq,
+                turn_id=graph_input.input_turn_id,
+                node_code=node_code,
+            )
+        try:
+            result = stub(graph_input, runtime)
+        except BaseException:
+            if trace is not None:
+                trace.node_completed(
+                    workspace_id=graph_input.workspace_ref,
+                    graph_run_id=graph_input.graph_run_id,
+                    input_seq=graph_input.input_seq,
+                    turn_id=graph_input.input_turn_id,
+                    node_code=node_code,
+                    status="error",
+                )
+            raise
+        if trace is not None:
+            trace.node_completed(
+                workspace_id=graph_input.workspace_ref,
+                graph_run_id=graph_input.graph_run_id,
+                input_seq=graph_input.input_seq,
+                turn_id=graph_input.input_turn_id,
+                node_code=node_code,
+                status="success",
+            )
+        return result
+
+    traced.__name__ = node_code
+    return traced
+
+
 def _context_value(
     runtime: Runtime[GraphRuntimeContext],
     key: str,
@@ -753,6 +898,16 @@ def _route_intent(
             security_flagged=decision.security_flagged,
             selected_route="request_access",
         )
+    trace = _optional_trace(runtime)
+    if trace is not None:
+        turn_id, input_seq = _trace_turn_context(state, runtime)
+        trace.route_selected(
+            workspace_id=state.workspace_ref,
+            graph_run_id=state.graph_run_id,
+            input_seq=input_seq,
+            turn_id=turn_id,
+            route_code=decision.selected_route,
+        )
     return {
         "intent": decision.intent,
         "security_flagged": decision.security_flagged,
@@ -806,6 +961,18 @@ def _call_model_attempt(
             attempt=attempt,
         )
     correction = CORRECTION_PROMPT if attempt == 2 else None
+    trace = _optional_trace(runtime)
+    turn_id, input_seq = _trace_turn_context(state, runtime)
+    if trace is not None:
+        trace.model_started(
+            workspace_id=state.workspace_ref,
+            graph_run_id=state.graph_run_id,
+            input_seq=input_seq,
+            turn_id=turn_id,
+            operation="parse_input",
+            provider_mode=_provider_mode(model),
+            attempt=attempt,
+        )
     try:
         raw_parsed = model.parse_reply(
             state.safe_user_text,
@@ -813,8 +980,32 @@ def _call_model_attempt(
         )
         parsed = ParsedReply.model_validate(raw_parsed)
     except (MalformedStructuredOutputError, ValidationError):
+        if trace is not None:
+            trace.model_completed(
+                workspace_id=state.workspace_ref,
+                graph_run_id=state.graph_run_id,
+                input_seq=input_seq,
+                turn_id=turn_id,
+                operation="parse_input",
+                provider_mode=_provider_mode(model),
+                attempt=attempt,
+                status="malformed",
+                extracted_fields=[],
+            )
         return "malformed", None
     except (httpx.HTTPError, TimeoutError):
+        if trace is not None:
+            trace.model_completed(
+                workspace_id=state.workspace_ref,
+                graph_run_id=state.graph_run_id,
+                input_seq=input_seq,
+                turn_id=turn_id,
+                operation="parse_input",
+                provider_mode=_provider_mode(model),
+                attempt=attempt,
+                status="unavailable",
+                extracted_fields=[],
+            )
         return "unavailable", None
     principal = _context_value(runtime, "principal")
     if not isinstance(principal, Principal):
@@ -827,6 +1018,23 @@ def _call_model_attempt(
     )
     # Confirmation is a T34 input decision, never a T32 model candidate.
     parsed = parsed.model_copy(update={"confirmed": None})
+    if trace is not None:
+        extracted_fields = [
+            field
+            for field in ("entitlement_id", "duration_days", "justification")
+            if getattr(parsed, field) is not None
+        ]
+        trace.model_completed(
+            workspace_id=state.workspace_ref,
+            graph_run_id=state.graph_run_id,
+            input_seq=input_seq,
+            turn_id=turn_id,
+            operation="parse_input",
+            provider_mode=_provider_mode(model),
+            attempt=attempt,
+            status="parsed",
+            extracted_fields=extracted_fields,
+        )
     return "parsed", parsed
 
 
@@ -991,6 +1199,16 @@ def _execute_read_tool(
         raise GraphRuntimeContractError("read-only services are unavailable")
     if not isinstance(policy_service, PolicyService):
         raise GraphRuntimeContractError("policy service is unavailable")
+    trace = _optional_trace(runtime)
+    turn_id, input_seq = _trace_turn_context(state, runtime)
+    if trace is not None:
+        trace.tool_started(
+            workspace_id=state.workspace_ref,
+            graph_run_id=state.graph_run_id,
+            input_seq=input_seq,
+            turn_id=turn_id,
+            tool=call.tool,
+        )
     with session_factory() as session:
         result = execute_read_only_tool(
             session,
@@ -1006,6 +1224,16 @@ def _execute_read_tool(
         IntentRoute(intent=state.intent, security_probe=state.security_flagged),
         result,
     )
+    if trace is not None:
+        trace.tool_completed(
+            workspace_id=state.workspace_ref,
+            graph_run_id=state.graph_run_id,
+            input_seq=input_seq,
+            turn_id=turn_id,
+            tool=call.tool,
+            status=cast(SafeToolStatus, result.status),
+            summary=summary,
+        )
     return {
         "safe_tool_result": _safe_tool_result(
             call,
@@ -1214,7 +1442,7 @@ def _handle_numeric_followup(
     if context is None:
         context = _step_context(state, runtime)
     try:
-        service.persist_numeric_duration(
+        completed = service.persist_numeric_duration(
             context,
             workspace_token=workspace_token,
             expected_revision=cursor.draft_revision,
@@ -1228,6 +1456,21 @@ def _handle_numeric_followup(
             business_status="needs_clarification",
             phase="collecting",
             error_code="CURSOR_STALE",
+        )
+    trace = _optional_trace(runtime)
+    if trace is not None:
+        turn_id, input_seq = _trace_turn_context(state, runtime)
+        missing = cast(list[MissingField], proposed.missing_fields())
+        trace.draft_updated(
+            workspace_id=state.workspace_ref,
+            graph_run_id=state.graph_run_id,
+            input_seq=input_seq,
+            turn_id=turn_id,
+            step_key=NUMERIC_DRAFT_STEP_KEY,
+            draft=proposed.model_dump(mode="json"),
+            missing_fields=missing,
+            can_enter_approval=not missing,
+            draft_revision=completed.committed_revision,
         )
     return _numeric_success_update(state, runtime)
 
@@ -1249,6 +1492,15 @@ def _retrieve_policy_pgvector(
     session_factory = _context_value(runtime, "session_factory")
     if not isinstance(policy_service, PolicyService) or not callable(session_factory):
         raise GraphRuntimeContractError("policy retrieval service is unavailable")
+    trace = _optional_trace(runtime)
+    turn_id, input_seq = _trace_turn_context(state, runtime)
+    if trace is not None:
+        trace.retrieval_started(
+            workspace_id=state.workspace_ref,
+            graph_run_id=state.graph_run_id,
+            input_seq=input_seq,
+            turn_id=turn_id,
+        )
     try:
         with session_factory() as session:
             answer = policy_service.query(session, state.safe_user_text)
@@ -1268,6 +1520,16 @@ def _retrieve_policy_pgvector(
         "insufficient_evidence": "insufficient",
         "retrieval_unavailable": "unavailable",
     }[answer.status]
+    if trace is not None:
+        trace.retrieval_completed(
+            workspace_id=state.workspace_ref,
+            graph_run_id=state.graph_run_id,
+            input_seq=input_seq,
+            turn_id=turn_id,
+            status=status,
+            match_count=len(evidence_codes),
+            evidence_codes=evidence_codes,
+        )
     summary = redact_sensitive_content(answer.answer.strip())
     return {
         "tool_name": "search_policies",
@@ -1398,6 +1660,16 @@ def _resolve_entitlement(
         tool="resolve_entitlement",
         query=state.draft_patch.entitlement_id,
     )
+    trace = _optional_trace(runtime)
+    turn_id, input_seq = _trace_turn_context(state, runtime)
+    if trace is not None:
+        trace.tool_started(
+            workspace_id=state.workspace_ref,
+            graph_run_id=state.graph_run_id,
+            input_seq=input_seq,
+            turn_id=turn_id,
+            tool=call.tool,
+        )
     try:
         with session_factory() as session:
             result = execute_read_only_tool(
@@ -1412,6 +1684,16 @@ def _resolve_entitlement(
         invocation.tool_call = call
         invocation.tool_result = result
     summary = entitlement_resolution_message(result)
+    if trace is not None:
+        trace.tool_completed(
+            workspace_id=state.workspace_ref,
+            graph_run_id=state.graph_run_id,
+            input_seq=input_seq,
+            turn_id=turn_id,
+            tool=call.tool,
+            status=cast(SafeToolStatus, result.status),
+            summary=summary,
+        )
     safe_result = _safe_tool_result(call, result, summary=summary)
     resolution = result.entitlement_resolution
     matched = (
@@ -1561,9 +1843,24 @@ def _persist_draft_cas(
         runtime,
         include_quota=False,
     )
+    missing = cast(list[MissingField], authoritative.draft.missing_fields())
+    trace = _optional_trace(runtime)
+    if trace is not None:
+        turn_id, input_seq = _trace_turn_context(state, runtime)
+        trace.draft_updated(
+            workspace_id=state.workspace_ref,
+            graph_run_id=state.graph_run_id,
+            input_seq=input_seq,
+            turn_id=turn_id,
+            step_key=DRAFT_CAS_STEP_KEY,
+            draft=merged.model_dump(mode="json"),
+            missing_fields=missing,
+            can_enter_approval=not missing,
+            draft_revision=completed.committed_revision,
+        )
     return {
         "committed_draft_revision": completed.committed_revision,
-        "missing_fields": cast(list[MissingField], authoritative.draft.missing_fields()),
+        "missing_fields": missing,
     }
 
 
@@ -1660,6 +1957,16 @@ def _await_requester_confirmation(
     single ``Command(resume=...)``; the node then routes to rehydration instead
     of ending the graph, so the new input is processed inside this same call.
     """
+    trace = _optional_trace(runtime)
+    if trace is not None:
+        turn_id, input_seq = _trace_turn_context(state, runtime)
+        trace.node_started(
+            workspace_id=state.workspace_ref,
+            graph_run_id=state.graph_run_id,
+            input_seq=input_seq,
+            turn_id=turn_id,
+            node_code="await_requester_confirmation",
+        )
     if state.pending_input_id is None:
         raw = runtime.context.get("pending_input_id")
         if not isinstance(raw, str):
@@ -1692,6 +1999,17 @@ def _await_requester_confirmation(
     selected_route = (
         "resume_confirm" if decision == "confirm" else "resume_new_input"
     )
+    trace = _optional_trace(runtime)
+    if trace is not None:
+        turn_id, input_seq = _trace_turn_context(state, runtime)
+        trace.input_resumed(
+            workspace_id=state.workspace_ref,
+            graph_run_id=state.graph_run_id,
+            input_seq=input_seq,
+            turn_id=turn_id,
+            pending_input_id=str(pending_input_id),
+            decision=("confirm" if decision == "confirm" else "route_new_input"),
+        )
     resume_update: dict[str, object] = {
         "selected_route": selected_route,
         "safe_user_text": safe_user_text,
@@ -1708,6 +2026,16 @@ def _await_requester_confirmation(
     if type(current_seq) is int and current_seq >= 0:
         resume_update["input_seq"] = current_seq
     update = validate_state_update(state, resume_update)
+    if trace is not None:
+        turn_id, input_seq = _trace_turn_context(state, runtime)
+        trace.node_completed(
+            workspace_id=state.workspace_ref,
+            graph_run_id=state.graph_run_id,
+            input_seq=input_seq,
+            turn_id=turn_id,
+            node_code="await_requester_confirmation",
+            status="success",
+        )
     return Command(
         update=update.model_dump(mode="python"),
         goto="rehydrate_resume_snapshot",
@@ -1990,16 +2318,19 @@ def _compile_production_graph(
     )
     builder.add_node(
         "hydrate_authoritative_snapshot",
-        cast(Any, _hydrate_authoritative_snapshot),
+        cast(Any, _traced_hydrate_node(_hydrate_authoritative_snapshot)),
         input_schema=GraphInput,
     )
     builder.add_node(
         "route_intent",
-        cast(Any, validated_state_node(_route_intent)),
+        cast(Any, traced_validated_state_node(_route_intent, node_code="route_intent")),
     )
     builder.add_node(
         "compose_safe_answer",
-        cast(Any, validated_state_node(_compose_safe_answer)),
+        cast(
+            Any,
+            traced_validated_state_node(_compose_safe_answer, node_code="compose_safe_answer"),
+        ),
     )
     implemented_nodes: dict[str, StateStub] = {
         "handle_numeric_followup": _handle_numeric_followup,
@@ -2032,7 +2363,10 @@ def _compile_production_graph(
             node_name,
             cast(
                 Any,
-                validated_state_node(implemented_nodes.get(node_name, _passthrough_stub)),
+                traced_validated_state_node(
+                    implemented_nodes.get(node_name, _passthrough_stub),
+                    node_code=node_name,
+                ),
             ),
         )
     # The confirmation interrupt node is registered unwrapped: on first run it
@@ -2098,6 +2432,42 @@ def _compile_production_graph(
     return builder.compile(checkpointer=checkpointer)
 
 
+def _build_trace_recorder(
+    context: GraphRuntimeContext,
+) -> GraphTraceRecorder | None:
+    """把服务端验证的 execution 绑定注入轨迹记录器；绑定缺失时静默降级。"""
+
+    session_factory = context.get("session_factory")
+    workspace_token = context.get("workspace_token")
+    principal = context.get("principal")
+    current_turn_id = context.get("current_turn_id")
+    current_fence = context.get("current_fence")
+    auth_session_id = context.get("auth_session_id")
+    if not (
+        callable(session_factory)
+        and isinstance(workspace_token, str)
+        and isinstance(principal, Principal)
+        and isinstance(current_turn_id, str)
+        and current_turn_id
+        and type(current_fence) is int
+        and current_fence > 0
+        and isinstance(auth_session_id, str)
+    ):
+        return None
+    try:
+        return GraphTraceRecorder(
+            cast(Any, session_factory),
+            workspace_token=workspace_token,
+            input_turn_id=current_turn_id,
+            actor_id=principal.employee_id,
+            auth_session_ref=auth_session_id,
+            lease_fence=current_fence,
+        )
+    except (TypeError, ValueError):
+        # 轨迹记录永不改变图语义：绑定不可用时静默降级。
+        return None
+
+
 @dataclass(frozen=True)
 class ProductionGraph:
     """The only supported invoke boundary for the compiled production graph."""
@@ -2116,6 +2486,8 @@ class ProductionGraph:
         invocation = _InvocationFacts()
         prepared = dict(context)
         prepared["_invocation_facts"] = invocation
+        if context.get("trace_enabled"):
+            invocation.trace = _build_trace_recorder(context)
         return cast(GraphRuntimeContext, prepared), invocation
 
     @staticmethod
