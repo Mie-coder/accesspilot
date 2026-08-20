@@ -30,6 +30,7 @@ from pydantic import (
 from sqlalchemy import select
 
 from accesspilot.agent.deepseek import DeepSeekStructuredReplyModel
+from accesspilot.agent.fault_injection import FaultPoint, hit_fault
 from accesspilot.agent.routing import (
     ConversationIntent,
     IntentRoute,
@@ -979,6 +980,10 @@ def _call_model_attempt(
             correction=correction,
         )
         parsed = ParsedReply.model_validate(raw_parsed)
+        # The Provider has returned, while its trace/checkpoint completion fact
+        # is still absent. Recovery may call the Provider again, but the
+        # already committed local quota reservation must remain exactly once.
+        hit_fault(FaultPoint.AFTER_QUOTA_COMMIT_BEFORE_CHECKPOINT)
     except (MalformedStructuredOutputError, ValidationError):
         if trace is not None:
             trace.model_completed(
@@ -1224,6 +1229,7 @@ def _execute_read_tool(
         IntentRoute(intent=state.intent, security_probe=state.security_flagged),
         result,
     )
+    hit_fault(FaultPoint.AFTER_TOOL_COMPLETION_BEFORE_EVENT)
     if trace is not None:
         trace.tool_completed(
             workspace_id=state.workspace_ref,
@@ -1684,6 +1690,7 @@ def _resolve_entitlement(
         invocation.tool_call = call
         invocation.tool_result = result
     summary = entitlement_resolution_message(result)
+    hit_fault(FaultPoint.AFTER_TOOL_COMPLETION_BEFORE_EVENT)
     if trace is not None:
         trace.tool_completed(
             workspace_id=state.workspace_ref,
@@ -1838,6 +1845,7 @@ def _persist_draft_cas(
             )
     except (CursorConflictError, DraftRevisionConflictError):
         return _draft_conflict_update(state, runtime)
+    hit_fault(FaultPoint.AFTER_DRAFT_CAS_BEFORE_CHECKPOINT)
     authoritative = _read_authoritative_snapshot(
         state.workspace_ref,
         runtime,
@@ -2010,6 +2018,8 @@ def _await_requester_confirmation(
             pending_input_id=str(pending_input_id),
             decision=("confirm" if decision == "confirm" else "route_new_input"),
         )
+    if decision != "confirm":
+        hit_fault(FaultPoint.AFTER_NON_CONFIRM_RESUME_CONSUMED)
     resume_update: dict[str, object] = {
         "selected_route": selected_route,
         "safe_user_text": safe_user_text,
@@ -2122,6 +2132,31 @@ def _rehydrate_resume_snapshot(
             )
         )
     cursor = snapshot.cursor
+    confirmed = _explicit_confirmation_from_text(state.safe_user_text)
+    completed_confirmation = None
+    if confirmed is True:
+        workspace_token = _context_value(runtime, "workspace_token")
+        if not isinstance(workspace_token, str):
+            raise GraphRuntimeContractError("workspace binding is unavailable")
+        try:
+            completed_confirmation = _step_service(runtime).completed_confirmation(
+                _step_context(state, runtime),
+                workspace_token=workspace_token,
+                pending_input_id=pending_input_id,
+            )
+        except (StepExecutionRejected, StepOperationConflict):
+            return _confirmation_conflict_update(state, runtime)
+    if completed_confirmation is not None and pending is not None:
+        revision_matches = (
+            completed_confirmation.committed_revision == pending.draft_revision + 1
+            and snapshot.workspace.draft_revision
+            == completed_confirmation.committed_revision
+            and snapshot.draft.confirmed
+        )
+    else:
+        revision_matches = snapshot.workspace.draft_revision == (
+            pending.draft_revision if pending is not None else -1
+        )
     if (
         pending is None
         or auth is None
@@ -2130,13 +2165,13 @@ def _rehydrate_resume_snapshot(
         or cursor is None
         or cursor.expected_field != "confirmation"
         or cursor.auth_session_id != auth_session_id
-        # The authoritative revision must equal the interrupt-time committed
-        # revision recorded on the pending row; the checkpoint base may be
-        # older because the collection turn itself advanced the revision.
-        or snapshot.workspace.draft_revision != pending.draft_revision
+        # Ordinarily the authoritative revision equals the interrupt-time
+        # pending revision. After a crash beyond confirmation CAS, the stable
+        # completed operation is the authoritative replay fact and its
+        # committed revision is exactly one step ahead of the pending row.
+        or not revision_matches
     ):
         return _confirmation_conflict_update(state, runtime)
-    confirmed = _explicit_confirmation_from_text(state.safe_user_text)
     return {
         "selected_route": (
             "resume_confirm" if confirmed is True else "resume_new_input"
@@ -2188,6 +2223,7 @@ def _apply_confirmation_cas(
         )
     except (DraftRevisionConflictError, StepExecutionRejected, StepOperationConflict):
         return _confirmation_conflict_update(state, runtime)
+    hit_fault(FaultPoint.AFTER_CONFIRMATION_CAS_BEFORE_TERMINAL)
     return {
         "committed_draft_revision": completed.committed_revision,
         "business_status": "ready_to_submit",
@@ -2548,6 +2584,7 @@ class ProductionGraph:
         )
         payload = self._interrupt_payload(result)
         if payload is not None:
+            hit_fault(FaultPoint.AFTER_INTERRUPT_SAVED)
             raise ConfirmationInterruptRaised(payload)
         node_output = _GraphNodeOutput.model_validate(result)
         if is_resume:

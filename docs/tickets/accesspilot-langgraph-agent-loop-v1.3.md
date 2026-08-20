@@ -1,7 +1,7 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Tickets
 
-**状态：** 用户已确认串行实施；T26–T36 `Verified`，T37–T42 尚未开始；T36 已获准本地提交并进入 T37，未授权推送、合并、部署或修改正式简历
-**更新时间：** 2026-08-19
+**状态：** 用户已确认串行实施；T26–T37 `Verified`，T38–T42 尚未开始；T37 已获用户授权仅本地提交，未授权推送、合并、部署或修改正式简历
+**更新时间：** 2026-08-20
 **继承基线：** AccessPilot v1.2，`product_verified=true`；T32 实现基线 HEAD `7ad8a01`，历史证据不自动证明 v1.3
 **Canonical Spec：** `docs/specs/accesspilot-langgraph-agent-loop-v1.3.md`
 **双评审裁决：** `docs/reviews/accesspilot-v1.3-spec-review-decisions-2026-08-16.md`
@@ -333,7 +333,7 @@ canary。
 
 ## T37 — 六个崩溃边界的幂等恢复
 
-**状态：** 尚未开始
+**状态：** `Verified`；首轮独立验收发现普通 END 绕过 accepted-head promotion 的 1 项 P1，已通过 graph-only fenced finalizer 闭环；定向复核 P0/P1/P2=0，验收证据见 [T37 验收证据包](../evidence/accesspilot-v1.3-t37-acceptance-2026-08-20.md)
 
 **目标：** 在任何真实 flow 2 canary 前，证明 checkpoint 和应用事务非原子窗口不会丢输入或重复本地副作用。
 
@@ -345,7 +345,7 @@ canary。
 2. 六个场景 crash→restart→reconcile/resume 后，run/input/turn 不变、attempt/fence 只在接管递增，安全输入不丢，quota、草稿 revision、accepted head、轨迹和终态均最多一次，Request/Approval/Grant 数量不变。
 3. Provider 已返回但完成事实未持久化时允许外部调用 at-least-once，但本地 quota 最多一次；stale owner 的业务写/head CAS 被拒绝，checkpoint 失败不提前释放 lease 或伪造终态。
 
-**测试/运行验证：** 每个崩溃点查 operation facts、execution/pending、Cursor、checkpoint head、草稿、事件、终态和正式业务表；保留可复现故障证据。
+**测试/运行验证：** T37 定向 13 项、受影响 T30–T36 回归 166 项、T34/T36 真实 PostgreSQL 回归 16 项通过；P1 修复后 T33/T34/T36 Agent 回归 36 项、真实 PostgreSQL 回归 25 项通过。独立定向复核另实测 T37 13 项和旧 T33 finalizer 14 项，Ruff、MyPy、`git diff --check` 通过且无 skip/blocker。
 
 **依赖：** T36。
 
@@ -467,4 +467,4 @@ canary。
 
 - T26–T40 分层建立 AC-01–AC-12；T41 在同一 revision 汇总判定 AC-01–AC-13；T42 单独完成 AC-14；
 - 数据库、checkpoint、Graph State、JSON、SSE、UI 和证据按依赖串行，不并发修改共享权威源；
-- **当前停点：T36 `Verified`；用户已授权 T36 本地提交并进入 T37。** 仍不推送、合并、部署或修改正式简历。
+- **当前停点：T37 `Verified`；用户已授权仅本地提交。** 完成本地提交后进入 T38，仍未授权推送、合并、部署或修改正式简历。

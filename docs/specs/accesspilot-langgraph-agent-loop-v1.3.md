@@ -1,7 +1,7 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Spec
 
-**状态：** T26–T33 `Verified`；T34 `In progress`（服务原语已实现，图接入待完成）；T35–T42 尚未开始；未授权推送、合并、部署或修改正式简历
-**更新时间：** 2026-08-17
+**状态：** T26–T37 `Verified`；T38–T42 尚未开始；T37 已获用户授权仅本地提交，未授权推送、合并、部署或修改正式简历
+**更新时间：** 2026-08-20
 **继承基线：** AccessPilot v1.2，`product_verified=true`；历史验证结果不能自动证明 v1.3
 **上游规格：** `docs/specs/accesspilot-productized-agent-v1.2.md`
 **参考实现：** `deepseek-ai/deepseek-harness` 的只读轨迹体验；不复制其内部协议或调试器复杂度
@@ -628,4 +628,4 @@ Claim Ledger 能从“LangGraph 主链、Postgres checkpoint、interrupt/resume�
 
 用户已选择 Claude Code + DeepSeek 双评审；两份只读结果已完成，接受项已回流本修订版，裁决见评审决策记录。
 
-用户已确认 T26–T42 按张串行实施。T26 已通过 Claude Code + DeepSeek 双独立验收并本地提交；T27–T31 已独立验收并本地提交；T32 首轮验收 2 项 P1 已闭环，二轮只读复核 P1=1 已补齐，二轮独立复核 P0=0、P1=0 后已本地提交。T33 已实现、修复并独立复核 P0=0、P1=0，标记 `Verified` 后进入 T34。仍未授权推送、合并、部署或修改正式简历。
+用户已确认 T26–T42 按张串行实施。T26–T36 已按各自证据完成实现、受影响回归和独立验收；T37 的六点故障恢复在首轮独立验收发现普通 END accepted-head promotion 缺口后完成回修，定向复核 P0/P1/P2=0，现标记为 `Verified`。用户已授权 T37 仅本地提交；完成后进入 T38，仍未授权推送、合并、部署或修改正式简历。

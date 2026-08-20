@@ -521,6 +521,58 @@ class AgentStepOperationService:
                 replayed=False,
             )
 
+    def completed_confirmation(
+        self,
+        context: AgentStepContext,
+        *,
+        workspace_token: str,
+        pending_input_id: UUID,
+    ) -> CompletedStepOperation | None:
+        """Read the stable confirmation fact after a post-CAS process crash.
+
+        The lookup is fenced like every other step read.  It exists separately
+        from ``completed_step`` because confirmation identity is derived from
+        ``pending_input_id`` rather than ``graph_run_id + input_seq``.
+        """
+
+        context = self._validated_context(context)
+        operation = confirm_operation_id(
+            workspace_id=context.workspace_id,
+            pending_input_id=pending_input_id,
+        )
+        with self._session_factory() as session, session.begin():
+            self._lock_execution(session, context)
+            step = session.scalar(
+                select(AgentStepExecutionRecord)
+                .where(
+                    AgentStepExecutionRecord.workspace_id == context.workspace_id,
+                    AgentStepExecutionRecord.operation_id == operation,
+                )
+                .with_for_update()
+            )
+            self._lock_workspace(
+                session,
+                context,
+                workspace_token=workspace_token,
+            )
+            if step is None:
+                return None
+            if (
+                step.graph_run_id != context.graph_run_id
+                or step.step_key != "apply_confirmation"
+                or step.status != "completed"
+                or step.committed_revision is None
+            ):
+                raise StepOperationConflict(
+                    "completed confirmation operation does not match"
+                )
+            return CompletedStepOperation(
+                operation_id=step.operation_id,
+                step_key=step.step_key,
+                committed_revision=step.committed_revision,
+                replayed=True,
+            )
+
     def _persist_draft(
         self,
         context: AgentStepContext,
