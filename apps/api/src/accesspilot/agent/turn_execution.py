@@ -163,8 +163,9 @@ class TurnExecutionService:
         """Atomically allocate run/seq/turn/fence and persist input facts.
 
         The transaction holds the Workspace row lock, rejects a second running
-        input before any user-visible fact is written, and only then stages
-        ``turn.started`` + ``message.user`` and creates the execution row.
+        input or an input that must resume an active pending before any
+        user-visible fact is written, and only then stages ``turn.started`` +
+        ``message.user`` and creates the execution row.
         """
         safe_text = redact_sensitive_content(safe_user_text.strip())
         if not safe_text:
@@ -202,6 +203,16 @@ class TurnExecutionService:
                         "recovery takeover is required before a new input"
                     )
                 raise TurnInProgressError("another turn is already running")
+            pending = session.scalar(
+                select(AgentPendingInputRecord.id)
+                .where(
+                    AgentPendingInputRecord.workspace_id == workspace.id,
+                    AgentPendingInputRecord.status.in_(("active", "resuming")),
+                )
+                .limit(1)
+            )
+            if pending is not None:
+                raise TurnInProgressError("active pending input requires resume")
 
             latest = session.scalar(
                 select(AgentTurnExecutionRecord)

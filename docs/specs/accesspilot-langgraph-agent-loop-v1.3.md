@@ -1,6 +1,6 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Spec
 
-**状态：** T26–T37 `Verified`；T38–T42 尚未开始；T37 已获用户授权仅本地提交，未授权推送、合并、部署或修改正式简历
+**状态：** T26–T38 `Verified`；T39–T42 尚未开始；用户已授权 T38 仅本地提交，T37 已本地提交 `e1e47cc`，未授权推送、合并、部署或修改正式简历
 **更新时间：** 2026-08-20
 **继承基线：** AccessPilot v1.2，`product_verified=true`；历史验证结果不能自动证明 v1.3
 **上游规格：** `docs/specs/accesspilot-productized-agent-v1.2.md`
@@ -628,4 +628,4 @@ Claim Ledger 能从“LangGraph 主链、Postgres checkpoint、interrupt/resume�
 
 用户已选择 Claude Code + DeepSeek 双评审；两份只读结果已完成，接受项已回流本修订版，裁决见评审决策记录。
 
-用户已确认 T26–T42 按张串行实施。T26–T36 已按各自证据完成实现、受影响回归和独立验收；T37 的六点故障恢复在首轮独立验收发现普通 END accepted-head promotion 缺口后完成回修，定向复核 P0/P1/P2=0，现标记为 `Verified`。用户已授权 T37 仅本地提交；完成后进入 T38，仍未授权推送、合并、部署或修改正式简历。
+用户已确认 T26–T42 按张串行实施。T26–T37 已按各自证据完成实现、受影响回归和独立验收；T38 的 JSON 生产图隔离入口门禁在首轮独立验收发现无锁分流与 `begin_input` 间的 pending 竞态后完成锁内复核回修，定向复验 P0/P1/P2=0。用户已授权 T38 仅本地提交；尚未进入 T39，也未授权推送、合并、部署或修改正式简历。

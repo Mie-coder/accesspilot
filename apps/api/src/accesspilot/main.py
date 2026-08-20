@@ -69,8 +69,10 @@ from accesspilot.auth import (
 )
 from accesspilot.config import Settings
 from accesspilot.conversation import (
+    ConversationConflictError,
     ConversationInputError,
     ConversationOrchestrator,
+    ConversationUnavailableError,
     DeterministicStructuredReplyModel,
     LegacyConversationOrchestrator,
     _redact_sensitive_content,
@@ -1486,6 +1488,16 @@ def create_app(
             ) from error
         except ConversationInputError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
+        except ConversationConflictError as error:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": error.code, "message": error.safe_message},
+            ) from error
+        except ConversationUnavailableError as error:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": error.code, "message": error.safe_message},
+            ) from error
         return turn.model_dump(mode="json", exclude={"quota"})
 
     @app.post("/api/workspaces", include_in_schema=False)

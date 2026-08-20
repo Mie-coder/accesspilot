@@ -54,6 +54,22 @@ class ConversationInputError(ValueError):
     """聊天消息不满足最小输入要求。"""
 
 
+class ConversationConflictError(RuntimeError):
+    """A stable, non-secret conflict raised by a conversation engine."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        self.safe_message = message
+        super().__init__(code)
+
+
+class ConversationUnavailableError(RuntimeError):
+    """A stable public close for an unavailable conversation engine."""
+
+    code = "CONVERSATION_ENGINE_UNAVAILABLE"
+    safe_message = "对话执行暂时不可用，请稍后重试。"
+
+
 _CURRENT_TURN_ID: ContextVar[str | None] = ContextVar(
     "accesspilot_current_turn_id", default=None
 )

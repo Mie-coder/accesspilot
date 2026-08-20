@@ -1,6 +1,6 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Tickets
 
-**状态：** 用户已确认串行实施；T26–T37 `Verified`，T38–T42 尚未开始；T37 已获用户授权仅本地提交，未授权推送、合并、部署或修改正式简历
+**状态：** 用户已确认串行实施；T26–T38 `Verified`，T39–T42 尚未开始；用户已授权 T38 仅本地提交，T37 已本地提交 `e1e47cc`，未授权推送、合并、部署或修改正式简历
 **更新时间：** 2026-08-20
 **继承基线：** AccessPilot v1.2，`product_verified=true`；T32 实现基线 HEAD `7ad8a01`，历史证据不自动证明 v1.3
 **Canonical Spec：** `docs/specs/accesspilot-langgraph-agent-loop-v1.3.md`
@@ -355,7 +355,7 @@ canary。
 
 ## T38 — JSON 生产图隔离入口门禁
 
-**状态：** 尚未开始
+**状态：** `Verified`；首轮独立验收发现无锁分流后 `begin_input` 未在 Workspace 行锁内复核 live pending 的 1 项 P1，已以零写入 409 守卫闭环；定向复验 P0/P1/P2=0，验收证据见 [T38 验收证据包](../evidence/accesspilot-v1.3-t38-acceptance-2026-08-20.md)
 
 **目标：** 让真实 JSON API 适配器在隔离测试中调用生产图，但不创建“JSON 已切/SSE 未切”的持久 Workspace。
 
@@ -367,7 +367,7 @@ canary。
 2. App A 在确认处写原子 pending/Cursor/terminal 后退出；App B 以后续新 input turn、同 thread/run 经 rehydrate 完成 confirm 或非确认重路由，且恢复性崩溃不丢消息。
 3. 同 Workspace 并发 invoke/resume 只一个进图；错身份/revision/pending 失败闭合，每个 HTTP turn 只一个终态，测试结束不留真实 flow 2 Workspace。
 
-**测试/运行验证：** JSON API 路径断言、resolved engine、真实 App A/B、confirm/非 confirm/并发/崩溃恢复，以及默认 Legacy 反证。
+**测试/运行验证：** T38 定向 23 项通过，其中官方 PostgresSaver + 新 runtime App A/B 4 项通过且无 skip/blocker；T27 黄金合同、Auth/Workspace JSON 与 engine binding 65 项，T33–T37 Agent 77 项，T33–T36 真实 PostgreSQL 33 项通过。P1 回修后受影响 TurnExecution/rollback/recovery 48 项通过；Ruff、MyPy（58 个源码文件）、`git diff --check` 通过。独立复验另实测 T38 23 项及精确并发调度，确认迟到请求 409 零副作用、重试同 run resume、每个已接受 turn 唯一终态。
 
 **依赖：** T37。
 
@@ -467,4 +467,4 @@ canary。
 
 - T26–T40 分层建立 AC-01–AC-12；T41 在同一 revision 汇总判定 AC-01–AC-13；T42 单独完成 AC-14；
 - 数据库、checkpoint、Graph State、JSON、SSE、UI 和证据按依赖串行，不并发修改共享权威源；
-- **当前停点：T37 `Verified`；用户已授权仅本地提交。** 完成本地提交后进入 T38，仍未授权推送、合并、部署或修改正式简历。
+- **当前停点：T38 `Verified`，用户已授权仅本地提交；未进入 T39。** T37 已本地提交 `e1e47cc`，仍未授权推送、合并、部署或修改正式简历。
