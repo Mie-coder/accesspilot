@@ -1,6 +1,6 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Spec
 
-**状态：** T26–T39 `Verified`；T40–T42 尚未开始；用户已授权 T39 仅本地提交，T38 已本地提交 `0aa953c`，未授权推送、合并、部署或修改正式简历
+**状态：** T26–T40 `Verified`；T41–T42 尚未开始；T40 已获授权仅本地提交，后续 Ticket 独立验收通过后默认仅本地提交；T39 已本地提交 `3272a4f`，未授权推送、合并、部署或修改正式简历
 **更新时间：** 2026-08-20
 **继承基线：** AccessPilot v1.2，`product_verified=true`；历史验证结果不能自动证明 v1.3
 **上游规格：** `docs/specs/accesspilot-productized-agent-v1.2.md`
@@ -628,4 +628,4 @@ Claim Ledger 能从“LangGraph 主链、Postgres checkpoint、interrupt/resume�
 
 用户已选择 Claude Code + DeepSeek 双评审；两份只读结果已完成，接受项已回流本修订版，裁决见评审决策记录。
 
-用户已确认 T26–T42 按张串行实施。T26–T38 已按各自证据完成实现、受影响回归和独立验收；T38 已按用户授权本地提交 `0aa953c`。T39 的「对话 / 轨迹」只读 UI 与最近三轮已完成实现、受影响回归、完整 Web 测试、三尺寸视觉与独立验收，P0/P1=0，1 项 reduced-motion P2 已记录且不阻塞。用户已授权 T39 仅本地提交；尚未进入 T40，也未授权推送、合并、部署或修改正式简历。
+用户已确认 T26–T42 按张串行实施。T26–T40 已按各自证据完成实现、受影响回归和独立验收；T39 已按用户授权本地提交 `3272a4f`。T40 的 SSE LangGraph 门禁、传输合同与 Sticky flow 2 canary 已通过修复轮独立验收，P0/P1=0，1 项 cleanup task 观察性 P2 已记录且不阻塞；用户已授权 T40 及后续独立验收通过的 Ticket 默认仅本地提交。当前尚未进入 T41，也未授权推送、合并、部署或修改正式简历。

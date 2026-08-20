@@ -1,11 +1,13 @@
 """模型配额保护下的申请对话、草稿合并与安全事件写入。"""
 
 import re
+from _thread import LockType
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Protocol
+from threading import Lock
+from typing import Literal, Protocol
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -103,13 +105,37 @@ def _noop_success_finalizer() -> None:
     """Default finalizer for engines with no post-terminal business action."""
 
 
+TerminalEventType = Literal[
+    "message.completed",
+    "error.recoverable",
+    "turn.interrupted",
+]
+TerminalFinalizer = Callable[[TerminalEventType, dict[str, object]], int | None]
+
+
 @dataclass(frozen=True)
 class ConversationRunResult:
-    """Prepared turn plus its engine-owned post-terminal success action."""
+    """Prepared turn plus its engine-owned terminal lifecycle actions.
+
+    Legacy keeps the mature transport-owned terminal followed by its cursor
+    transition.  A checkpointed engine instead supplies ``terminal_finalizer``
+    so accepted-head promotion, terminal status, pending/Cursor projection and
+    lease release remain one fenced engine transaction.
+    """
 
     turn: ConversationTurn
     success_finalizer: Callable[[], None] = field(
         default=_noop_success_finalizer,
+        repr=False,
+        compare=False,
+    )
+    terminal_finalizer: TerminalFinalizer | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    _terminal_lock: LockType = field(
+        default_factory=Lock,
         repr=False,
         compare=False,
     )
@@ -118,6 +144,24 @@ class ConversationRunResult:
         """Apply engine-owned state only after the transport persisted success."""
 
         self.success_finalizer()
+
+    @property
+    def owns_terminal(self) -> bool:
+        """Whether this engine must persist the terminal itself."""
+
+        return self.terminal_finalizer is not None
+
+    def finalize_terminal(
+        self,
+        event_type: TerminalEventType,
+        payload: dict[str, object],
+    ) -> int | None:
+        """Persist one engine-owned terminal and return its database event id."""
+
+        if self.terminal_finalizer is None:
+            raise RuntimeError("prepared conversation does not own its terminal")
+        with self._terminal_lock:
+            return self.terminal_finalizer(event_type, payload)
 
 
 class ConversationOrchestrator(Protocol):

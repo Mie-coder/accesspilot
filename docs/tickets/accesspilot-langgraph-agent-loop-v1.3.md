@@ -1,6 +1,6 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Tickets
 
-**状态：** 用户已确认串行实施；T26–T39 `Verified`，T40–T42 尚未开始；用户已授权 T39 仅本地提交，T38 已本地提交 `0aa953c`，未授权推送、合并、部署或修改正式简历
+**状态：** 用户已确认串行实施；T26–T40 `Verified`，T41–T42 尚未开始；T40 已获授权仅本地提交，后续 Ticket 独立验收通过后默认仅本地提交；T39 已本地提交 `3272a4f`，未授权推送、合并、部署或修改正式简历
 **更新时间：** 2026-08-20
 **继承基线：** AccessPilot v1.2，`product_verified=true`；T32 实现基线 HEAD `7ad8a01`，历史证据不自动证明 v1.3
 **Canonical Spec：** `docs/specs/accesspilot-langgraph-agent-loop-v1.3.md`
@@ -399,7 +399,7 @@ canary。
 
 ## T40 — SSE LangGraph 门禁、传输合同与 Sticky Flow 2 Canary
 
-**状态：** 尚未开始
+**状态：** `Verified`；三条验收标准通过，独立验收修复轮 P0/P1/P2=0/0/1；验收证据见 [T40 验收证据包](../evidence/accesspilot-v1.3-t40-acceptance-2026-08-20.md)
 
 **目标：** 先证明 SSE 适配器不破坏成熟传输合同，再首次为真实新 Workspace 整体绑定 LangGraph。
 
@@ -411,7 +411,7 @@ canary。
 2. SSE 断开只在 graph worker 确认停止后写 interrupted/释放 lease；后台仍可能运行时 execution 保持 running 并由恢复合同闭合；同一输入 JSON/SSE 规范化 outcome、interrupt terminal、Cursor 和业务事实一致。
 3. JSON 与 SSE 隔离门禁都通过后，`mixed` 才以服务端稳定 cohort 为新 Workspace 写 flow 2；该 Workspace 两入口同时走 LangGraph，通过 JSON→SSE 与 SSE→JSON 跨入口 pending/resume，flow 1 仍 Legacy，resolved engine/持久事件/UI 徽标一致。
 
-**测试/运行验证：** 新增 LangGraph SSE 失败测试后跑完整流式/重连/Nginx 回归；实际完成申请收集→interrupt→跨入口 resume、断线重连和受控 flow 2 Workspace canary。
+**测试/运行验证：** 首轮可信红灯 2 项后完成真实 SSE、断线 worker 屏障、single terminal owner、sticky 双入口与官方 PostgresSaver 四向恢复；独立验收发现 live-running SSE admission P1，两条 direct-ASGI 红灯回修后关闭。最终 T40 16 项（0 skip）、修复轮受影响 63+2 项、Ruff、MyPy 与 `git diff --check` 全部通过。
 
 **依赖：** T39。
 
@@ -467,4 +467,4 @@ canary。
 
 - T26–T40 分层建立 AC-01–AC-12；T41 在同一 revision 汇总判定 AC-01–AC-13；T42 单独完成 AC-14；
 - 数据库、checkpoint、Graph State、JSON、SSE、UI 和证据按依赖串行，不并发修改共享权威源；
-- **当前停点：T39 `Verified`，用户已授权仅本地提交；未进入 T40。** T38 已本地提交 `0aa953c`，仍未授权推送、合并、部署或修改正式简历。
+- **当前停点：T40 `Verified`，用户已授权仅本地提交；尚未进入 T41。** 后续 Ticket 独立验收通过后默认仅本地提交；T39 已本地提交 `3272a4f`，仍未授权推送、合并、部署或修改正式简历。

@@ -14,9 +14,9 @@ One Workspace is bound to exactly one engine for its whole life:
   ``409 ENGINE_BINDING_CONFLICT`` and never silently re-routes the Workspace
   to the other engine.
 
-The JSON/SSE entry wiring that consumes this resolution belongs to T38/T40;
-until those entry gates exist the mixed canary must stay at 0 (enforced by
-``Settings``).
+The JSON/SSE entry wiring that consumes this resolution is completed by
+T38/T40. Mixed may allocate nonzero flow-2 cohorts only with the strict
+checkpoint configuration enforced by ``Settings``.
 """
 
 from __future__ import annotations

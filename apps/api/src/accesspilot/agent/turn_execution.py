@@ -159,6 +159,7 @@ class TurnExecutionService:
         auth_session_ref: UUID,
         actor_id: str,
         safe_user_text: str,
+        input_turn_id: str | None = None,
     ) -> TurnExecutionHandle:
         """Atomically allocate run/seq/turn/fence and persist input facts.
 
@@ -233,22 +234,33 @@ class TurnExecutionService:
             workspace.lease_fence += 1
             lease_fence = workspace.lease_fence
             checkpoint_thread_id = f"accesspilot:v1.3:{graph_run_id}"
-            input_turn_id = f"turn-{uuid4()}"
+            input_turn_id = input_turn_id or f"turn-{uuid4()}"
+            if not input_turn_id or len(input_turn_id) > 120:
+                raise ValueError("input_turn_id must be a non-empty server id")
             lease_expires_at = now + timedelta(seconds=self._lease_seconds)
 
-            stage_workspace_event(
-                session,
-                workspace_token=workspace_token,
-                event_type="turn.started",
-                payload={
-                    "turn_id": input_turn_id,
-                    "lease_expires_at": lease_expires_at,
-                    # T36：LangGraph 入口记录最终解析引擎与图版本。
-                    "orchestrator": "langgraph",
-                    "flow_version": workspace.flow_version,
-                    "graph_version": LANGGRAPH_GRAPH_VERSION,
-                },
+            existing_started = session.scalar(
+                select(WorkspaceEventRecord).where(
+                    WorkspaceEventRecord.workspace_id == workspace.id,
+                    WorkspaceEventRecord.event_type == "turn.started",
+                    WorkspaceEventRecord.payload["turn_id"].astext
+                    == input_turn_id,
+                )
             )
+            if existing_started is None:
+                stage_workspace_event(
+                    session,
+                    workspace_token=workspace_token,
+                    event_type="turn.started",
+                    payload={
+                        "turn_id": input_turn_id,
+                        "lease_expires_at": lease_expires_at,
+                        # T36：LangGraph 入口记录最终解析引擎与图版本。
+                        "orchestrator": "langgraph",
+                        "flow_version": workspace.flow_version,
+                        "graph_version": LANGGRAPH_GRAPH_VERSION,
+                    },
+                )
             user_message = stage_workspace_event(
                 session,
                 workspace_token=workspace_token,
@@ -764,6 +776,10 @@ class TurnExecutionService:
         pending_input_id: UUID,
         draft_revision: int,
         previous_pending_input_id: UUID | None = None,
+        terminal_event_type: Literal[
+            "message.completed", "error.recoverable", "turn.interrupted"
+        ] = "message.completed",
+        terminal_payload: dict[str, object] | None = None,
     ) -> int:
         """Atomically promote accepted head + pending + Cursor + terminal events.
 
@@ -939,17 +955,27 @@ class TurnExecutionService:
                     "turn_id": handle.input_turn_id,
                 },
             )
-            completed_payload = validate_event_payload(
-                "message.completed",
-                {
+            if terminal_event_type == "message.completed":
+                raw_terminal_payload = terminal_payload or {
                     "turn_id": handle.input_turn_id,
                     "message_id": f"msg-{uuid4()}",
                     "content": "申请信息已完整。请明确回复“确认提交”后再创建正式申请。",
                     "intent": "request_access",
                     "business_status": "awaiting_confirmation",
                     "draft_revision": draft_revision,
-                },
+                }
+            elif terminal_payload is None:
+                raise ValueError("non-success interrupt terminal requires payload")
+            else:
+                raw_terminal_payload = terminal_payload
+            safe_terminal_payload = validate_event_payload(
+                terminal_event_type,
+                raw_terminal_payload,
             )
+            if safe_terminal_payload.get("turn_id") != handle.input_turn_id:
+                raise TurnExecutionError(
+                    "terminal event turn_id does not match the execution turn"
+                )
             required_event = WorkspaceEventRecord(
                 workspace_id=handle.workspace_id,
                 event_type="agent.input.required",
@@ -968,27 +994,31 @@ class TurnExecutionService:
                 event_type="business.status",
                 payload=status_payload,
             )
-            completed_event = WorkspaceEventRecord(
+            terminal_event = WorkspaceEventRecord(
                 workspace_id=handle.workspace_id,
-                event_type="message.completed",
+                event_type=terminal_event_type,
                 event_key=identity_event_key(
                     workspace_id=handle.workspace_id,
                     graph_run_id=handle.graph_run_id,
                     input_seq=handle.input_seq,
-                    step_key=terminal_step_key("message.completed"),
+                    step_key=terminal_step_key(terminal_event_type),
                     lifecycle_phase="terminal",
                     ordinal=0,
                 ),
-                payload=completed_payload,
+                payload=safe_terminal_payload,
             )
-            session.add_all([required_event, status_event, completed_event])
+            session.add_all([required_event, status_event, terminal_event])
             session.flush()
-            execution.status = "waiting_input"
+            execution.status = (
+                "waiting_input"
+                if terminal_event_type == "message.completed"
+                else self._TERMINAL_STATUS_BY_EVENT[terminal_event_type]
+            )
             execution.lease_expires_at = None
-            execution.terminal_event_id = completed_event.id
+            execution.terminal_event_id = terminal_event.id
             execution.updated_at = utc_now()
             session.flush()
-            return completed_event.id
+            return terminal_event.id
 
     def finalize_resume_outcome(
         self,
@@ -1124,6 +1154,7 @@ class TurnExecutionService:
         pending_input_id: UUID,
         lock: AdvisoryLockHandle,
         saver: SaverLike,
+        input_turn_id: str | None = None,
     ) -> TurnExecutionHandle:
         """Accept one resume input and seed the exact accepted checkpoint head."""
         safe_text = redact_sensitive_content(safe_user_text.strip())
@@ -1190,22 +1221,33 @@ class TurnExecutionService:
                 input_seq = 0
             workspace.lease_fence += 1
             lease_fence = workspace.lease_fence
-            input_turn_id = f"turn-{uuid4()}"
+            input_turn_id = input_turn_id or f"turn-{uuid4()}"
+            if not input_turn_id or len(input_turn_id) > 120:
+                raise ValueError("input_turn_id must be a non-empty server id")
             lease_expires_at = now + timedelta(seconds=self._lease_seconds)
 
-            stage_workspace_event(
-                session,
-                workspace_token=workspace_token,
-                event_type="turn.started",
-                payload={
-                    "turn_id": input_turn_id,
-                    "lease_expires_at": lease_expires_at,
-                    # T36：LangGraph 入口记录最终解析引擎与图版本。
-                    "orchestrator": "langgraph",
-                    "flow_version": workspace.flow_version,
-                    "graph_version": LANGGRAPH_GRAPH_VERSION,
-                },
+            existing_started = session.scalar(
+                select(WorkspaceEventRecord).where(
+                    WorkspaceEventRecord.workspace_id == workspace.id,
+                    WorkspaceEventRecord.event_type == "turn.started",
+                    WorkspaceEventRecord.payload["turn_id"].astext
+                    == input_turn_id,
+                )
             )
+            if existing_started is None:
+                stage_workspace_event(
+                    session,
+                    workspace_token=workspace_token,
+                    event_type="turn.started",
+                    payload={
+                        "turn_id": input_turn_id,
+                        "lease_expires_at": lease_expires_at,
+                        # T36：LangGraph 入口记录最终解析引擎与图版本。
+                        "orchestrator": "langgraph",
+                        "flow_version": workspace.flow_version,
+                        "graph_version": LANGGRAPH_GRAPH_VERSION,
+                    },
+                )
             user_message = stage_workspace_event(
                 session,
                 workspace_token=workspace_token,

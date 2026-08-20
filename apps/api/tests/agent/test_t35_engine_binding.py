@@ -4,8 +4,7 @@ Covers the full allocation matrix, the stable ``agent_thread_id`` hash, the
 fixed resolution order ``running execution.engine -> active/resuming
 pending.engine -> Workspace flow_version`` with the fixed
 409 ``ENGINE_BINDING_CONFLICT`` on any disagreement, client override
-rejection, and the mixed-canary-0 gate that must hold before the T38/T40
-entry gates exist.
+rejection, and the mixed canary configuration after the T38/T40 entry gates.
 """
 
 from __future__ import annotations
@@ -400,32 +399,18 @@ def test_client_cannot_override_engine_flow_or_thread(
     assert normal.json()["intent"] == "help"
 
 
-def test_settings_keep_mixed_canary_disabled_until_entry_gates() -> None:
-    # The T38/T40 entry gates do not exist yet: mixed must stay at 0 canary.
-    with pytest.raises(ValidationError, match="must stay 0"):
-        _settings(
-            orchestrator_mode="mixed",
-            langgraph_canary_percent=1,
-            checkpoint_database_url="postgresql://runtime/db",
-            langgraph_strict_msgpack=True,
+def test_settings_allow_mixed_canary_after_both_entry_gates() -> None:
+    for percent in (0, 1, 30, 100):
+        assert (
+            _settings(
+                orchestrator_mode="mixed",
+                langgraph_canary_percent=percent,
+                checkpoint_database_url="postgresql://runtime/db",
+                langgraph_strict_msgpack=True,
+            ).langgraph_canary_percent
+            == percent
         )
-    with pytest.raises(ValidationError, match="must stay 0"):
-        _settings(
-            orchestrator_mode="mixed",
-            langgraph_canary_percent=30,
-            checkpoint_database_url="postgresql://runtime/db",
-            langgraph_strict_msgpack=True,
-        )
-    # 0 is legal; missing and out-of-range remain illegal.
-    assert (
-        _settings(
-            orchestrator_mode="mixed",
-            langgraph_canary_percent=0,
-            checkpoint_database_url="postgresql://runtime/db",
-            langgraph_strict_msgpack=True,
-        ).langgraph_canary_percent
-        == 0
-    )
+    # Missing and out-of-range values remain illegal.
     with pytest.raises(ValidationError, match="required in mixed"):
         _settings(
             orchestrator_mode="mixed",

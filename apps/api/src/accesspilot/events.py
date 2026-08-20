@@ -441,6 +441,9 @@ def append_turn_started(
     *,
     workspace_token: str,
     turn_id: str,
+    orchestrator: str | None = None,
+    flow_version: int | None = None,
+    graph_version: str | None = None,
 ) -> WorkspaceEventRecord:
     """锁定 Workspace 并幂等写入当前轮 started 事实。"""
 
@@ -490,10 +493,16 @@ def append_turn_started(
     event = WorkspaceEventRecord(
         workspace_id=workspace.id,
         event_type="turn.started",
-        payload=validate_event_payload("turn.started", {
-            "turn_id": turn_id,
-            "lease_expires_at": now + timedelta(minutes=5),
-        }),
+        payload=validate_event_payload(
+            "turn.started",
+            {
+                "turn_id": turn_id,
+                "lease_expires_at": now + timedelta(minutes=5),
+                "orchestrator": orchestrator,
+                "flow_version": flow_version,
+                "graph_version": graph_version,
+            },
+        ),
     )
     session.add(event)
     session.commit()

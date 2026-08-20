@@ -1,11 +1,12 @@
 """T19 Mock Login, AuthSession and request Principal boundaries."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from hmac import compare_digest
 from secrets import token_urlsafe
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -88,6 +89,7 @@ def create_login_session(
     *,
     account_id: str,
     ttl_seconds: int,
+    flow_allocator: Callable[[UUID], int] | None = None,
 ) -> tuple[AuthContext, str, str]:
     """Atomically create a private Workspace and AuthSession.
 
@@ -108,8 +110,13 @@ def create_login_session(
             # employee directory; this is a deployment/data error, not a
             # reason to fall back to request-provided identity.
             raise LoginAccountError(account_id)
+        agent_thread_id = uuid4()
         workspace = WorkspaceRecord(
             token_hash=hash_workspace_token(token),
+            agent_thread_id=agent_thread_id,
+            flow_version=(flow_allocator or (lambda thread_id: 1))(
+                agent_thread_id
+            ),
             actor_id=employee.employee_id,
             demo_actor_id=None,
             demo_session_active=False,

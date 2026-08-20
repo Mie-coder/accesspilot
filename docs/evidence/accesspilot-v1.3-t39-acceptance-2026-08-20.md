@@ -1,7 +1,7 @@
 # AccessPilot v1.3 T39 验收证据包（Verified）
 
 **Ticket：** T39 — 「对话 / 轨迹」只读 UI 与最近三轮
-**实现基线：** `0aa953c`（T38）；T39 当前为未提交工作树 revision
+**实现基线：** `0aa953c`（T38）；T39 已本地提交 `3272a4f`
 **日期：** 2026-08-20
 **状态：** `Verified`；独立验收 P0/P1/P2=0/0/1，P2 不阻塞
 
@@ -80,4 +80,4 @@ T36 的 node、route、model、retrieval、tool、draft/State、input required/r
 
 ## 7. 当前停点
 
-T39 已 `Verified`，用户已授权仅本地提交。未进入 T40；未授权推送、合并、部署或修改正式简历。
+T39 已 `Verified` 并按用户授权本地提交 `3272a4f`。当前按已确认的 Ticket 顺序进入 T40；未授权推送、合并、部署或修改正式简历。

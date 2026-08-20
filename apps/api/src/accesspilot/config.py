@@ -85,13 +85,6 @@ class Settings(BaseSettings):
                 raise ValueError("langgraph_canary_percent is required in mixed mode")
             if not 0 <= self.langgraph_canary_percent <= 100:
                 raise ValueError("langgraph_canary_percent must be between 0 and 100")
-            if self.langgraph_canary_percent != 0:
-                # T35 gate: until the T38/T40 JSON/SSE entry gates pass, mixed
-                # must never allocate a real flow 2 Workspace.
-                raise ValueError(
-                    "langgraph_canary_percent must stay 0 until the JSON/SSE "
-                    "entry gates pass"
-                )
         elif self.langgraph_canary_percent is not None:
             raise ValueError("langgraph_canary_percent is only valid in mixed mode")
         if self.orchestrator_mode in {"mixed", "langgraph"}:

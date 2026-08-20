@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
@@ -28,6 +29,10 @@ from accesspilot.agent.checkpoint import (
     ServerExecutionContext,
 )
 from accesspilot.agent.embeddings import DeterministicEmbeddingModel
+from accesspilot.agent.engine_binding import (
+    EngineBindingConflictError,
+    WorkspaceEngineResolver,
+)
 from accesspilot.agent.production_graph import (
     ConfirmationInterruptRaised,
     GraphInput,
@@ -38,6 +43,8 @@ from accesspilot.agent.production_graph import (
     route_graph_input,
 )
 from accesspilot.agent.routing import DeterministicIntentRouter, IntentRouter
+from accesspilot.agent.safety import redact_sensitive_content
+from accesspilot.agent.trace import LANGGRAPH_GRAPH_VERSION
 from accesspilot.agent.turn_execution import (
     RecoveryPlan,
     StaleTurnFenceError,
@@ -57,6 +64,7 @@ from accesspilot.conversation import (
     ConversationRunResult,
     ConversationTurn,
     ConversationUnavailableError,
+    TerminalEventType,
     _explicit_confirmation_from_text,
     normalized_outcome,
 )
@@ -66,6 +74,7 @@ from accesspilot.db.models import (
     WorkspaceEventRecord,
     WorkspaceRecord,
 )
+from accesspilot.db.workspace_store import hash_workspace_token
 from accesspilot.events import ModelQuotaExceededError, get_model_quota
 from accesspilot.tools.policies import PolicyService
 from accesspilot.workspaces import WorkspaceService
@@ -75,7 +84,25 @@ _CONFLICT_MESSAGES: dict[str, str] = {
     "TURN_RECOVERY_IN_PROGRESS": "上一轮对话正在恢复，请稍后重试。",
     "TURN_LOCK_UNAVAILABLE": "当前 Workspace 已有对话执行者。",
     "TURN_BINDING_CONFLICT": "对话恢复状态已变化，请刷新后重试。",
+    "ENGINE_BINDING_CONFLICT": "Workspace 引擎绑定状态不一致。",
 }
+
+
+@dataclass(frozen=True)
+class LangGraphSseAdmission:
+    """One fenced HTTP input accepted before its SSE response begins."""
+
+    handle: TurnExecutionHandle
+    workspace_token: str
+    safe_content: str
+    principal: object
+    pending_input_id: UUID
+    is_resume: bool
+    started_event_id: int
+
+    @property
+    def turn_id(self) -> str:
+        return self.handle.input_turn_id
 
 
 class LangGraphConversationOrchestrator:
@@ -107,6 +134,137 @@ class LangGraphConversationOrchestrator:
         )
         self._heartbeat_interval = heartbeat_interval
 
+    def transport_binding(self, *, workspace_token: str) -> dict[str, object]:
+        """Return the persisted binding used by the first SSE frame."""
+
+        with self._session_factory() as session:
+            workspace = session.scalar(
+                select(WorkspaceRecord).where(
+                    WorkspaceRecord.token_hash == hash_workspace_token(workspace_token)
+                )
+            )
+            if workspace is None:
+                raise TurnExecutionError("workspace is unavailable")
+            return {
+                "orchestrator": "langgraph",
+                "flow_version": workspace.flow_version,
+                "graph_version": LANGGRAPH_GRAPH_VERSION,
+            }
+
+    def transport_turn_id(self, *, workspace_token: str, proposed: str) -> str:
+        """Never reuse a running turn outside fenced SSE admission."""
+
+        del workspace_token
+        return proposed
+
+    def admit_sse(
+        self,
+        *,
+        workspace_token: str,
+        content: str,
+        proposed_turn_id: str,
+        auth_session_id: str | None,
+    ) -> LangGraphSseAdmission:
+        """Atomically accept an SSE input before any response frame is sent."""
+
+        safe_content = content.strip()
+        if not safe_content:
+            raise ConversationInputError("消息不能为空")
+        try:
+            auth = load_auth_context(
+                self._session_factory,
+                token=workspace_token,
+            )
+            if auth_session_id is None or str(auth.session_id) != auth_session_id:
+                raise ConversationConflictError(
+                    "TURN_BINDING_CONFLICT",
+                    _CONFLICT_MESSAGES["TURN_BINDING_CONFLICT"],
+                )
+            running, pending = self._live_execution_facts(auth.workspace_id)
+            if running is not None:
+                return self._admit_recovery_sse(
+                    workspace_token=workspace_token,
+                    safe_content=safe_content,
+                    auth_session_ref=auth.session_id,
+                    actor_id=auth.principal.employee_id,
+                    principal=auth.principal,
+                    running=running,
+                    pending=pending,
+                )
+            if pending is not None:
+                return self._admit_resume_sse(
+                    workspace_token=workspace_token,
+                    safe_content=safe_content,
+                    auth_session_ref=auth.session_id,
+                    actor_id=auth.principal.employee_id,
+                    principal=auth.principal,
+                    pending=pending,
+                    input_turn_id=proposed_turn_id,
+                )
+            handle = self._turn_service.begin_input(
+                workspace_token=workspace_token,
+                auth_session_ref=auth.session_id,
+                actor_id=auth.principal.employee_id,
+                safe_user_text=safe_content,
+                input_turn_id=proposed_turn_id,
+            )
+            return self._sse_admission(
+                handle=handle,
+                workspace_token=workspace_token,
+                safe_content=safe_content,
+                principal=auth.principal,
+                pending_input_id=uuid4(),
+                is_resume=False,
+            )
+        except ConversationInputError:
+            raise
+        except ConversationConflictError:
+            raise
+        except ModelQuotaExceededError:
+            raise
+        except TurnInProgressError as error:
+            raise self._conflict("TURN_IN_PROGRESS") from error
+        except TurnRecoveryInProgressError as error:
+            raise self._conflict("TURN_RECOVERY_IN_PROGRESS") from error
+        except TurnLockUnavailableError as error:
+            raise self._conflict("TURN_LOCK_UNAVAILABLE") from error
+        except (
+            CandidateCheckpointRejected,
+            ExactCheckpointRequired,
+            StaleTurnFenceError,
+            TurnExecutionError,
+            TurnLeaseActiveError,
+        ) as error:
+            raise self._conflict("TURN_BINDING_CONFLICT") from error
+        except InvalidAuthSessionError as error:
+            raise self._conflict("TURN_BINDING_CONFLICT") from error
+        except CheckpointUnavailableError as error:
+            raise ConversationUnavailableError() from error
+        except Exception as error:
+            raise ConversationUnavailableError() from error
+
+    def prepare_admitted(
+        self,
+        *,
+        admission: LangGraphSseAdmission,
+    ) -> ConversationRunResult:
+        """Execute exactly the input already accepted by ``admit_sse``."""
+
+        with self._turn_service.advisory_lock(
+            admission.handle.agent_thread_id
+        ) as lock:
+            result = self._execute(
+                handle=admission.handle,
+                workspace_token=admission.workspace_token,
+                safe_content=admission.safe_content,
+                principal=admission.principal,
+                lock=lock,
+                pending_input_id=admission.pending_input_id,
+                is_resume=admission.is_resume,
+                defer_terminal=True,
+            )
+        return cast(ConversationRunResult, result)
+
     def prepare(
         self,
         *,
@@ -115,10 +273,16 @@ class LangGraphConversationOrchestrator:
         turn_id: str,
         auth_session_id: str | None,
     ) -> ConversationRunResult:
-        """T40 owns the SSE adapter; T38 must not create a split transport."""
+        """Execute the graph but defer its fenced terminal to the SSE owner."""
 
-        del workspace_token, content, turn_id, auth_session_id
-        raise ConversationUnavailableError()
+        result = self._run(
+            workspace_token=workspace_token,
+            content=content,
+            auth_session_id=auth_session_id,
+            input_turn_id=turn_id,
+            defer_terminal=True,
+        )
+        return cast(ConversationRunResult, result)
 
     def handle(
         self,
@@ -128,6 +292,26 @@ class LangGraphConversationOrchestrator:
         auth_session_id: str | None,
     ) -> ConversationTurn:
         """Accept, execute and atomically finalize one real JSON graph turn."""
+
+        result = self._run(
+            workspace_token=workspace_token,
+            content=content,
+            auth_session_id=auth_session_id,
+            input_turn_id=None,
+            defer_terminal=False,
+        )
+        return cast(ConversationTurn, result)
+
+    def _run(
+        self,
+        *,
+        workspace_token: str,
+        content: str,
+        auth_session_id: str | None,
+        input_turn_id: str | None,
+        defer_terminal: bool,
+    ) -> ConversationTurn | ConversationRunResult:
+        """Shared JSON/SSE graph execution; only finalization timing differs."""
 
         safe_content = content.strip()
         if not safe_content:
@@ -152,6 +336,7 @@ class LangGraphConversationOrchestrator:
                     principal=auth.principal,
                     running=running,
                     pending=pending,
+                    defer_terminal=defer_terminal,
                 )
             if pending is not None:
                 return self._run_resume(
@@ -161,12 +346,15 @@ class LangGraphConversationOrchestrator:
                     actor_id=auth.principal.employee_id,
                     principal=auth.principal,
                     pending=pending,
+                    input_turn_id=input_turn_id,
+                    defer_terminal=defer_terminal,
                 )
             handle = self._turn_service.begin_input(
                 workspace_token=workspace_token,
                 auth_session_ref=auth.session_id,
                 actor_id=auth.principal.employee_id,
                 safe_user_text=safe_content,
+                input_turn_id=input_turn_id,
             )
             with self._turn_service.advisory_lock(handle.agent_thread_id) as lock:
                 return self._execute(
@@ -177,6 +365,7 @@ class LangGraphConversationOrchestrator:
                     lock=lock,
                     pending_input_id=uuid4(),
                     is_resume=False,
+                    defer_terminal=defer_terminal,
                 )
         except ConversationInputError:
             raise
@@ -239,7 +428,7 @@ class LangGraphConversationOrchestrator:
                 session.expunge(pending)
             return running, pending
 
-    def _run_resume(
+    def _admit_resume_sse(
         self,
         *,
         workspace_token: str,
@@ -248,7 +437,8 @@ class LangGraphConversationOrchestrator:
         actor_id: str,
         principal: object,
         pending: AgentPendingInputRecord,
-    ) -> ConversationTurn:
+        input_turn_id: str,
+    ) -> LangGraphSseAdmission:
         if pending.status != "active":
             raise self._conflict("TURN_RECOVERY_IN_PROGRESS")
         self._preflight_resume_quota(
@@ -264,6 +454,129 @@ class LangGraphConversationOrchestrator:
                 pending_input_id=pending.pending_input_id,
                 lock=lock,
                 saver=self._checkpoint_saver,
+                input_turn_id=input_turn_id,
+            )
+        return self._sse_admission(
+            handle=handle,
+            workspace_token=workspace_token,
+            safe_content=safe_content,
+            principal=principal,
+            pending_input_id=pending.pending_input_id,
+            is_resume=True,
+        )
+
+    def _admit_recovery_sse(
+        self,
+        *,
+        workspace_token: str,
+        safe_content: str,
+        auth_session_ref: UUID,
+        actor_id: str,
+        principal: object,
+        running: AgentTurnExecutionRecord,
+        pending: AgentPendingInputRecord | None,
+    ) -> LangGraphSseAdmission:
+        now = datetime.now(UTC)
+        if running.lease_expires_at is None or running.lease_expires_at > now:
+            raise self._conflict("TURN_IN_PROGRESS")
+        persisted_content = self._safe_input_fact(running.input_event_id)
+        if redact_sensitive_content(safe_content) != persisted_content:
+            raise self._conflict("TURN_RECOVERY_IN_PROGRESS")
+        with self._workspace_lock(running.workspace_id) as agent_thread_id:
+            with self._turn_service.advisory_lock(agent_thread_id) as lock:
+                plan = self._turn_service.takeover(
+                    workspace_token=workspace_token,
+                    graph_run_id=running.graph_run_id,
+                    input_seq=running.input_seq,
+                    auth_session_ref=auth_session_ref,
+                    actor_id=actor_id,
+                    lock=lock,
+                    saver=self._checkpoint_saver,
+                )
+                handle = self._handle_from_plan(
+                    plan,
+                    actor_id=actor_id,
+                    auth_session_ref=auth_session_ref,
+                )
+        resumed_pending = (
+            pending
+            if pending is not None
+            and pending.graph_run_id == plan.graph_run_id
+            and pending.resume_input_seq == plan.input_seq
+            else None
+        )
+        return self._sse_admission(
+            handle=handle,
+            workspace_token=workspace_token,
+            safe_content=persisted_content,
+            principal=principal,
+            pending_input_id=(
+                resumed_pending.pending_input_id
+                if resumed_pending is not None
+                else uuid4()
+            ),
+            is_resume=resumed_pending is not None,
+        )
+
+    def _sse_admission(
+        self,
+        *,
+        handle: TurnExecutionHandle,
+        workspace_token: str,
+        safe_content: str,
+        principal: object,
+        pending_input_id: UUID,
+        is_resume: bool,
+    ) -> LangGraphSseAdmission:
+        with self._session_factory() as session:
+            started_event_id = session.scalar(
+                select(WorkspaceEventRecord.id).where(
+                    WorkspaceEventRecord.workspace_id == handle.workspace_id,
+                    WorkspaceEventRecord.event_type == "turn.started",
+                    WorkspaceEventRecord.payload["turn_id"].astext
+                    == handle.input_turn_id,
+                )
+            )
+        if started_event_id is None:
+            raise TurnExecutionError("admitted turn.started fact is unavailable")
+        return LangGraphSseAdmission(
+            handle=handle,
+            workspace_token=workspace_token,
+            safe_content=safe_content,
+            principal=principal,
+            pending_input_id=pending_input_id,
+            is_resume=is_resume,
+            started_event_id=started_event_id,
+        )
+
+    def _run_resume(
+        self,
+        *,
+        workspace_token: str,
+        safe_content: str,
+        auth_session_ref: UUID,
+        actor_id: str,
+        principal: object,
+        pending: AgentPendingInputRecord,
+        input_turn_id: str | None,
+        defer_terminal: bool,
+    ) -> ConversationTurn | ConversationRunResult:
+        if pending.status != "active":
+            raise self._conflict("TURN_RECOVERY_IN_PROGRESS")
+        self._preflight_resume_quota(
+            workspace_token=workspace_token,
+            safe_content=safe_content,
+        )
+        with self._turn_service.advisory_lock(pending.agent_thread_id) as lock:
+            handle = self._turn_service.begin_resume(
+                workspace_token=workspace_token,
+                auth_session_ref=auth_session_ref,
+                actor_id=actor_id,
+                safe_user_text=safe_content,
+                pending_input_id=pending.pending_input_id,
+                lock=lock,
+                saver=self._checkpoint_saver,
+                input_turn_id=input_turn_id,
             )
             return self._execute(
                 handle=handle,
@@ -273,6 +586,7 @@ class LangGraphConversationOrchestrator:
                 lock=lock,
                 pending_input_id=pending.pending_input_id,
                 is_resume=True,
+                defer_terminal=defer_terminal,
             )
 
     def _preflight_resume_quota(
@@ -314,7 +628,8 @@ class LangGraphConversationOrchestrator:
         principal: object,
         running: AgentTurnExecutionRecord,
         pending: AgentPendingInputRecord | None,
-    ) -> ConversationTurn:
+        defer_terminal: bool,
+    ) -> ConversationTurn | ConversationRunResult:
         if running.lease_expires_at is None or running.lease_expires_at > datetime.now(UTC):
             raise self._conflict("TURN_IN_PROGRESS")
         with self._workspace_lock(running.workspace_id) as agent_thread_id:
@@ -353,6 +668,7 @@ class LangGraphConversationOrchestrator:
                         else uuid4()
                     ),
                     is_resume=resumed_pending is not None,
+                    defer_terminal=defer_terminal,
                 )
         if safe_content != persisted_content:
             # This request was a genuinely new input, not a retry of the
@@ -382,7 +698,8 @@ class LangGraphConversationOrchestrator:
         lock: AdvisoryLockHandle,
         pending_input_id: UUID,
         is_resume: bool,
-    ) -> ConversationTurn:
+        defer_terminal: bool,
+    ) -> ConversationTurn | ConversationRunResult:
         context = self._server_context(handle.execution_id)
         invocation = FencedPostgresSaverAdapter(
             self._checkpoint_saver
@@ -469,11 +786,29 @@ class LangGraphConversationOrchestrator:
                 pending_input_id=pending_input_id,
                 draft_revision=revision,
                 previous_pending_input_id=pending_input_id if is_resume else None,
-            )
-            return self._interrupt_turn(
+            ) if not defer_terminal else None
+            turn = self._interrupt_turn(
                 workspace_token=workspace_token,
                 message=str(stopped.payload["summary"]),
                 draft_revision=revision,
+            )
+            if not defer_terminal:
+                return turn
+            return ConversationRunResult(
+                turn=turn,
+                terminal_finalizer=lambda event_type, payload: (
+                    self._finalize_deferred_terminal(
+                        handle=handle,
+                        workspace_token=workspace_token,
+                        verified=verified,
+                        pending_input_id=pending_input_id,
+                        is_resume=is_resume,
+                        is_interrupt=True,
+                        draft_revision=revision,
+                        event_type=event_type,
+                        payload=payload,
+                    )
+                ),
             )
         turn = self._conversation_turn(GraphOutput.model_validate(output))
         verified = self._verify_end(invocation, graph)
@@ -483,6 +818,23 @@ class LangGraphConversationOrchestrator:
             else "message.completed"
         )
         terminal_payload = self._terminal_payload(handle, turn, event_type=event_type)
+        if defer_terminal:
+            return ConversationRunResult(
+                turn=turn,
+                terminal_finalizer=lambda terminal_type, terminal_payload: (
+                    self._finalize_deferred_terminal(
+                        handle=handle,
+                        workspace_token=workspace_token,
+                        verified=verified,
+                        pending_input_id=pending_input_id,
+                        is_resume=is_resume,
+                        is_interrupt=False,
+                        draft_revision=turn.draft_revision,
+                        event_type=terminal_type,
+                        payload=terminal_payload,
+                    )
+                ),
+            )
         if is_resume:
             self._turn_service.finalize_resume_outcome(
                 handle,
@@ -503,6 +855,72 @@ class LangGraphConversationOrchestrator:
                 payload=terminal_payload,
             )
         return turn
+
+    def _finalize_deferred_terminal(
+        self,
+        *,
+        handle: TurnExecutionHandle,
+        workspace_token: str,
+        verified: Any,
+        pending_input_id: UUID,
+        is_resume: bool,
+        is_interrupt: bool,
+        draft_revision: int,
+        event_type: TerminalEventType,
+        payload: dict[str, object],
+    ) -> int | None:
+        """Finalize only after the synchronous graph worker has returned.
+
+        The original advisory-lock context has ended, but the execution lease
+        remains live and prevents takeover.  Reacquiring the same server-side
+        thread lock closes the candidate and terminal atomically.  A competing
+        completion/disconnect finalizer observes the already-written terminal
+        instead of creating a second one.
+        """
+
+        try:
+            with self._turn_service.advisory_lock(handle.agent_thread_id) as lock:
+                if is_interrupt:
+                    return self._turn_service.finalize_interrupt(
+                        handle,
+                        workspace_token=workspace_token,
+                        lock=lock,
+                        verified=verified,
+                        pending_input_id=pending_input_id,
+                        draft_revision=draft_revision,
+                        previous_pending_input_id=(
+                            pending_input_id if is_resume else None
+                        ),
+                        terminal_event_type=event_type,
+                        terminal_payload=payload,
+                    )
+                if is_resume:
+                    return self._turn_service.finalize_resume_outcome(
+                        handle,
+                        workspace_token=workspace_token,
+                        lock=lock,
+                        verified=verified,
+                        pending_input_id=pending_input_id,
+                        event_type=event_type,
+                        payload=payload,
+                    )
+                return self._turn_service.finalize_graph_turn_with_event(
+                    handle,
+                    workspace_token=workspace_token,
+                    lock=lock,
+                    verified=verified,
+                    event_type=event_type,
+                    payload=payload,
+                )
+        except StaleTurnFenceError:
+            with self._session_factory() as session:
+                execution = session.get(
+                    AgentTurnExecutionRecord,
+                    handle.execution_id,
+                )
+                if execution is not None and execution.terminal_event_id is not None:
+                    return execution.terminal_event_id
+            raise
 
     def _runtime_context(
         self,
@@ -649,3 +1067,114 @@ class LangGraphConversationOrchestrator:
             "content": turn.assistant_message,
             **outcome,
         }
+
+
+class WorkspaceBoundConversationOrchestrator:
+    """Dispatch both JSON and SSE from one persisted Workspace binding."""
+
+    def __init__(
+        self,
+        *,
+        resolver: WorkspaceEngineResolver,
+        legacy: object,
+        langgraph: LangGraphConversationOrchestrator | None,
+    ) -> None:
+        self._resolver = resolver
+        self._legacy = legacy
+        self._langgraph = langgraph
+
+    def _delegate(self, workspace_token: str) -> object:
+        try:
+            engine = self._resolver.resolve(workspace_token=workspace_token)
+        except EngineBindingConflictError as error:
+            raise ConversationConflictError(
+                "ENGINE_BINDING_CONFLICT",
+                _CONFLICT_MESSAGES["ENGINE_BINDING_CONFLICT"],
+            ) from error
+        if engine == "legacy":
+            return self._legacy
+        if self._langgraph is None:
+            raise ConversationUnavailableError()
+        return self._langgraph
+
+    def handle(
+        self,
+        *,
+        workspace_token: str,
+        content: str,
+        auth_session_id: str | None,
+    ) -> ConversationTurn:
+        delegate = self._delegate(workspace_token)
+        return delegate.handle(  # type: ignore[attr-defined,no-any-return]
+            workspace_token=workspace_token,
+            content=content,
+            auth_session_id=auth_session_id,
+        )
+
+    def prepare(
+        self,
+        *,
+        workspace_token: str,
+        content: str,
+        turn_id: str,
+        auth_session_id: str | None,
+    ) -> ConversationRunResult:
+        delegate = self._delegate(workspace_token)
+        return delegate.prepare(  # type: ignore[attr-defined,no-any-return]
+            workspace_token=workspace_token,
+            content=content,
+            turn_id=turn_id,
+            auth_session_id=auth_session_id,
+        )
+
+    def admit_sse(
+        self,
+        *,
+        workspace_token: str,
+        content: str,
+        proposed_turn_id: str,
+        auth_session_id: str | None,
+    ) -> LangGraphSseAdmission | None:
+        delegate = self._delegate(workspace_token)
+        admitter = getattr(delegate, "admit_sse", None)
+        if admitter is None:
+            return None
+        return cast(
+            LangGraphSseAdmission,
+            admitter(
+                workspace_token=workspace_token,
+                content=content,
+                proposed_turn_id=proposed_turn_id,
+                auth_session_id=auth_session_id,
+            ),
+        )
+
+    def prepare_admitted(
+        self,
+        *,
+        admission: LangGraphSseAdmission,
+    ) -> ConversationRunResult:
+        if self._langgraph is None:
+            raise ConversationUnavailableError()
+        return self._langgraph.prepare_admitted(admission=admission)
+
+    def transport_binding(self, *, workspace_token: str) -> dict[str, object]:
+        delegate = self._delegate(workspace_token)
+        metadata = getattr(delegate, "transport_binding", None)
+        if metadata is not None:
+            return cast(dict[str, object], metadata(workspace_token=workspace_token))
+        engine = self._resolver.resolve(workspace_token=workspace_token)
+        return {
+            "orchestrator": engine,
+            "flow_version": 1 if engine == "legacy" else 2,
+        }
+
+    def transport_turn_id(self, *, workspace_token: str, proposed: str) -> str:
+        delegate = self._delegate(workspace_token)
+        resolver = getattr(delegate, "transport_turn_id", None)
+        if resolver is None:
+            return proposed
+        return cast(
+            str,
+            resolver(workspace_token=workspace_token, proposed=proposed),
+        )

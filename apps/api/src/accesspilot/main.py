@@ -6,7 +6,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from typing import Literal
+from typing import Any, Literal, cast
 from urllib.parse import parse_qs
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -40,7 +40,12 @@ from accesspilot.agent.embeddings import (
     DeterministicEmbeddingModel,
     EmbeddingModel,
 )
-from accesspilot.agent.engine_binding import allocate_flow_version
+from accesspilot.agent.engine_binding import WorkspaceEngineResolver, allocate_flow_version
+from accesspilot.agent.json_orchestrator import (
+    LangGraphConversationOrchestrator,
+    LangGraphSseAdmission,
+    WorkspaceBoundConversationOrchestrator,
+)
 from accesspilot.agent.structured_reply import StructuredReplyModel
 from accesspilot.approvals import (
     ApprovalActorMismatchError,
@@ -72,9 +77,11 @@ from accesspilot.conversation import (
     ConversationConflictError,
     ConversationInputError,
     ConversationOrchestrator,
+    ConversationRunResult,
     ConversationUnavailableError,
     DeterministicStructuredReplyModel,
     LegacyConversationOrchestrator,
+    TerminalEventType,
     _redact_sensitive_content,
     contains_protected_internal_content,
     is_suspicious_protected_prefix,
@@ -83,11 +90,13 @@ from accesspilot.conversation import (
 )
 from accesspilot.db.models import (
     AccessGrantRecord,
+    AgentTurnExecutionRecord,
     ApprovalCaseRecord,
     ApprovalStepRecord,
     EmployeeRecord,
     ProvisioningAttemptRecord,
     WorkspaceEventRecord,
+    WorkspaceRecord,
 )
 from accesspilot.db.session import build_engine, build_session_factory
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
@@ -105,6 +114,7 @@ from accesspilot.events import (
     TurnInProgressError,
     append_turn_started,
     append_turn_terminal,
+    find_turn_terminal,
     format_sse_event,
     get_model_quota,
     list_turn_events,
@@ -370,15 +380,16 @@ def create_app(
         product_actor_id=active_settings.product_actor_id,
         demo_mode_enabled=active_settings.demo_mode_enabled,
     )
+    legacy_conversation_orchestrator = LegacyConversationOrchestrator(
+        session_factory=active_session_factory,
+        workspace_service=workspace_service,
+        model=structured_reply_model,
+        policy_service=active_policy_service,
+    )
     active_conversation_orchestrator = (
         conversation_orchestrator
         if conversation_orchestrator is not None
-        else LegacyConversationOrchestrator(
-            session_factory=active_session_factory,
-            workspace_service=workspace_service,
-            model=structured_reply_model,
-            policy_service=active_policy_service,
-        )
+        else legacy_conversation_orchestrator
     )
     active_checkpoint_runtime_factory = (
         checkpoint_runtime_factory or build_checkpoint_runtime
@@ -391,6 +402,28 @@ def create_app(
             runtime = active_checkpoint_runtime_factory(active_settings)
             runtime.start()
         application.state.checkpoint_runtime = runtime
+        if conversation_orchestrator is not None:
+            application.state.conversation_orchestrator = conversation_orchestrator
+        else:
+            saver = getattr(runtime, "saver", None) if runtime is not None else None
+            langgraph_orchestrator = (
+                LangGraphConversationOrchestrator(
+                    session_factory=active_session_factory,
+                    workspace_service=workspace_service,
+                    model=structured_reply_model,
+                    checkpoint_saver=saver,
+                    policy_service=active_policy_service,
+                )
+                if saver is not None
+                else None
+            )
+            application.state.conversation_orchestrator = (
+                WorkspaceBoundConversationOrchestrator(
+                    resolver=WorkspaceEngineResolver(active_session_factory),
+                    legacy=legacy_conversation_orchestrator,
+                    langgraph=langgraph_orchestrator,
+                )
+            )
         try:
             yield
         finally:
@@ -398,6 +431,14 @@ def create_app(
                 runtime.close()
 
     app = FastAPI(title=active_settings.app_name, lifespan=lifespan)
+    app.state.stream_cleanup_tasks = set()
+
+    def current_conversation_orchestrator() -> ConversationOrchestrator:
+        return getattr(
+            app.state,
+            "conversation_orchestrator",
+            active_conversation_orchestrator,
+        )
 
     # v1.2 closes the anonymous Workspace/Demo surface at the application
     # boundary.  Keeping this guard ahead of route matching also prevents a
@@ -885,6 +926,11 @@ def create_app(
                 active_session_factory,
                 account_id=body.account_id,
                 ttl_seconds=active_settings.auth_session_ttl_seconds,
+                flow_allocator=lambda agent_thread_id: allocate_flow_version(
+                    agent_thread_id,
+                    mode=active_settings.orchestrator_mode,
+                    canary_percent=active_settings.langgraph_canary_percent,
+                ),
             )
         except LoginAccountError as error:
             raise HTTPException(status_code=422, detail="不支持该 Mock 账号") from error
@@ -1171,16 +1217,87 @@ def create_app(
         request: Request,
         workspace: Workspace = Depends(require_workspace),  # noqa: B008
     ) -> SafeStreamingResponse:
-        """当前轮真实 SSE：先发 started，再在线程池执行同步 prepare。"""
+        """当前轮 SSE：先原子 admission，再发 started 并执行图。"""
 
-        turn_id = str(uuid4())
+        orchestrator = current_conversation_orchestrator()
+        proposed_turn_id = str(uuid4())
+        auth_session_id = workspace.auth_session_id
+        admission: LangGraphSseAdmission | None = None
+        admission_resolver = getattr(orchestrator, "admit_sse", None)
+        turn_id_resolver = getattr(orchestrator, "transport_turn_id", None)
+        binding_resolver = getattr(orchestrator, "transport_binding", None)
         try:
-            with active_session_factory() as session:
-                started_event = append_turn_started(
-                    session,
+            if admission_resolver is not None:
+                admission = admission_resolver(
                     workspace_token=workspace.token,
-                    turn_id=turn_id,
+                    content=body.content,
+                    proposed_turn_id=proposed_turn_id,
+                    auth_session_id=auth_session_id,
                 )
+            if admission is not None:
+                turn_id = admission.turn_id
+                with active_session_factory() as session:
+                    started_event = session.get(
+                        WorkspaceEventRecord,
+                        admission.started_event_id,
+                    )
+                    if started_event is None:
+                        raise ConversationUnavailableError()
+                    session.expunge(started_event)
+            else:
+                turn_id = (
+                    str(
+                        turn_id_resolver(
+                            workspace_token=workspace.token,
+                            proposed=proposed_turn_id,
+                        )
+                    )
+                    if turn_id_resolver is not None
+                    else proposed_turn_id
+                )
+                binding = (
+                    dict(binding_resolver(workspace_token=workspace.token))
+                    if binding_resolver is not None
+                    else {}
+                )
+                with active_session_factory() as session:
+                    started_event = append_turn_started(
+                        session,
+                        workspace_token=workspace.token,
+                        turn_id=turn_id,
+                        orchestrator=(
+                            str(binding["orchestrator"])
+                            if binding.get("orchestrator") is not None
+                            else None
+                        ),
+                        flow_version=(
+                            int(binding["flow_version"])
+                            if binding.get("flow_version") is not None
+                            else None
+                        ),
+                        graph_version=(
+                            str(binding["graph_version"])
+                            if binding.get("graph_version") is not None
+                            else None
+                        ),
+                    )
+        except ModelQuotaExceededError as error:
+            raise HTTPException(
+                status_code=429,
+                detail="模型调用额度已用尽，当前为只读回放模式",
+            ) from error
+        except ConversationInputError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except ConversationConflictError as error:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": error.code, "message": error.safe_message},
+            ) from error
+        except ConversationUnavailableError as error:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": error.code, "message": error.safe_message},
+            ) from error
         except TurnInProgressError as error:
             raise HTTPException(
                 status_code=409,
@@ -1190,32 +1307,138 @@ def create_app(
                 },
             ) from error
 
-        def persist_terminal(
-            event_type: str,
-            payload: dict[str, object],
-        ) -> WorkspaceEventRecord | None:
+        def persisted_terminal() -> WorkspaceEventRecord | None:
             with active_session_factory() as session:
-                return append_turn_terminal(
+                workspace_record = session.scalar(
+                    select(WorkspaceRecord).where(
+                        WorkspaceRecord.id == workspace.workspace_id
+                    )
+                )
+                if workspace_record is None:
+                    return None
+                event = find_turn_terminal(
+                    session,
+                    workspace_id=workspace_record.id,
+                    turn_id=turn_id,
+                )
+                if event is not None:
+                    session.expunge(event)
+                return event
+
+        def persist_terminal(
+            event_type: TerminalEventType,
+            payload: dict[str, object],
+            run_result: ConversationRunResult | None = None,
+        ) -> WorkspaceEventRecord | None:
+            if run_result is not None and run_result.owns_terminal:
+                event_id = run_result.finalize_terminal(event_type, payload)
+                if event_id is None:
+                    return persisted_terminal()
+                with active_session_factory() as session:
+                    event = session.get(WorkspaceEventRecord, event_id)
+                    if event is not None:
+                        session.expunge(event)
+                    return event
+            with active_session_factory() as session:
+                event = append_turn_terminal(
                     session,
                     workspace_token=workspace.token,
                     turn_id=turn_id,
                     event_type=event_type,
                     payload=payload,
                 )
+            if event is None:
+                return persisted_terminal()
+            if run_result is not None and event_type == "message.completed":
+                run_result.finalize_success()
+            return event
 
-        async def persist_interrupted() -> None:
-            persist_terminal(
+        def graph_worker_is_running() -> bool:
+            with active_session_factory() as session:
+                return (
+                    session.scalar(
+                        select(AgentTurnExecutionRecord.id)
+                        .where(
+                            AgentTurnExecutionRecord.workspace_id
+                            == workspace.workspace_id,
+                            AgentTurnExecutionRecord.input_turn_id == turn_id,
+                            AgentTurnExecutionRecord.status == "running",
+                        )
+                        .limit(1)
+                    )
+                    is not None
+                )
+
+        worker_task: asyncio.Task[ConversationRunResult] | None = None
+        prepared_result: ConversationRunResult | None = None
+        cleanup_started = False
+
+        def interrupted_payload() -> dict[str, object]:
+            return {
+                "turn_id": turn_id,
+                "reason": "client_cancelled",
+                "retryable": True,
+            }
+
+        async def cleanup_after_worker_stops(
+            task: asyncio.Task[ConversationRunResult],
+        ) -> None:
+            try:
+                result = await asyncio.shield(task)
+            except BaseException:
+                # A failed graph invocation may still own a live execution.
+                # Never let the transport release that lease or forge a
+                # terminal; T33/T37 takeover remains authoritative.
+                if not graph_worker_is_running() and persisted_terminal() is None:
+                    await asyncio.to_thread(
+                        persist_terminal,
+                        "turn.interrupted",
+                        interrupted_payload(),
+                    )
+                return
+            await asyncio.to_thread(
+                persist_terminal,
                 "turn.interrupted",
-                {
-                    "turn_id": turn_id,
-                    "reason": "client_cancelled",
-                    "retryable": True,
-                },
+                interrupted_payload(),
+                result,
             )
 
+        def spawn_cleanup(task: asyncio.Task[ConversationRunResult]) -> None:
+            nonlocal cleanup_started
+            if cleanup_started:
+                return
+            cleanup_started = True
+            cleanup = asyncio.create_task(cleanup_after_worker_stops(task))
+            cleanup_tasks: set[asyncio.Task[None]] = app.state.stream_cleanup_tasks
+            cleanup_tasks.add(cleanup)
+            cleanup.add_done_callback(cleanup_tasks.discard)
+
+        async def handle_disconnect() -> None:
+            task = worker_task
+            result = prepared_result
+            if result is not None:
+                await asyncio.to_thread(
+                    persist_terminal,
+                    "turn.interrupted",
+                    interrupted_payload(),
+                    result,
+                )
+                return
+            if task is None:
+                await asyncio.to_thread(
+                    persist_terminal,
+                    "turn.interrupted",
+                    interrupted_payload(),
+                )
+                return
+            if not task.done():
+                spawn_cleanup(task)
+                return
+            spawn_cleanup(task)
+
         async def stream_generator() -> AsyncIterator[str]:
+            nonlocal prepared_result, worker_task
             seq = 1
-            auth_session_id = workspace.auth_session_id
             # 首帧只依赖已提交的 started 事实，不等待同步结构化提取。
             yield encode_persisted_frame(
                 started_event,
@@ -1225,14 +1448,31 @@ def create_app(
             seq += 1
             prepared = None
             try:
-                run_result = await asyncio.to_thread(
-                    active_conversation_orchestrator.prepare,
-                    workspace_token=workspace.token,
-                    content=body.content,
-                    turn_id=turn_id,
-                    auth_session_id=auth_session_id,
-                )
+                if admission is not None:
+                    prepare_admitted = cast(Any, orchestrator).prepare_admitted
+                    worker_task = asyncio.create_task(
+                        asyncio.to_thread(
+                            prepare_admitted,
+                            admission=admission,
+                        )
+                    )
+                else:
+                    worker_task = asyncio.create_task(
+                        asyncio.to_thread(
+                            orchestrator.prepare,
+                            workspace_token=workspace.token,
+                            content=body.content,
+                            turn_id=turn_id,
+                            auth_session_id=auth_session_id,
+                        )
+                    )
+                run_result = await asyncio.shield(worker_task)
+                prepared_result = run_result
                 prepared = run_result.turn
+            except asyncio.CancelledError:
+                if worker_task is not None:
+                    spawn_cleanup(worker_task)
+                raise
             except ModelQuotaExceededError:
                 message = "模型调用额度已用尽，当前为只读回放模式"
                 event = persist_terminal(
@@ -1261,6 +1501,19 @@ def create_app(
                 return
             except Exception:
                 # 流式边界不泄漏供应商异常、请求头、Key 或配额细节。
+                existing = persisted_terminal()
+                if existing is not None:
+                    yield encode_persisted_frame(
+                        existing,
+                        turn_id=turn_id,
+                        seq=seq,
+                    )
+                    return
+                if graph_worker_is_running():
+                    # The synchronous worker has stopped with an unfinalized
+                    # execution.  Its lease/fence remain owned by recovery;
+                    # the transport must not claim cancellation or release it.
+                    return
                 message = "我暂时没能可靠理解这条消息，请稍后重试或换一种说法。"
                 event = persist_terminal(
                     "error.recoverable",
@@ -1347,6 +1600,7 @@ def create_app(
                             "error_code", "BUSINESS_VALIDATION_FAILED"
                         ),
                     },
+                    run_result,
                 )
                 if event is not None:
                     yield encode_persisted_frame(event, turn_id=turn_id, seq=seq)
@@ -1395,6 +1649,7 @@ def create_app(
                         "reason": "client_cancelled",
                         "retryable": True,
                     },
+                    run_result,
                 )
                 if event is not None:
                     yield encode_persisted_frame(event, turn_id=turn_id, seq=seq)
@@ -1407,6 +1662,7 @@ def create_app(
                         "code": "ANSWER_STREAM_UNAVAILABLE",
                         "message": "回答流暂时不可用，请稍后重试。",
                     },
+                    run_result,
                 )
                 if event is not None:
                     yield encode_persisted_frame(event, turn_id=turn_id, seq=seq)
@@ -1420,6 +1676,7 @@ def create_app(
                         "code": "ANSWER_STREAM_UNAVAILABLE",
                         "message": "回答流暂时不可用，请稍后重试。",
                     },
+                    run_result,
                 )
                 if event is not None:
                     yield encode_persisted_frame(event, turn_id=turn_id, seq=seq)
@@ -1445,10 +1702,10 @@ def create_app(
                     "content": content,
                     **outcome,
                 },
+                run_result,
             )
             if event is None:
                 return
-            run_result.finalize_success()
             payload = dict(event.payload)
             payload["persisted_event_id"] = event.id
             yield encode_persisted_frame(
@@ -1461,7 +1718,7 @@ def create_app(
         return SafeStreamingResponse(
             stream_generator(),
             media_type="text/event-stream",
-            on_disconnect=persist_interrupted,
+            on_disconnect=handle_disconnect,
             headers={
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
@@ -1476,7 +1733,7 @@ def create_app(
         """处理一轮申请对话，并持久化前端可回放的安全事件。"""
 
         try:
-            turn = active_conversation_orchestrator.handle(
+            turn = current_conversation_orchestrator().handle(
                 workspace_token=workspace.token,
                 content=body.content,
                 auth_session_id=workspace.auth_session_id,
