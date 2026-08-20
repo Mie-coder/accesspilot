@@ -6,7 +6,7 @@
 
 **验收日期：** 2026-08-21
 
-**状态：** `Verified`；独立验收修复轮 P0/P1/P2=0/0/0，`product_verified=true`；用户已授权仅本地提交，未推送、合并或部署。
+**状态：** `Verified`；独立验收修复轮 P0/P1/P2=0/0/0，`product_verified=true`；已本地提交 `9e757fd`，未推送、合并或部署。
 
 ## 1. 口径与边界
 
@@ -201,4 +201,6 @@ T41 实现修改：
 - 独立复算 HEAD 与 `apps/ + scripts/` 内容身份均和 task space 8 主证一致；三张新截图尺寸和内容匹配，旧跨 revision 截图未计入主证；
 - exact `6c3` 探针资源与所有 `t41rb`、`t41_suite`、task 8 browser 资源均不存在；来源不明的既有 11 个测试 DB / 22 个角色保持未动。
 
-T41 三条验收标准与 AC-01–AC-13 已在同一内容 revision 上通过，故设置 `product_verified=true`。T41 等待按用户长期授权仅本地提交；T42 尚未开始，`interview_ready` 或正式简历表述仍不得据此自动成立。
+T41 三条验收标准与 AC-01–AC-13 已在同一内容 revision 上通过，故设置 `product_verified=true`。T41 已按用户长期授权本地提交 `9e757fd`。
+
+截至 2026-08-21，后续 T42 已完成 Claim Ledger、Product Manifest、限制披露、候选表述、Agent Loop 讲解图和 Demo 索引，并经独立验收修复轮判定 P0/P1/P2=0/0/0。该结论不改变 T41 的产品验收分母；`interview_ready` 仍为 `pending_user_verification`，正式简历仍未修改。

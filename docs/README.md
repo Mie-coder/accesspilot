@@ -25,3 +25,15 @@
 - 最终 DeepSeek 评审：`reviews/accesspilot-v1.2-final-acceptance-deepseek-review-2026-08-12.md`
 
 T18–T25 产品与证据产物已完成，`product_verified=true`；`interview_ready=pending_user_verification`。当前仅有本地提交，不推送、合并或部署；真实能力以根目录 `README.md`、对应测试和 evidence 为准。
+
+## AccessPilot v1.3 证据入口
+
+- [Canonical Spec](specs/accesspilot-langgraph-agent-loop-v1.3.md)
+- [串行 Ticket](tickets/accesspilot-langgraph-agent-loop-v1.3.md)
+- [T41 同 revision 产品验收](evidence/accesspilot-v1.3-t41-acceptance-2026-08-20.md)
+- [Product Manifest](evidence/accesspilot-v1.3-product-manifest.md)
+- [Claim Ledger](evidence/accesspilot-v1.3-claim-ledger.md)
+- [面试候选表述、Agent Loop 讲解图与 Demo 索引](evidence/accesspilot-v1.3-interview-evidence-pack.md)
+- [T42 定向文档审计](../scripts/verify-t42-evidence.py)
+
+v1.3 的 T26–T42 已全部 `Verified`，T41 设置 `product_verified=true`；T42 独立验收修复轮 P0/P1/P2=0/0/0。`interview_ready=pending_user_verification`；候选表述不是正式简历变更，也不代表用户本人已完成无稿复现。

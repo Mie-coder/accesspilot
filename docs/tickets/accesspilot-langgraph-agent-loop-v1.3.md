@@ -1,7 +1,7 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Tickets
 
-**状态：** 用户已确认串行实施；T26–T41 `Verified`，`product_verified=true`，T42 尚未开始；T41 已获授权仅本地提交，后续 Ticket 独立验收通过后默认仅本地提交；未授权推送、合并、部署或修改正式简历
-**更新时间：** 2026-08-20
+**状态：** 用户已确认串行实施；T26–T42 `Verified`，`product_verified=true`，`interview_ready=pending_user_verification`；T42 独立验收修复轮 P0/P1/P2=0/0/0，仅本地提交；未授权推送、合并、部署或修改正式简历
+**更新时间：** 2026-08-21
 **继承基线：** AccessPilot v1.2，`product_verified=true`；T32 实现基线 HEAD `7ad8a01`，历史证据不自动证明 v1.3
 **Canonical Spec：** `docs/specs/accesspilot-langgraph-agent-loop-v1.3.md`
 **双评审裁决：** `docs/reviews/accesspilot-v1.3-spec-review-decisions-2026-08-16.md`
@@ -443,7 +443,7 @@ canary。
 
 ## T42 — Claim Ledger、限制披露与简历证据包
 
-**状态：** 尚未开始
+**状态：** `Verified`；三条验收标准与 AC-14 均通过；首轮独立验收发现三项证据链 P1，修复轮复核 P0/P1/P2=0/0/0；正式简历未修改，`interview_ready=pending_user_verification`
 
 **目标：** 把已验证的 LangGraph 能力转化为可追溯证据，但不直接修改正式简历。
 
@@ -455,7 +455,7 @@ canary。
 2. Product Manifest/评测证据只记录 T41 实测指标；Provider at-least-once、Mock 身份、无真实 SSO/IAM、无 ReAct/Multi-Agent/SLA/Token 成本/可观测平台等边界明确披露。
 3. 形成可核验的简历候选表述、Agent Loop 讲解图和 Demo 证据，但正式简历保持未修改；只有用户另行确认后才允许采用。
 
-**测试/运行验证：** 文档链接、revision、指标来源、Claim→证据反向抽查和边界审计；独立 reviewer 只读复核 AC-14。
+**测试/运行验证：** 六条 Claim、14 项 T41 指标来源与仓库链接审计通过；8/8 mutation probes 和 5/5 定向负向探针均能拒绝证据漂移、夸大表述、工具 exactly-once 误述及 Markdown 空白缺陷；Ruff、tracked/untracked diff-check 通过。独立 reviewer 修复轮只读复核 AC-14，P0/P1/P2=0/0/0。证据入口见 [Claim Ledger](../evidence/accesspilot-v1.3-claim-ledger.md)、[Product Manifest](../evidence/accesspilot-v1.3-product-manifest.md)、[Interview Evidence Pack](../evidence/accesspilot-v1.3-interview-evidence-pack.md) 与 [审计脚本](../../scripts/verify-t42-evidence.py)。
 
 **依赖：** T41。
 
@@ -467,4 +467,4 @@ canary。
 
 - T26–T40 分层建立 AC-01–AC-12；T41 在同一 revision 汇总判定 AC-01–AC-13；T42 单独完成 AC-14；
 - 数据库、checkpoint、Graph State、JSON、SSE、UI 和证据按依赖串行，不并发修改共享权威源；
-- **当前停点：T41 `Verified`，`product_verified=true`，已获授权仅本地提交；T42 尚未开始。** 后续 Ticket 独立验收通过后默认仅本地提交；仍未授权推送、合并、部署或修改正式简历。
+- **当前停点：T26–T42 全部 `Verified`，`product_verified=true`，`interview_ready=pending_user_verification`。** T41 已本地提交 `9e757fd`，T42 按用户长期授权仅本地提交；仍未授权推送、合并、部署或修改正式简历。下一步进入 v1.3 整体最终验收。
