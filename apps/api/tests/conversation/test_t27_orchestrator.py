@@ -615,7 +615,7 @@ def test_json_and_sse_entries_only_invoke_the_injected_orchestrator(
         "draft",
         "assistant_message",
     ):
-        assert terminal_payload[key] == json_payload[key]
+        assert terminal_payload.get(key) == json_payload[key]
     assert len(orchestrator.handle_calls) == 1
     assert orchestrator.handle_calls[0] == {
         "workspace_token": login.session_token,

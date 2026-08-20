@@ -35,7 +35,7 @@ describe('bootstrapWorkspace', () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       if (url === '/api/drafts/current') {
-        return Response.json({ draft: null })
+        return Response.json({ draft: null, draft_revision: 4 })
       }
       if (url === '/api/auth/session') {
         return Response.json({
@@ -65,6 +65,7 @@ describe('bootstrapWorkspace', () => {
 
     expect(snapshot.identity.employee_id).toBe('EMP-002')
     expect(snapshot.draft).toBeNull()
+    expect(snapshot.draftRevision).toBe(4)
     expect(snapshot.lastEventId).toBe(1)
     expect(snapshot.events[0]?.type).toBe('message.assistant')
     expect(fetchMock).toHaveBeenCalledWith(

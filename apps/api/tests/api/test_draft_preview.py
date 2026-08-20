@@ -64,6 +64,43 @@ def test_preview_returns_missing_fields_for_current_workspace(
     }
 
 
+def test_preview_and_current_draft_expose_the_authoritative_revision(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    client = build_client(database_session_factory)
+
+    first = client.post(
+        "/api/drafts/preview",
+        json={"entitlement_id": "insighthub.dashboard_view"},
+    )
+    assert first.status_code == 200
+    assert first.json()["draft_revision"] == 1
+
+    current = client.get("/api/drafts/current")
+    assert current.status_code == 200
+    assert current.json() == {
+        "draft": first.json()["draft"],
+        "draft_revision": 1,
+    }
+
+    idempotent = client.post(
+        "/api/drafts/preview",
+        json={"entitlement_id": "insighthub.dashboard_view"},
+    )
+    assert idempotent.status_code == 200
+    assert idempotent.json()["draft_revision"] == 1
+
+    advanced = client.post(
+        "/api/drafts/preview",
+        json={
+            "entitlement_id": "insighthub.dashboard_view",
+            "duration_days": 7,
+        },
+    )
+    assert advanced.status_code == 200
+    assert advanced.json()["draft_revision"] == 2
+
+
 def test_complete_unconfirmed_draft_is_not_ready_for_approval(
     database_session_factory: sessionmaker[Session],
 ) -> None:
@@ -210,7 +247,10 @@ def test_preview_rejects_forged_entitlement_without_creating_a_draft(
     assert resolution["target_field"] == "entitlement_id"
     assert resolution["candidates"] == []
     assert resolution["eligible_access"]
-    assert client.get("/api/drafts/current").json() == {"draft": None}
+    assert client.get("/api/drafts/current").json() == {
+        "draft": None,
+        "draft_revision": 0,
+    }
 
 
 def test_preview_ambiguous_entitlement_keeps_existing_draft_unchanged(
@@ -250,7 +290,10 @@ def test_preview_ambiguous_entitlement_keeps_existing_draft_unchanged(
         "insighthub.customer_export",
         "insighthub.dashboard_view",
     ]
-    assert client.get("/api/drafts/current").json() == {"draft": snapshot}
+    assert client.get("/api/drafts/current").json() == {
+        "draft": snapshot,
+        "draft_revision": 1,
+    }
 
 
 def test_preview_alias_is_canonicalized_to_stable_entitlement_code(

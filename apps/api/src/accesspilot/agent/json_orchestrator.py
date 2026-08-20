@@ -1046,14 +1046,31 @@ class LangGraphConversationOrchestrator:
     def _conversation_turn(output: GraphOutput) -> ConversationTurn:
         return ConversationTurn.model_validate(output.model_dump(mode="python"))
 
-    @staticmethod
     def _terminal_payload(
+        self,
         handle: TurnExecutionHandle,
         turn: ConversationTurn,
         *,
         event_type: str,
     ) -> dict[str, object]:
         outcome = normalized_outcome(turn)
+        with self._session_factory() as session:
+            workspace = session.get(WorkspaceRecord, handle.workspace_id)
+        if workspace is None:
+            raise TurnExecutionError("terminal workspace is unavailable")
+        draft = workspace.draft
+        if (
+            draft is not None
+            and draft.get("employee_id") is not None
+            and draft.get("employee_id") != handle.actor_id
+        ):
+            draft = None
+        outcome.update(
+            {
+                "draft": draft,
+                "draft_revision": workspace.draft_revision,
+            }
+        )
         if event_type == "error.recoverable":
             return {
                 "turn_id": handle.input_turn_id,

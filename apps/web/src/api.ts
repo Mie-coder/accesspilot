@@ -348,9 +348,17 @@ async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
   return (await response.json()) as T
 }
 
-async function readDraft(): Promise<RequestDraft | null> {
-  const response = await requestJson<{ draft: RequestDraft | null }>('/api/drafts/current')
-  return response.draft
+export interface CurrentDraftResponse {
+  draft: RequestDraft | null
+  draft_revision: number
+}
+
+export async function readCurrentDraft(): Promise<CurrentDraftResponse> {
+  const response = await requestJson<CurrentDraftResponse>('/api/drafts/current')
+  if (!Number.isSafeInteger(response.draft_revision) || response.draft_revision < 0) {
+    throw new Error('后端草稿 revision 无效')
+  }
+  return response
 }
 
 export async function login(accountId: string): Promise<AuthSessionPayload> {
@@ -428,13 +436,14 @@ export async function replayEvents(
 
 export async function bootstrapWorkspace(): Promise<WorkspaceSnapshot> {
   const authSession = await readAuthSession()
-  const [draft, events] = await Promise.all([
-    readDraft(),
+  const [draftState, events] = await Promise.all([
+    readCurrentDraft(),
     replayEvents(),
   ])
   return {
     identity: authSession.principal,
-    draft,
+    draft: draftState.draft,
+    draftRevision: draftState.draft_revision,
     events,
     lastEventId: events.at(-1)?.id ?? 0,
   }

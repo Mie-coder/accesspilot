@@ -110,7 +110,7 @@ function authenticatedFetch(options: { logoutStatus?: number } = {}) {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     if (url === '/api/auth/session') return jsonResponse(authPayload)
-    if (url === '/api/drafts/current') return jsonResponse({ draft: null })
+    if (url === '/api/drafts/current') return jsonResponse({ draft: null, draft_revision: 0 })
     if (url === '/api/events?follow=false') return emptyEventsResponse()
     if (url === '/api/auth/logout') {
       return jsonResponse(
@@ -198,7 +198,9 @@ describe('App authentication state machine', () => {
       const url = String(input)
       if (url === '/api/access-overview') return jsonResponse({ items: [] })
       if (url === '/api/auth/session') return jsonResponse(authPayload)
-      if (url === '/api/drafts/current') return jsonResponse({ draft: appMocks.draft })
+      if (url === '/api/drafts/current') {
+        return jsonResponse({ draft: appMocks.draft, draft_revision: 1 })
+      }
       if (url === '/api/events?follow=false') return emptyEventsResponse()
       throw new Error(`unexpected fetch ${url}`)
     })
@@ -294,7 +296,7 @@ describe('App authentication state machine', () => {
       const url = String(input)
       if (url === '/api/auth/logout') return jsonResponse({ status: 'revoked' })
       if (url === '/api/auth/session') return jsonResponse(authPayload)
-      if (url === '/api/drafts/current') return jsonResponse({ draft: null })
+      if (url === '/api/drafts/current') return jsonResponse({ draft: null, draft_revision: 0 })
       if (url === '/api/events?follow=false') return emptyEventsResponse()
       throw new Error(`unexpected fetch ${url}`)
     })

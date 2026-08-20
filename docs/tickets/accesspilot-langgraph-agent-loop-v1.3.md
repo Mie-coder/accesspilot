@@ -1,6 +1,6 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Tickets
 
-**状态：** 用户已确认串行实施；T26–T40 `Verified`，T41–T42 尚未开始；T40 已获授权仅本地提交，后续 Ticket 独立验收通过后默认仅本地提交；T39 已本地提交 `3272a4f`，未授权推送、合并、部署或修改正式简历
+**状态：** 用户已确认串行实施；T26–T41 `Verified`，`product_verified=true`，T42 尚未开始；T41 已获授权仅本地提交，后续 Ticket 独立验收通过后默认仅本地提交；未授权推送、合并、部署或修改正式简历
 **更新时间：** 2026-08-20
 **继承基线：** AccessPilot v1.2，`product_verified=true`；T32 实现基线 HEAD `7ad8a01`，历史证据不自动证明 v1.3
 **Canonical Spec：** `docs/specs/accesspilot-langgraph-agent-loop-v1.3.md`
@@ -421,7 +421,7 @@ canary。
 
 ## T41 — v1.3 全量评测、浏览器验收与回滚演练
 
-**状态：** 尚未开始
+**状态：** `Verified`；三条验收标准与 AC-01–AC-13 在同一内容 revision 通过，独立验收修复轮 P0/P1/P2=0/0/0，`product_verified=true`；验收证据见 [T41 验收证据包](../evidence/accesspilot-v1.3-t41-acceptance-2026-08-20.md)
 
 **目标：** 在同一新 revision 上证明 AC-01–AC-13 全部成立，并完成 sticky flow 与完整 Legacy 回滚。
 
@@ -433,7 +433,7 @@ canary。
 2. 同一 revision 完成重启确认、grounded RAG、只读权限解析、安全探测、可恢复错误、四角色 Case 闭环、最近三轮轨迹、三视口和键盘运行验收。
 3. 完成“停收 → 排空 → pending/checkpoint 双向对账 → flow 2 降级 → legacy 重启”演练；旧/新 Workspace、草稿、事件、Cursor、正式 Case 和 Grant 继续可读，任一 AC 失败则不设 `product_verified=true`。
 
-**测试/运行验证：** 固定 parity 连续两次零差异；记录真实场景数、路径一致率、恢复成功率、事件完整率、泄漏数和可观测性能数据，不复用历史 `425/87/101`。
+**测试/运行验证：** API 868 项与 Web 109 项零 skip；Alembic、Ruff、MyPy、ESLint、两套 TypeScript、Vite 全绿；固定 33 个语义场景连续两轮零差异，fresh 产品评测 15 组/101 cases；rollback 9 项与真实浏览器四角色主链、重启恢复、三视口、键盘和控制台通过。独立验收发现的 draft revision 乱序与 rollback 早期清理两项 P1 已用可信红灯关闭。
 
 **依赖：** T40。
 
@@ -467,4 +467,4 @@ canary。
 
 - T26–T40 分层建立 AC-01–AC-12；T41 在同一 revision 汇总判定 AC-01–AC-13；T42 单独完成 AC-14；
 - 数据库、checkpoint、Graph State、JSON、SSE、UI 和证据按依赖串行，不并发修改共享权威源；
-- **当前停点：T40 `Verified`，用户已授权仅本地提交；尚未进入 T41。** 后续 Ticket 独立验收通过后默认仅本地提交；T39 已本地提交 `3272a4f`，仍未授权推送、合并、部署或修改正式简历。
+- **当前停点：T41 `Verified`，`product_verified=true`，已获授权仅本地提交；T42 尚未开始。** 后续 Ticket 独立验收通过后默认仅本地提交；仍未授权推送、合并、部署或修改正式简历。

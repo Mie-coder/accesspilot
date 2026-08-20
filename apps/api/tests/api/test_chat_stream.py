@@ -278,6 +278,43 @@ def test_current_turn_sse_emits_ordered_real_deltas_and_persists_before_complete
     )
 
 
+def test_readonly_json_and_sse_use_the_same_unpersisted_draft_authority(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    app = _stream_app(database_session_factory, TwoDeltaAnswerStream())
+
+    with TestClient(app) as sse_client:
+        _start_workspace(sse_client, database_session_factory)
+        current = sse_client.get("/api/drafts/current").json()
+        assert current == {"draft": None, "draft_revision": 0}
+        response = sse_client.post(
+            "/api/chat/messages/stream",
+            json={"content": "帮助"},
+        )
+        assert response.status_code == 200
+        completed = next(
+            frame
+            for frame in _parse_sse_frames(response.text)
+            if frame["event"] == "message.completed"
+        )
+        # A terminal with no persisted draft omits the optional field.  It
+        # must not synthesize a same-revision object that conflicts with the
+        # current endpoint's authoritative null.
+        assert "draft" not in completed["data"]["payload"]
+        assert (
+            completed["data"]["payload"]["draft_revision"]
+            == current["draft_revision"]
+        )
+
+    with TestClient(app) as json_client:
+        _start_workspace(json_client, database_session_factory)
+        current = json_client.get("/api/drafts/current").json()
+        response = json_client.post("/api/chat/messages", json={"content": "帮助"})
+        assert response.status_code == 200
+        assert response.json()["draft"] == current["draft"]
+        assert response.json()["draft_revision"] == current["draft_revision"]
+
+
 def test_current_turn_sse_model_error_has_single_recoverable_terminal(
     database_session_factory: sessionmaker[Session],
 ) -> None:

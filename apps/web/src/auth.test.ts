@@ -53,6 +53,7 @@ describe('T19 auth client contract', () => {
             justification: null,
             confirmed: false,
           },
+          draft_revision: 1,
           missing_fields: ['entitlement_id', 'duration_days', 'justification'],
           is_complete: false,
           can_enter_approval: false,

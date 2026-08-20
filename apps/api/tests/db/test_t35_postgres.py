@@ -11,6 +11,7 @@ the isolated deployment (no other workspaces exist there).
 from __future__ import annotations
 
 import os
+import re
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -91,7 +92,11 @@ def _admin_url() -> str | None:
 
 
 @contextmanager
-def _isolated_checkpoint_database() -> Iterator[Settings]:
+def _isolated_checkpoint_database(
+    *,
+    resource_prefix: str = "t35",
+    _fail_at: str | None = None,
+) -> Iterator[Settings]:
     configured = _admin_url()
     if not configured:
         pytest.skip(
@@ -101,76 +106,110 @@ def _isolated_checkpoint_database() -> Iterator[Settings]:
         drivername="postgresql", database="postgres"
     )
     admin_conninfo = admin_url.render_as_string(hide_password=False)
+    if re.fullmatch(r"[a-z][a-z0-9]{1,7}", resource_prefix) is None:
+        raise ValueError("resource_prefix must be 2-8 lowercase alphanumeric characters")
     suffix = uuid4().hex[:12]
-    database = f"t35chk_{suffix}"
-    migration_role = f"t35m_{suffix}"
-    runtime_role = f"t35r_{suffix}"
+    database = f"{resource_prefix}chk_{suffix}"
+    migration_role = f"{resource_prefix}m_{suffix}"
+    runtime_role = f"{resource_prefix}r_{suffix}"
     migration_password = f"m-{uuid4().hex}"
     runtime_password = f"r-{uuid4().hex}"
-    with psycopg.connect(admin_conninfo, autocommit=True) as admin:
-        admin.execute(
-            sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
-                sql.Identifier(migration_role), sql.Literal(migration_password)
-            )
-        )
-        admin.execute(
-            sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
-                sql.Identifier(runtime_role), sql.Literal(runtime_password)
-            )
-        )
-        admin.execute(
-            sql.SQL("CREATE DATABASE {} OWNER {}").format(
-                sql.Identifier(database), sql.Identifier(migration_role)
-            )
-        )
-    database_admin_url = make_url(configured).set(
-        drivername="postgresql", database=database
-    ).render_as_string(hide_password=False)
-    with psycopg.connect(database_admin_url, autocommit=True) as database_admin:
-        database_admin.execute("CREATE EXTENSION vector")
-    migration_url = make_url(configured).set(
-        username=migration_role,
-        password=migration_password,
-        database=database,
-    ).render_as_string(hide_password=False)
-    runtime_url = make_url(configured).set(
-        username=runtime_role,
-        password=runtime_password,
-        database=database,
-    ).render_as_string(hide_password=False)
-    schema = f"t35_checkpoint_{suffix}"
-    settings = Settings(
-        database_url=migration_url,
-        checkpoint_migration_database_url=migration_url,
-        checkpoint_database_url=runtime_url,
-        checkpoint_schema=schema,
-        orchestrator_mode="mixed",
-        langgraph_canary_percent=0,
-        _env_file=None,
+    schema = f"{resource_prefix}_checkpoint_{suffix}"
+    exact_identifier = re.compile(
+        rf"{re.escape(resource_prefix)}(?:chk_|m_|r_|_checkpoint_)[0-9a-f]{{12}}"
     )
+    for identifier in (database, migration_role, runtime_role, schema):
+        if exact_identifier.fullmatch(identifier) is None:
+            raise AssertionError("generated disposable PostgreSQL identifier is invalid")
+
+    migration_role_created = False
+    runtime_role_created = False
+    database_created = False
+
+    def fail_after(phase: str) -> None:
+        if _fail_at == phase:
+            raise RuntimeError(f"injected isolated database failure after {phase}")
+
     try:
+        with psycopg.connect(admin_conninfo, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                    sql.Identifier(migration_role), sql.Literal(migration_password)
+                )
+            )
+            migration_role_created = True
+            fail_after("migration_role")
+            admin.execute(
+                sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                    sql.Identifier(runtime_role), sql.Literal(runtime_password)
+                )
+            )
+            runtime_role_created = True
+            fail_after("runtime_role")
+            admin.execute(
+                sql.SQL("CREATE DATABASE {} OWNER {}").format(
+                    sql.Identifier(database), sql.Identifier(migration_role)
+                )
+            )
+            database_created = True
+            fail_after("database")
+
+        database_admin_url = make_url(configured).set(
+            drivername="postgresql", database=database
+        ).render_as_string(hide_password=False)
+        with psycopg.connect(database_admin_url, autocommit=True) as database_admin:
+            database_admin.execute("CREATE EXTENSION vector")
+        fail_after("extension")
+
+        migration_url = make_url(configured).set(
+            username=migration_role,
+            password=migration_password,
+            database=database,
+        ).render_as_string(hide_password=False)
+        runtime_url = make_url(configured).set(
+            username=runtime_role,
+            password=runtime_password,
+            database=database,
+        ).render_as_string(hide_password=False)
+        settings = Settings(
+            database_url=migration_url,
+            checkpoint_migration_database_url=migration_url,
+            checkpoint_database_url=runtime_url,
+            checkpoint_schema=schema,
+            orchestrator_mode="mixed",
+            langgraph_canary_percent=0,
+            _env_file=None,
+        )
+        fail_after("settings")
+
         root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
         alembic_config = Config(os.path.join(root, "alembic.ini"))
         alembic_config.attributes["database_url"] = migration_url
         command.upgrade(alembic_config, "head")
+        fail_after("alembic")
         run_official_checkpoint_setup(settings)
+        fail_after("checkpoint")
         yield settings
     finally:
-        with psycopg.connect(admin_conninfo, autocommit=True) as admin:
-            admin.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = %s AND pid <> pg_backend_pid()",
-                (database,),
-            )
-            admin.execute(
-                sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(database))
-            )
-            admin.execute(
-                sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(runtime_role))
-            )
-            admin.execute(
-                sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(migration_role))
-            )
+        if database_created or runtime_role_created or migration_role_created:
+            with psycopg.connect(admin_conninfo, autocommit=True) as admin:
+                if database_created:
+                    admin.execute(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = %s AND pid <> pg_backend_pid()",
+                        (database,),
+                    )
+                    admin.execute(
+                        sql.SQL("DROP DATABASE {}").format(sql.Identifier(database))
+                    )
+                if runtime_role_created:
+                    admin.execute(
+                        sql.SQL("DROP ROLE {}").format(sql.Identifier(runtime_role))
+                    )
+                if migration_role_created:
+                    admin.execute(
+                        sql.SQL("DROP ROLE {}").format(sql.Identifier(migration_role))
+                    )
 
 
 class StaticReplyModel:

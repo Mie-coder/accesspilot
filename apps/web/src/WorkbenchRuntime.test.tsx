@@ -14,6 +14,7 @@ const snapshot: WorkspaceSnapshot = {
     roles: [],
   },
   draft: null,
+  draftRevision: 0,
   events: [{
     id: 8,
     type: 'error.recoverable',
@@ -72,6 +73,9 @@ function Probe() {
       <output data-testid="connection-state">{workbench.connectionState}</output>
       <output data-testid="draft-employee">{workbench.draft?.employee_id}</output>
       <output data-testid="missing-count">{workbench.missingFields.length}</output>
+      <output data-testid="draft-confirmed">{String(workbench.draft?.confirmed)}</output>
+      <output data-testid="draft-entitlement">{workbench.draft?.entitlement_id}</output>
+      <output data-testid="draft-justification">{workbench.draft?.justification}</output>
       <output data-testid="request-id">{workbench.requestResult?.request_id}</output>
       <output data-testid="packet-mode">{workbench.decisionPacket?.generation_mode}</output>
       <output data-testid="packet-error">{workbench.decisionPacketError}</output>
@@ -81,8 +85,63 @@ function Probe() {
       <button type="button" onClick={() => void workbench.submit()}>submit request</button>
       <button type="button" onClick={() => void workbench.retryDecisionPacket()}>retry packet</button>
       <button type="button" onClick={() => void workbench.startApproval()}>start approval</button>
+      <button
+        type="button"
+        onClick={() => void workbench.selectEntitlement('codeforge.repo_read')}
+      >select entitlement</button>
     </>
   )
+}
+
+function turnFrame(event: string, seq: number, payload: Record<string, unknown>): string {
+  const data = JSON.stringify({
+    schema_version: 'v1',
+    turn_id: 'turn-resume',
+    seq,
+    occurred_at: '2026-08-20T08:00:00Z',
+    payload,
+  })
+  return `id: turn-resume:${seq}\nevent: ${event}\ndata: ${data}\n\n`
+}
+
+function streamFromText(text: string): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder()
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(text))
+      controller.close()
+    },
+  })
+}
+
+function controlledStream(): {
+  stream: ReadableStream<Uint8Array>
+  push: (text: string) => void
+  close: () => void
+} {
+  const encoder = new TextEncoder()
+  let controller: ReadableStreamDefaultController<Uint8Array> | null = null
+  return {
+    stream: new ReadableStream<Uint8Array>({
+      start(value) {
+        controller = value
+      },
+    }),
+    push(text) {
+      controller?.enqueue(encoder.encode(text))
+    },
+    close() {
+      controller?.close()
+    },
+  }
+}
+
+function workspaceFrame(
+  id: number,
+  event: string,
+  payload: Record<string, unknown>,
+): string {
+  return `id: ${id}\nevent: ${event}\ndata: ${JSON.stringify(payload)}\n\n`
 }
 
 afterEach(() => {
@@ -90,6 +149,319 @@ afterEach(() => {
 })
 
 describe('WorkbenchRuntime hydration', () => {
+  it('applies the authoritative confirmed draft from a resumed terminal frame', async () => {
+    const unconfirmedDraft = {
+      employee_id: 'EMP-001',
+      entitlement_id: 'insighthub.customer_export',
+      duration_days: 14,
+      justification: '虚构季度分析',
+      confirmed: false,
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/events') {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('请求已取消', 'AbortError')),
+            { once: true },
+          )
+        })
+      }
+      if (String(input) === '/api/chat/messages/stream') {
+        return new Response(
+          streamFromText(
+            turnFrame('message.delta', 1, { text: '已确认。' })
+              + turnFrame('message.completed', 2, {
+                content: '已确认。申请草稿已就绪，可以提交正式申请。',
+                business_status: 'ready_to_submit',
+                draft_revision: 2,
+                draft: { ...unconfirmedDraft, confirmed: true },
+              }),
+          ),
+          { headers: { 'Content-Type': 'text/event-stream' } },
+        )
+      }
+      throw new Error(`Unexpected request: ${String(input)}`)
+    }))
+    const view = render(
+      <WorkbenchRuntime snapshot={{
+        ...snapshot,
+        draft: unconfirmedDraft,
+        draftRevision: 1,
+        events: [],
+      }}>
+        <Probe />
+        <ChatThread />
+      </WorkbenchRuntime>,
+    )
+
+    fireEvent.change(screen.getByRole('textbox', { name: '描述权限申请' }), {
+      target: { value: '确认提交' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('draft-confirmed')).toHaveTextContent('true')
+    })
+    view.unmount()
+  })
+
+  it('does not let a delayed Workspace event roll back a newer current-turn draft', async () => {
+    const workspace = controlledStream()
+    const revisionThreeDraft = {
+      employee_id: 'EMP-001',
+      entitlement_id: 'insighthub.customer_export',
+      duration_days: 14,
+      justification: '虚构旧理由',
+      confirmed: false,
+    }
+    const revisionFourDraft = {
+      ...revisionThreeDraft,
+      justification: '虚构新理由',
+      confirmed: true,
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === '/api/events') {
+        return new Response(workspace.stream, {
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      }
+      if (String(input) === '/api/chat/messages/stream') {
+        return new Response(
+          streamFromText(turnFrame('message.completed', 1, {
+            content: '已确认新草稿。',
+            business_status: 'ready_to_submit',
+            draft: revisionFourDraft,
+            draft_revision: 4,
+          })),
+          { headers: { 'Content-Type': 'text/event-stream' } },
+        )
+      }
+      throw new Error(`Unexpected request: ${String(input)}`)
+    }))
+    const view = render(
+      <WorkbenchRuntime snapshot={{
+        ...snapshot,
+        draft: revisionThreeDraft,
+        draftRevision: 3,
+        events: [],
+        lastEventId: 0,
+      }}>
+        <Probe />
+        <ChatThread />
+      </WorkbenchRuntime>,
+    )
+
+    fireEvent.change(screen.getByRole('textbox', { name: '描述权限申请' }), {
+      target: { value: '确认新草稿' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+    await waitFor(() => {
+      expect(screen.getByTestId('draft-justification')).toHaveTextContent('虚构新理由')
+      expect(screen.getByTestId('draft-confirmed')).toHaveTextContent('true')
+    })
+
+    workspace.push(workspaceFrame(1, 'draft.updated', {
+      draft: revisionThreeDraft,
+      draft_revision: 3,
+    }))
+    await waitFor(() => expect(screen.getByTestId('connection-state')).toHaveTextContent('connected'))
+    expect(screen.getByTestId('draft-justification')).toHaveTextContent('虚构新理由')
+    expect(screen.getByTestId('draft-confirmed')).toHaveTextContent('true')
+    workspace.close()
+    view.unmount()
+  })
+
+  it('treats identical same-revision server drafts as idempotent', async () => {
+    const workspace = controlledStream()
+    const authoritativeDraft = {
+      employee_id: 'EMP-001',
+      entitlement_id: 'insighthub.dashboard_view',
+      duration_days: 7,
+      justification: '虚构幂等验证',
+      confirmed: false,
+    }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === '/api/events') {
+        return new Response(workspace.stream, {
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      }
+      throw new Error(`Unexpected request: ${String(input)}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const view = render(
+      <WorkbenchRuntime snapshot={{
+        ...snapshot,
+        draft: authoritativeDraft,
+        draftRevision: 5,
+        events: [],
+        lastEventId: 0,
+      }}><Probe /></WorkbenchRuntime>,
+    )
+
+    workspace.push(workspaceFrame(1, 'draft.updated', {
+      draft: authoritativeDraft,
+      draft_revision: 5,
+    }))
+    await waitFor(() => expect(screen.getByTestId('connection-state')).toHaveTextContent('connected'))
+    expect(screen.getByTestId('draft-justification')).toHaveTextContent('虚构幂等验证')
+    expect(screen.getByTestId('workbench-error')).toBeEmptyDOMElement()
+    expect(fetchMock.mock.calls.some(([input]) => String(input) === '/api/drafts/current')).toBe(false)
+    workspace.close()
+    view.unmount()
+  })
+
+  it('fails closed on a conflicting same-revision draft and reloads authority', async () => {
+    const workspace = controlledStream()
+    const authoritativeDraft = {
+      employee_id: 'EMP-001',
+      entitlement_id: 'insighthub.dashboard_view',
+      duration_days: 7,
+      justification: '虚构权威理由',
+      confirmed: false,
+    }
+    const conflictingDraft = {
+      ...authoritativeDraft,
+      justification: '虚构冲突理由',
+      confirmed: true,
+    }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === '/api/events') {
+        return new Response(workspace.stream, {
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      }
+      if (String(input) === '/api/drafts/current') {
+        return Response.json({ draft: authoritativeDraft, draft_revision: 6 })
+      }
+      throw new Error(`Unexpected request: ${String(input)}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const view = render(
+      <WorkbenchRuntime snapshot={{
+        ...snapshot,
+        draft: authoritativeDraft,
+        draftRevision: 6,
+        events: [],
+        lastEventId: 0,
+      }}><Probe /></WorkbenchRuntime>,
+    )
+
+    workspace.push(workspaceFrame(1, 'message.completed', {
+      content: '不应接受冲突草稿',
+      draft: conflictingDraft,
+      draft_revision: 6,
+    }))
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input]) => String(input) === '/api/drafts/current')).toBe(true)
+      expect(screen.getByTestId('workbench-error')).toHaveTextContent('草稿版本冲突')
+    })
+    expect(screen.getByTestId('draft-justification')).toHaveTextContent('虚构权威理由')
+    expect(screen.getByTestId('draft-confirmed')).toHaveTextContent('false')
+    workspace.close()
+    view.unmount()
+  })
+
+  it('ignores server drafts with missing or invalid revisions', async () => {
+    const workspace = controlledStream()
+    const authoritativeDraft = {
+      employee_id: 'EMP-001',
+      entitlement_id: 'insighthub.dashboard_view',
+      duration_days: 7,
+      justification: '虚构有效草稿',
+      confirmed: false,
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === '/api/events') {
+        return new Response(workspace.stream, {
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      }
+      throw new Error(`Unexpected request: ${String(input)}`)
+    }))
+    const view = render(
+      <WorkbenchRuntime snapshot={{
+        ...snapshot,
+        draft: authoritativeDraft,
+        draftRevision: 7,
+        events: [],
+        lastEventId: 0,
+      }}><Probe /></WorkbenchRuntime>,
+    )
+
+    workspace.push(
+      workspaceFrame(1, 'draft.updated', {
+        draft: { ...authoritativeDraft, justification: '缺失 revision' },
+      })
+      + workspaceFrame(2, 'draft.updated', {
+        draft: { ...authoritativeDraft, justification: '非法 revision' },
+        draft_revision: '8',
+      }),
+    )
+    await waitFor(() => expect(screen.getByTestId('connection-state')).toHaveTextContent('connected'))
+    expect(screen.getByTestId('draft-justification')).toHaveTextContent('虚构有效草稿')
+    workspace.close()
+    view.unmount()
+  })
+
+  it('keeps a local selection out of the draft until preview returns server authority', async () => {
+    const workspace = controlledStream()
+    const originalDraft = {
+      employee_id: 'EMP-001',
+      entitlement_id: 'insighthub.dashboard_view',
+      duration_days: 7,
+      justification: '虚构本地输入边界',
+      confirmed: false,
+    }
+    let resolvePreview: ((response: Response) => void) | undefined
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      if (String(input) === '/api/events') {
+        return Promise.resolve(new Response(workspace.stream, {
+          headers: { 'Content-Type': 'text/event-stream' },
+        }))
+      }
+      if (String(input) === '/api/drafts/preview') {
+        return new Promise<Response>((resolve) => { resolvePreview = resolve })
+      }
+      throw new Error(`Unexpected request: ${String(input)}`)
+    }))
+    const view = render(
+      <WorkbenchRuntime snapshot={{
+        ...snapshot,
+        draft: originalDraft,
+        draftRevision: 2,
+        events: [],
+        lastEventId: 0,
+      }}><Probe /></WorkbenchRuntime>,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'select entitlement' }))
+    expect(screen.getByTestId('draft-entitlement')).toHaveTextContent(
+      'insighthub.dashboard_view',
+    )
+    resolvePreview?.(Response.json({
+      draft: { ...originalDraft, entitlement_id: 'codeforge.repo_read' },
+      draft_revision: 3,
+      missing_fields: [],
+      is_complete: true,
+      can_enter_approval: false,
+      entitlement_resolution: {
+        status: 'matched',
+        target_field: 'entitlement_id',
+        query: 'codeforge.repo_read',
+        candidates: [{ code: 'codeforge.repo_read' }],
+        eligible_access: [],
+      },
+      issues: [],
+    }))
+    await waitFor(() => {
+      expect(screen.getByTestId('draft-entitlement')).toHaveTextContent('codeforge.repo_read')
+    })
+    workspace.close()
+    view.unmount()
+  })
+
   it('restores a persisted recoverable error after refresh', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('', {
       headers: { 'Content-Type': 'text/event-stream' },

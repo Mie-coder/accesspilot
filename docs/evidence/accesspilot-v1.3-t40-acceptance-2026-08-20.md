@@ -1,7 +1,7 @@
 # AccessPilot v1.3 T40 验收证据包（Verified）
 
 **Ticket：** T40 — SSE LangGraph 门禁、传输合同与 Sticky Flow 2 Canary
-**实现基线：** `3272a4f`（T39）；T40 当前为未提交工作树 revision
+**实现基线：** `3272a4f`（T39）；T40 已本地提交 `51ce85f`
 **日期：** 2026-08-20
 **状态：** `Verified`；独立验收修复轮 P0/P1/P2=0/0/1，P2 不阻塞；用户已授权仅本地提交
 
@@ -78,4 +78,4 @@ execution 在该失败下仍保持可由 T33/T37 takeover 闭合的状态，因�
 
 ## 7. 当前停点
 
-T40 已 `Verified`，用户已授权仅本地提交，并授权后续 Ticket 在独立验收通过后默认仅本地提交。当前尚未进入 T41；未授权推送、合并、部署、修改正式简历或删除 Legacy/checkpoint 数据。
+T40 已 `Verified` 并按用户授权本地提交 `51ce85f`；后续 Ticket 在独立验收通过后默认仅本地提交。当前进入 T41；未授权推送、合并、部署、修改正式简历或删除 Legacy/checkpoint 数据。

@@ -403,6 +403,11 @@ def test_eval_12_two_malformed_replies_fail_closed(
 
     assert response.status_code == 200
     assert response.json()["business_status"] == "recoverable_error"
-    assert response.json()["draft"]["confirmed"] is False
+    assert response.json()["draft"] is None
+    assert response.json()["draft_revision"] == 0
+    assert client.get("/api/drafts/current").json() == {
+        "draft": None,
+        "draft_revision": 0,
+    }
     assert model.calls == 2
     assert "MODEL_REPLY_UNAVAILABLE" in history.text

@@ -17,7 +17,8 @@ export type ConnectionState = 'connected' | 'reconnecting'
 
 export interface ChatTurn {
   assistant_message: string
-  draft: RequestDraft
+  draft: RequestDraft | null
+  draft_revision: number
   missing_fields: string[]
   phase: string
   business_status: string
@@ -102,6 +103,7 @@ export interface WorkspaceIdentity {
 export interface WorkspaceSnapshot {
   identity: WorkspaceIdentity
   draft: RequestDraft | null
+  draftRevision: number
   events: WorkspaceEvent[]
   lastEventId: number
 }
@@ -157,6 +159,7 @@ export interface EntitlementResolution {
 
 export interface DraftPreviewResponse {
   draft: RequestDraft | null
+  draft_revision: number
   missing_fields: string[]
   is_complete: boolean
   can_enter_approval: boolean

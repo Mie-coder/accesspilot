@@ -78,6 +78,7 @@ from accesspilot.conversation import (
     ConversationInputError,
     ConversationOrchestrator,
     ConversationRunResult,
+    ConversationTurn,
     ConversationUnavailableError,
     DeterministicStructuredReplyModel,
     LegacyConversationOrchestrator,
@@ -792,6 +793,33 @@ def create_app(
         workspace.auth_session_id = str(context.session_id)
         workspace.actor_id = context.principal.employee_id
         return workspace
+
+    def authoritative_draft_state(workspace: Workspace) -> dict[str, object]:
+        """Return the visible persisted draft paired with its exact revision."""
+
+        latest = workspace_service.get(
+            workspace.token,
+            auth_session_id=workspace.auth_session_id,
+        )
+        draft = latest.draft
+        if (
+            draft is not None
+            and draft.employee_id is not None
+            and draft.employee_id != workspace.actor_id
+        ):
+            draft = None
+        return {
+            "draft": draft.model_dump(mode="json") if draft is not None else None,
+            "draft_revision": latest.draft_revision,
+        }
+
+    def authoritative_outcome(
+        turn: ConversationTurn,
+        workspace: Workspace,
+    ) -> dict[str, object]:
+        outcome = normalized_outcome(turn)
+        outcome.update(authoritative_draft_state(workspace))
+        return outcome
 
     def require_active_demo(
         request: Request,
@@ -1584,7 +1612,7 @@ def create_app(
                 "resolution_unavailable",
             }:
                 message = prepared.assistant_message
-                outcome = normalized_outcome(prepared)
+                outcome = authoritative_outcome(prepared, workspace)
                 event = persist_terminal(
                     "error.recoverable",
                     {
@@ -1692,7 +1720,7 @@ def create_app(
                 )
                 seq += 1
             content = "".join(chunks) or prepared.assistant_message
-            outcome = normalized_outcome(prepared)
+            outcome = authoritative_outcome(prepared, workspace)
             outcome["assistant_message"] = content
             event = persist_terminal(
                 "message.completed",
@@ -1755,7 +1783,9 @@ def create_app(
                 status_code=503,
                 detail={"code": error.code, "message": error.safe_message},
             ) from error
-        return turn.model_dump(mode="json", exclude={"quota"})
+        payload = turn.model_dump(mode="json", exclude={"quota"})
+        payload.update(authoritative_draft_state(workspace))
+        return payload
 
     @app.post("/api/workspaces", include_in_schema=False)
     def create_workspace(request: Request, response: Response) -> dict[str, str]:
@@ -1957,6 +1987,7 @@ def create_app(
                         if workspace.draft is not None
                         else None
                     ),
+                    "draft_revision": workspace.draft_revision,
                     "missing_fields": current_draft.missing_fields(),
                     "is_complete": not current_draft.missing_fields(),
                     "can_enter_approval": False,
@@ -1994,7 +2025,7 @@ def create_app(
             # 旧 preview 的渐进式收集行为。
             bound_draft = bound_draft.model_copy(update={"confirmed": False})
 
-        workspace_service.save_draft(
+        updated_workspace = workspace_service.save_draft(
             workspace.token,
             bound_draft,
             auth_session_id=workspace.auth_session_id,
@@ -2002,6 +2033,7 @@ def create_app(
         missing_fields = bound_draft.missing_fields()
         return {
             "draft": bound_draft.model_dump(mode="json"),
+            "draft_revision": updated_workspace.draft_revision,
             "missing_fields": missing_fields,
             "is_complete": not missing_fields,
             "can_enter_approval": (
@@ -2033,7 +2065,10 @@ def create_app(
             and draft.employee_id != workspace.actor_id
         ):
             draft = None
-        return {"draft": draft.model_dump(mode="json") if draft is not None else None}
+        return {
+            "draft": draft.model_dump(mode="json") if draft is not None else None,
+            "draft_revision": workspace.draft_revision,
+        }
 
     @app.post("/api/requests", status_code=201)
     def submit_request(

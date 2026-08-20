@@ -190,13 +190,7 @@ def test_injected_json_orchestrator_enters_real_compiled_production_path(
         "assistant_message": (
             "我可以帮你查询可申请权限、当前有效授权、申请状态，或发起权限申请。"
         ),
-        "draft": {
-            "employee_id": "EMP-001",
-            "entitlement_id": None,
-            "duration_days": None,
-            "justification": None,
-            "confirmed": False,
-        },
+        "draft": None,
         "missing_fields": ["entitlement_id", "duration_days", "justification"],
         "phase": "collecting",
         "business_status": "answered",

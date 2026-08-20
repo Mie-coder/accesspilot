@@ -591,7 +591,10 @@ def test_entitlement_resolution_returns_typed_ambiguous_candidates_without_draft
         <= candidate.keys()
         for candidate in payload["candidates"]
     )
-    assert client.get("/api/drafts/current").json() == {"draft": snapshot}
+    assert client.get("/api/drafts/current").json() == {
+        "draft": snapshot,
+        "draft_revision": 1,
+    }
 
 
 def test_selected_entitlement_is_revalidated_and_invalidates_old_confirmation(

@@ -657,7 +657,10 @@ def test_draft_chat_events_and_cursor_stay_in_the_source_workspace(
         session_factory=database_session_factory,
     )
     assert new_session.get(f"/api/requests/{request_id}").status_code == 200
-    assert new_session.get("/api/drafts/current").json() == {"draft": None}
+    assert new_session.get("/api/drafts/current").json() == {
+        "draft": None,
+        "draft_revision": 0,
+    }
     event_replay = new_session.get("/api/events?follow=false")
     assert event_replay.status_code == 200
     assert "T20-PRIVATE-CHAT-EVENT" not in event_replay.text

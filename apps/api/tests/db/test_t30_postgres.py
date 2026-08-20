@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
@@ -21,15 +21,22 @@ from accesspilot.agent.checkpoint import (
     ServerExecutionContext,
     psycopg_connection_url,
 )
+from accesspilot.agent.embeddings import DeterministicEmbeddingModel
 from accesspilot.agent.production_graph import (
     GraphInput,
     UnsafeGraphStateUpdateError,
     build_production_graph,
 )
+from accesspilot.agent.routing import DeterministicIntentRouter
 from accesspilot.agent.state import DraftPatch, GraphState, SafeToolResult
+from accesspilot.auth import Principal
 from accesspilot.checkpoint_init import run_official_checkpoint_setup
 from accesspilot.config import Settings
+from accesspilot.conversation import DeterministicStructuredReplyModel
 from accesspilot.db.models import AgentTurnExecutionRecord
+from accesspilot.events import ModelQuota
+from accesspilot.tools.policies import PolicyService
+from accesspilot.workspaces import InMemoryWorkspaceStore, Workspace, WorkspaceService
 
 _ADMIN_URL_ENV = "ACCESSPILOT_T30_ADMIN_DATABASE_URL"
 _FALLBACK_ADMIN_URL_ENV = "ACCESSPILOT_T29_ADMIN_DATABASE_URL"
@@ -55,6 +62,7 @@ _FORBIDDEN_KEYS = {
     "current_turn_id",
     "current_fence",
     "workspace_token",
+    "auth_session_id",
     "cookie",
     "csrf_token",
     "api_key",
@@ -62,6 +70,7 @@ _FORBIDDEN_KEYS = {
 _RUNTIME_CANARIES = {
     "runtime-turn-secret",
     "workspace-token-canary",
+    "auth-session-canary",
     "cookie-canary",
     "csrf-canary",
     "sk-runtime-canary-12345678",
@@ -199,18 +208,33 @@ def _graph_input(context: ServerExecutionContext, **extra: object) -> dict[str, 
     return value
 
 
-def _runtime_context() -> dict[str, object]:
-    marker = object()
+def _runtime_context(context: ServerExecutionContext) -> dict[str, object]:
+    store = InMemoryWorkspaceStore()
+    workspace = Workspace(
+        token="workspace-token-canary",
+        workspace_id=context.workspace_id,
+        actor_id="EMP-001",
+        auth_session_id="auth-session-canary",
+    )
+    store.save(workspace)
     return {
-        "session_factory": marker,
-        "workspace_service": marker,
-        "policy_service": marker,
-        "structured_reply_model": marker,
-        "intent_router": marker,
-        "principal": marker,
+        "session_factory": lambda: nullcontext(object()),
+        "workspace_service": WorkspaceService(store),
+        "policy_service": PolicyService(
+            embedding_model=DeterministicEmbeddingModel()
+        ),
+        "structured_reply_model": DeterministicStructuredReplyModel(),
+        "intent_router": DeterministicIntentRouter(),
+        "principal": Principal(
+            employee_id="EMP-001",
+            name="林晓",
+            department="数据平台部",
+            roles=("analyst",),
+        ),
         "current_turn_id": "runtime-turn-secret",
         "current_fence": 91,
         "workspace_token": "workspace-token-canary",
+        "auth_session_id": "auth-session-canary",
         "cookie": "cookie-canary",
         "csrf_token": "csrf-canary",
         "api_key": "sk-runtime-canary-12345678",
@@ -299,6 +323,15 @@ def _assert_rows_are_safe(
 def test_t30_real_postgres_strict_checkpoint_scan_and_malicious_zero_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "accesspilot.agent.production_graph.get_model_quota",
+        lambda *args, **kwargs: ModelQuota(
+            used=0,
+            limit=20,
+            remaining=20,
+            retry_consumed=0,
+        ),
+    )
     with _isolated_checkpoint_database() as isolated:
         run_official_checkpoint_setup(isolated.settings)
         runtime = PostgresCheckpointRuntime(isolated.settings)
@@ -319,7 +352,7 @@ def test_t30_real_postgres_strict_checkpoint_scan_and_malicious_zero_write(
             result = graph.invoke(
                 _graph_input(context),
                 config=base_config,
-                context=_runtime_context(),  # type: ignore[arg-type]
+                context=_runtime_context(context),  # type: ignore[arg-type]
                 durability="sync",
             )
             assert result.business_status == "answered"
@@ -346,10 +379,10 @@ def test_t30_real_postgres_strict_checkpoint_scan_and_malicious_zero_write(
             from accesspilot.agent import production_graph as production_graph_module
 
             def legal_nested_node_update(state, runtime_context):  # type: ignore[no-untyped-def]
-                del state, runtime_context
-                return {
-                    "intent": "discover_eligible_access",
-                    "selected_route": "read_only",
+                    del state, runtime_context
+                    return {
+                        "intent": "unknown",
+                        "selected_route": "unknown",
                     "tool_name": "list_eligible_access",
                     "draft_patch": {
                         "entitlement_id": "insighthub.customer_export",
@@ -368,7 +401,7 @@ def test_t30_real_postgres_strict_checkpoint_scan_and_malicious_zero_write(
 
             monkeypatch.setattr(
                 production_graph_module,
-                "_route_intent_stub",
+                "_route_intent",
                 legal_nested_node_update,
             )
             nested_context = _execution_context()
@@ -385,7 +418,7 @@ def test_t30_real_postgres_strict_checkpoint_scan_and_malicious_zero_write(
             nested_graph.invoke(
                 _graph_input(nested_context),
                 config=nested_config,
-                context=_runtime_context(),  # type: ignore[arg-type]
+                context=_runtime_context(nested_context),  # type: ignore[arg-type]
                 durability="sync",
             )
             nested_snapshot = nested_graph.compiled.get_state(
@@ -443,7 +476,7 @@ def test_t30_real_postgres_strict_checkpoint_scan_and_malicious_zero_write(
                     malicious_graph.invoke(
                         _graph_input(malicious_context, **malicious_update),
                         config=malicious_config,
-                        context=_runtime_context(),  # type: ignore[arg-type]
+                        context=_runtime_context(malicious_context),  # type: ignore[arg-type]
                         durability="sync",
                     )
             assert _checkpoint_rows(runtime, malicious_context.checkpoint_thread_id) == ([], [], [])
@@ -468,7 +501,7 @@ def test_t30_real_postgres_strict_checkpoint_scan_and_malicious_zero_write(
 
             monkeypatch.setattr(
                 production_graph_module,
-                "_compose_safe_answer_stub",
+                "_compose_safe_answer",
                 malicious_node_update,
             )
             node_context = _execution_context()
@@ -484,7 +517,7 @@ def test_t30_real_postgres_strict_checkpoint_scan_and_malicious_zero_write(
                 node_graph.invoke(
                     _graph_input(node_context),
                     config=node_config,
-                    context=_runtime_context(),  # type: ignore[arg-type]
+                    context=_runtime_context(node_context),  # type: ignore[arg-type]
                     durability="sync",
                 )
             node_rows = _checkpoint_rows(runtime, node_context.checkpoint_thread_id)

@@ -16,6 +16,7 @@ import {
 import {
   createDecisionPacket,
   ApiError,
+  readCurrentDraft,
   readRequestDetail,
   replayEvents,
   previewDraft,
@@ -48,6 +49,31 @@ function missingFields(draft: RequestDraft): string[] {
 }
 
 const fallbackRecoverableError = '本轮可安全重试，请稍后再试。'
+const draftConflictError = '草稿版本冲突，已从服务器重新加载权威草稿。'
+
+type DraftApplyResult = 'applied' | 'idempotent' | 'stale' | 'invalid' | 'conflict'
+
+function isRequestDraft(value: unknown): value is RequestDraft {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const draft = value as Record<string, unknown>
+  return (
+    (draft.employee_id === null || typeof draft.employee_id === 'string')
+    && (draft.entitlement_id === null || typeof draft.entitlement_id === 'string')
+    && (draft.duration_days === null
+      || (typeof draft.duration_days === 'number' && Number.isSafeInteger(draft.duration_days)))
+    && (draft.justification === null || typeof draft.justification === 'string')
+    && typeof draft.confirmed === 'boolean'
+  )
+}
+
+function sameDraft(left: RequestDraft | null, right: RequestDraft | null): boolean {
+  if (left === null || right === null) return left === right
+  return left.employee_id === right.employee_id
+    && left.entitlement_id === right.entitlement_id
+    && left.duration_days === right.duration_days
+    && left.justification === right.justification
+    && left.confirmed === right.confirmed
+}
 
 function isTerminalEvent(event: WorkspaceEvent): boolean {
   return event.type === 'message.completed' || event.type === 'turn.interrupted'
@@ -192,6 +218,11 @@ export function WorkbenchRuntime({
   const [retryableInterruption, setRetryableInterruption] = useState(false)
   const [connectionState, setConnectionState] = useState<ConnectionState>('connected')
   const lastEventIdRef = useRef(snapshot.lastEventId)
+  const draftAuthorityRef = useRef({
+    draft: snapshot.draft,
+    revision: snapshot.draftRevision,
+  })
+  const draftReloadInFlightRef = useRef(false)
   const principalDraft = useMemo<RequestDraft>(() => ({
     employee_id: identity.employee_id,
     entitlement_id: draft?.entitlement_id ?? null,
@@ -200,16 +231,66 @@ export function WorkbenchRuntime({
     confirmed: draft?.confirmed ?? false,
   }), [draft, identity.employee_id])
 
-  const onTurn = useCallback((turn: ChatTurn) => {
-    setDraft(turn.draft)
-    setBusinessStatus(turn.business_status)
-    setError(null)
+  const reloadAuthoritativeDraft = useCallback(async () => {
+    if (draftReloadInFlightRef.current) return
+    draftReloadInFlightRef.current = true
+    try {
+      const authoritative = await readCurrentDraft()
+      if (!isRequestDraft(authoritative.draft) && authoritative.draft !== null) {
+        throw new Error('后端权威草稿无效')
+      }
+      if (authoritative.draft_revision >= draftAuthorityRef.current.revision) {
+        draftAuthorityRef.current = {
+          draft: authoritative.draft,
+          revision: authoritative.draft_revision,
+        }
+        setDraft(authoritative.draft)
+      }
+      setError(draftConflictError)
+    } catch {
+      setError('草稿版本冲突，权威草稿重新加载失败，请刷新后重试。')
+    } finally {
+      draftReloadInFlightRef.current = false
+    }
   }, [])
+
+  const applyServerDraft = useCallback((
+    candidate: unknown,
+    revision: unknown,
+  ): DraftApplyResult => {
+    if (
+      !Number.isSafeInteger(revision)
+      || (revision as number) < 0
+      || (candidate !== null && !isRequestDraft(candidate))
+    ) {
+      return 'invalid'
+    }
+    const nextRevision = revision as number
+    const current = draftAuthorityRef.current
+    if (nextRevision < current.revision) return 'stale'
+    if (nextRevision === current.revision) {
+      if (sameDraft(current.draft, candidate as RequestDraft | null)) return 'idempotent'
+      setError(draftConflictError)
+      void reloadAuthoritativeDraft()
+      return 'conflict'
+    }
+    const nextDraft = candidate as RequestDraft | null
+    draftAuthorityRef.current = { draft: nextDraft, revision: nextRevision }
+    setDraft(nextDraft)
+    return 'applied'
+  }, [reloadAuthoritativeDraft])
+
+  const onTurn = useCallback((turn: ChatTurn) => {
+    const draftResult = applyServerDraft(turn.draft, turn.draft_revision)
+    setBusinessStatus(turn.business_status)
+    if (draftResult !== 'conflict') setError(null)
+  }, [applyServerDraft])
 
   const applyTurnEvent = useCallback((event: TurnSseFrame) => {
     const payload = event.data.payload
-    if (event.event === 'draft.updated' && payload.draft !== null && typeof payload.draft === 'object') {
-      setDraft(payload.draft as RequestDraft)
+    let draftResult: DraftApplyResult | null = null
+    if (Object.prototype.hasOwnProperty.call(payload, 'draft')) {
+      draftResult = applyServerDraft(payload.draft, payload.draft_revision)
       setRetryableInterruption(false)
     }
     if (event.event === 'business.status' && typeof payload.status === 'string') {
@@ -218,13 +299,16 @@ export function WorkbenchRuntime({
     if (event.event === 'error.recoverable') {
       setError(typeof payload.message === 'string' ? payload.message : fallbackRecoverableError)
     }
-    if (event.event === 'message.completed' || event.event === 'turn.interrupted') {
+    if (
+      (event.event === 'message.completed' || event.event === 'turn.interrupted')
+      && draftResult !== 'conflict'
+    ) {
       setError(null)
     }
     if (event.event === 'turn.interrupted') {
       setRetryableInterruption(payload.retryable !== false)
     }
-  }, [])
+  }, [applyServerDraft])
   const onEvents = useCallback((newEvents: WorkspaceEvent[]) => {
     if (newEvents.length === 0) return
     setConnectionState('connected')
@@ -234,8 +318,9 @@ export function WorkbenchRuntime({
     )
     for (const event of newEvents) {
       const payload = event.payload
-      if (event.type === 'draft.updated' && payload.draft !== null && typeof payload.draft === 'object') {
-        setDraft(payload.draft as RequestDraft)
+      let draftResult: DraftApplyResult | null = null
+      if (Object.prototype.hasOwnProperty.call(payload, 'draft')) {
+        draftResult = applyServerDraft(payload.draft, payload.draft_revision)
       }
       if (event.type === 'business.status' && typeof payload.status === 'string') {
         setBusinessStatus(payload.status)
@@ -243,7 +328,7 @@ export function WorkbenchRuntime({
       if (event.type === 'error.recoverable') {
         setError(typeof payload.message === 'string' ? payload.message : fallbackRecoverableError)
       }
-      if (isTerminalEvent(event)) {
+      if (isTerminalEvent(event) && draftResult !== 'conflict') {
         setError(null)
       }
       if (event.type === 'turn.interrupted') {
@@ -254,7 +339,7 @@ export function WorkbenchRuntime({
       const seen = new Set(current.map((event) => event.id))
       return [...current, ...newEvents.filter((event) => !seen.has(event.id))]
     })
-  }, [])
+  }, [applyServerDraft])
   const onError = useCallback((message: string) => setError(message), [])
 
   const adapter = useMemo(
@@ -400,10 +485,14 @@ export function WorkbenchRuntime({
       // revalidates it and never accepts a stale confirmation from the UI.
       confirmed: false,
     }
+    // Candidate UI input is not a draft fact. Only the revisioned preview
+    // response may cross the server-authoritative draft boundary below.
     const preview = await previewDraft(candidateDraft)
-    if (preview.draft !== null) setDraft(preview.draft)
+    const draftResult = applyServerDraft(preview.draft, preview.draft_revision)
     const nonMissingIssues = preview.issues.filter((issue) => !issue.code.startsWith('missing_fields:'))
-    const revalidated = preview.draft?.entitlement_id === entitlementId
+    const revalidated = draftResult !== 'conflict'
+      && draftResult !== 'invalid'
+      && preview.draft?.entitlement_id === entitlementId
       && preview.entitlement_resolution?.status === 'matched'
       && preview.entitlement_resolution.candidates.length === 1
       && preview.entitlement_resolution.candidates[0]?.code === entitlementId
@@ -416,9 +505,9 @@ export function WorkbenchRuntime({
         : (nonMissingIssues[0]?.message ?? '当前身份已不再具备申请资格。'),
       previous_confirmation_invalidated: draft?.confirmed === true,
     }
-    setError(null)
+    if (draftResult !== 'conflict') setError(null)
     return result
-  }, [draft, identity.employee_id])
+  }, [applyServerDraft, draft, identity.employee_id])
 
 
   const context = useMemo<WorkbenchContextValue>(
