@@ -112,6 +112,19 @@ def _run(*args: str) -> str:
     return result.stdout.rstrip("\n")
 
 
+def _read_at_t41(path: Path, errors: list[str], label: str) -> str:
+    try:
+        relative = path.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        errors.append(f"{label} escapes repository: {path}")
+        return ""
+    try:
+        return _run("git", "show", f"{T41_REVISION}:{relative}")
+    except subprocess.CalledProcessError:
+        errors.append(f"{label} is absent from frozen T41 revision: {relative}")
+        return ""
+
+
 def _read(path: Path, errors: list[str]) -> str:
     if not path.is_file():
         errors.append(f"missing artifact: {path.relative_to(ROOT)}")
@@ -137,10 +150,19 @@ def _changed_paths() -> set[str]:
 def _verify_revision(errors: list[str]) -> None:
     head = _run("git", "rev-parse", "HEAD")
     resolved = _run("git", "rev-parse", "9e757fd")
-    if head != T41_REVISION:
-        errors.append(f"HEAD drifted from frozen T41 revision: {head}")
     if resolved != T41_REVISION:
         errors.append(f"short T41 revision resolves unexpectedly: {resolved}")
+    ancestry = subprocess.run(
+        ("git", "merge-base", "--is-ancestor", T41_REVISION, head),
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if ancestry.returncode != 0:
+        errors.append(
+            f"HEAD does not descend from frozen T41 revision: {head}"
+        )
 
 
 def _verify_change_scope(errors: list[str]) -> None:
@@ -242,7 +264,11 @@ def _verify_entry_symbols(
         if target is None or not target.is_file():
             errors.append(f"{claim_id} {field_name} target is missing: {href}")
             continue
-        source = target.read_text(encoding="utf-8")
+        source = _read_at_t41(
+            target,
+            errors,
+            f"{claim_id} {field_name} target",
+        )
         if not re.search(rf"\b{re.escape(symbol)}\b", source):
             errors.append(
                 f"{claim_id} names absent symbol {symbol!r} in {target.relative_to(ROOT)}"
@@ -305,9 +331,15 @@ def _verify_cl5_direct_ui_evidence(text: str, errors: list[str]) -> None:
         errors.append("CL-LG-05 lacks direct App.tsx implementation evidence")
     if f"]({app_test_href})" not in tests or test_title not in tests:
         errors.append("CL-LG-05 lacks the exact App.test.tsx no-side-effect test")
-    app_source = (ROOT / "apps/web/src/App.tsx").read_text(encoding="utf-8")
-    app_test_source = (ROOT / "apps/web/src/App.test.tsx").read_text(
-        encoding="utf-8"
+    app_source = _read_at_t41(
+        ROOT / "apps/web/src/App.tsx",
+        errors,
+        "direct App.tsx production evidence",
+    )
+    app_test_source = _read_at_t41(
+        ROOT / "apps/web/src/App.test.tsx",
+        errors,
+        "direct App.test.tsx test evidence",
     )
     if "export function App" not in app_source:
         errors.append("direct App.tsx production symbol is missing")
@@ -548,7 +580,7 @@ def main() -> int:
     _verify_revision(errors)
     _verify_change_scope(errors)
 
-    source = _read(T41_EVIDENCE, errors)
+    source = _read_at_t41(T41_EVIDENCE, errors, "T41 metric source")
     claim_ledger = _read(CLAIM_LEDGER, errors)
     manifest = _read(PRODUCT_MANIFEST, errors)
     interview_pack = _read(INTERVIEW_PACK, errors)

@@ -455,7 +455,7 @@ canary。
 2. Product Manifest/评测证据只记录 T41 实测指标；Provider at-least-once、Mock 身份、无真实 SSO/IAM、无 ReAct/Multi-Agent/SLA/Token 成本/可观测平台等边界明确披露。
 3. 形成可核验的简历候选表述、Agent Loop 讲解图和 Demo 证据，但正式简历保持未修改；只有用户另行确认后才允许采用。
 
-**测试/运行验证：** 六条 Claim、14 项 T41 指标来源与仓库链接审计通过；8/8 mutation probes 和 5/5 定向负向探针均能拒绝证据漂移、夸大表述、工具 exactly-once 误述及 Markdown 空白缺陷；Ruff、tracked/untracked diff-check 通过。独立 reviewer 修复轮只读复核 AC-14，P0/P1/P2=0/0/0。证据入口见 [Claim Ledger](../evidence/accesspilot-v1.3-claim-ledger.md)、[Product Manifest](../evidence/accesspilot-v1.3-product-manifest.md)、[Interview Evidence Pack](../evidence/accesspilot-v1.3-interview-evidence-pack.md) 与 [审计脚本](../../scripts/verify-t42-evidence.py)。
+**测试/运行验证：** 六条 Claim、14 项 T41 指标来源与仓库链接审计通过；8/8 mutation probes 和 5/5 定向负向探针均能拒绝证据漂移、夸大表述、工具 exactly-once 误述及 Markdown 空白缺陷；Ruff、tracked/untracked diff-check 通过。T42 首次提交后，整体最终验收发现审计脚本错误要求 HEAD 精确等于 T41，导致交付后的 T42 revision 无法复验；可信红灯已将其复现。最小修复改为要求当前 HEAD 是固定 T41 revision 的后代，并从该 revision 读取实现、测试和指标源；同一独立 reviewer 确认当前后代通过、隔离非后代 fail-closed，最终 P0/P1/P2=0/0/0。证据入口见 [Claim Ledger](../evidence/accesspilot-v1.3-claim-ledger.md)、[Product Manifest](../evidence/accesspilot-v1.3-product-manifest.md)、[Interview Evidence Pack](../evidence/accesspilot-v1.3-interview-evidence-pack.md) 与 [审计脚本](../../scripts/verify-t42-evidence.py)。
 
 **依赖：** T41。
 
