@@ -429,6 +429,10 @@ a:focus-visible {
   flex-direction: column;
 }
 
+.assistant-view-panel[hidden] {
+  display: none;
+}
+
 .trajectory-view-panel {
   overflow: auto;
   background: #f6f6f2;
@@ -488,6 +492,32 @@ a:focus-visible {
   line-height: 1.5;
 }
 
+.agent-trajectory-boundary {
+  margin: 0;
+  padding: 10px 12px;
+  border-left: 3px solid #4d8a70;
+  background: #edf5f0;
+  color: #315b48;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.agent-trajectory-connection {
+  display: grid;
+  gap: 3px;
+  padding: 11px 13px;
+  border: 1px solid #ddcf9e;
+  border-radius: 11px;
+  background: #fffaf0;
+  color: #796023;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.agent-trajectory-connection strong {
+  font-size: 11px;
+}
+
 .agent-trajectory-empty {
   min-height: 250px;
   display: grid;
@@ -526,15 +556,22 @@ a:focus-visible {
 }
 
 .agent-trajectory-turn > summary {
-  min-height: 52px;
+  min-height: 72px;
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto;
   align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
+  column-gap: 11px;
+  row-gap: 4px;
+  padding: 11px 14px;
   cursor: pointer;
   list-style: none;
   color: #5f6b64;
+}
+
+.agent-trajectory-turn > summary:focus-visible {
+  outline: 3px solid rgba(20, 102, 71, 0.24);
+  outline-offset: -3px;
 }
 
 .agent-trajectory-turn > summary::-webkit-details-marker {
@@ -548,6 +585,7 @@ a:focus-visible {
   display: grid;
   place-items: center;
   grid-column: 1;
+  grid-row: 1 / 4;
   border-radius: 50%;
   background: #edf0eb;
   color: #526159;
@@ -559,7 +597,7 @@ a:focus-visible {
   transform: rotate(90deg);
 }
 
-.agent-trajectory-turn > summary > span {
+.agent-trajectory-turn-index {
   grid-column: 2;
   grid-row: 1;
   color: #728078;
@@ -571,8 +609,7 @@ a:focus-visible {
 
 .agent-trajectory-turn > summary > strong {
   grid-column: 2;
-  grid-row: 1;
-  margin-left: 64px;
+  grid-row: 2;
   overflow: hidden;
   color: #26352c;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -582,8 +619,78 @@ a:focus-visible {
   white-space: nowrap;
 }
 
+.agent-trajectory-engine {
+  width: fit-content;
+  max-width: 100%;
+  grid-column: 2;
+  grid-row: 3;
+  overflow: hidden;
+  border-radius: 999px;
+  padding: 3px 7px;
+  font-size: 8px;
+  font-weight: 720;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-trajectory-engine.is-langgraph {
+  background: #e7f1eb;
+  color: #276348;
+}
+
+.agent-trajectory-engine.is-legacy {
+  background: #f4f0df;
+  color: #756329;
+}
+
+.agent-trajectory-engine.is-unknown {
+  background: #eff0ed;
+  color: #68716c;
+}
+
+.agent-trajectory-status {
+  grid-column: 3;
+  grid-row: 2 / 4;
+  align-self: center;
+  border: 1px solid #d5dad5;
+  border-radius: 999px;
+  background: #f3f5f2;
+  color: #5d6962;
+  padding: 4px 8px;
+  font-size: 8px;
+  font-weight: 760;
+  white-space: nowrap;
+}
+
+.agent-trajectory-status.is-running {
+  border-color: #b8cec2;
+  background: #edf6f1;
+  color: #2e674d;
+}
+
+.agent-trajectory-status.is-waiting {
+  border-color: #ddcf9e;
+  background: #fff8e8;
+  color: #806522;
+}
+
+.agent-trajectory-status.is-completed {
+  border-color: #b6d1c3;
+  background: #eaf5ee;
+  color: #1d6a49;
+}
+
+.agent-trajectory-status.is-error,
+.agent-trajectory-status.is-interrupted {
+  border-color: #e4beb0;
+  background: #fff2ed;
+  color: #93452f;
+}
+
 .agent-trajectory-turn > summary > small {
   grid-column: 3;
+  grid-row: 1;
   color: #838c87;
   font-size: 9px;
 }
@@ -591,6 +698,14 @@ a:focus-visible {
 .agent-trajectory-turn[open] > summary {
   border-bottom: 1px solid #e3e5de;
   background: #f8f9f5;
+}
+
+.agent-trajectory-unknown {
+  margin: 0;
+  padding: 9px 16px 0;
+  color: #796023;
+  font-size: 9px;
+  line-height: 1.5;
 }
 
 .agent-trajectory-loop {
@@ -610,6 +725,8 @@ a:focus-visible {
 
 .agent-trajectory-step.is-input { --step-color: #477a65; }
 .agent-trajectory-step.is-agent { --step-color: #6f678f; }
+.agent-trajectory-step.is-model { --step-color: #4e678e; }
+.agent-trajectory-step.is-rag { --step-color: #287a75; }
 .agent-trajectory-step.is-tool { --step-color: #b77b28; }
 .agent-trajectory-step.is-output { --step-color: #1d7654; }
 .agent-trajectory-step.is-warning { --step-color: #a06f22; }
@@ -3107,7 +3224,7 @@ a:focus-visible {
   }
 
   .agent-trajectory-turn > summary {
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: 20px minmax(0, 1fr) auto;
   }
 
   .agent-trajectory-turn > summary > small {

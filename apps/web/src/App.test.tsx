@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactElement } from 'react'
 
@@ -33,6 +33,7 @@ vi.mock('./ChatThread', () => ({
     return (
       <>
         <div>对话视图内容</div>
+        <input aria-label="未发送的对话内容" defaultValue="" />
         {confirmation ?? null}
       </>
     )
@@ -143,20 +144,45 @@ describe('application confirmation facts', () => {
 })
 
 describe('App authentication state machine', () => {
-  it('switches between conversation and the read-only trajectory at the assistant header', async () => {
-    vi.stubGlobal('fetch', authenticatedFetch())
+  it('switches tabs with roving keyboard focus and keeps the live conversation mounted without side effects', async () => {
+    const fetchMock = authenticatedFetch()
+    vi.stubGlobal('fetch', fetchMock)
 
     render(<App />)
 
     const trajectoryTab = await screen.findByRole('tab', { name: '轨迹' })
-    expect(screen.getByRole('tab', { name: '对话' })).toHaveAttribute('aria-selected', 'true')
+    const conversationTab = screen.getByRole('tab', { name: '对话' })
+    const draftInput = screen.getByRole('textbox', { name: '未发送的对话内容' })
+    const conversationPanel = screen.getByRole('tabpanel', { name: '对话' })
+    expect(conversationTab).toHaveAttribute('aria-selected', 'true')
+    expect(conversationTab).toHaveAttribute('tabindex', '0')
+    expect(trajectoryTab).toHaveAttribute('tabindex', '-1')
     expect(screen.getByText('对话视图内容')).toBeInTheDocument()
+    fireEvent.change(draftInput, { target: { value: '尚未发送' } })
+    const fetchCount = fetchMock.mock.calls.length
 
-    act(() => trajectoryTab.click())
+    conversationTab.focus()
+    fireEvent.keyDown(conversationTab, { key: 'ArrowRight' })
 
     expect(trajectoryTab).toHaveAttribute('aria-selected', 'true')
+    expect(trajectoryTab).toHaveFocus()
+    expect(trajectoryTab).toHaveAttribute('tabindex', '0')
+    expect(conversationTab).toHaveAttribute('tabindex', '-1')
+    expect(conversationPanel).toHaveAttribute('hidden')
     expect(screen.getByText('轨迹视图内容')).toBeInTheDocument()
-    expect(screen.queryByText('对话视图内容')).not.toBeInTheDocument()
+    expect(screen.getByText('对话视图内容')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(fetchCount)
+    expect(appMocks.append).not.toHaveBeenCalled()
+
+    fireEvent.keyDown(trajectoryTab, { key: 'Home' })
+    expect(conversationTab).toHaveFocus()
+    expect(conversationTab).toHaveAttribute('aria-selected', 'true')
+    expect(draftInput).toHaveValue('尚未发送')
+
+    fireEvent.keyDown(conversationTab, { key: 'ArrowLeft' })
+    expect(trajectoryTab).toHaveFocus()
+    fireEvent.keyDown(trajectoryTab, { key: 'End' })
+    expect(trajectoryTab).toHaveFocus()
   })
 
   it('allows only one same-frame explicit confirmation across both confirmation buttons', async () => {

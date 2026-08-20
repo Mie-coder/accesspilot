@@ -20,125 +20,257 @@ function event(
   }
 }
 
-describe('AgentTrajectory', () => {
-  it('explains its read-only event boundary and renders a useful empty state', () => {
-    render(<AgentTrajectory events={[]} />)
+function langGraphStart(id: number, turnId: string): WorkspaceEvent {
+  return event(id, 'turn.started', turnId, {
+    orchestrator: 'langgraph',
+    flow_version: 2,
+    graph_version: 'accesspilot-langgraph-v1.3',
+  })
+}
 
-    expect(screen.getByRole('heading', { name: 'Agent 运行轨迹' })).toBeInTheDocument()
-    expect(screen.getByText(/ConversationService/)).toHaveTextContent('当前主编排器是 ConversationService，不是 LangGraph')
-    expect(screen.getByText(/持久化的安全事件/)).toHaveTextContent('只读')
-    expect(screen.getByText(/不包含隐藏推理/)).toBeInTheDocument()
-    expect(screen.getByRole('status')).toHaveTextContent('还没有可回放的 Agent 轨迹')
+describe('AgentTrajectory', () => {
+  it('explains the read-only boundary and renders empty and reconnecting states', () => {
+    const { rerender } = render(<AgentTrajectory events={[]} />)
+
+    const trajectory = screen.getByLabelText('Agent 运行轨迹')
+    expect(within(trajectory).getByRole('heading', { name: 'Agent 运行轨迹' })).toBeInTheDocument()
+    expect(within(trajectory).getByText('这是执行事实的只读投影，不是模型思维链。')).toBeInTheDocument()
+    expect(within(trajectory).getByRole('status')).toHaveTextContent('还没有可展示的运行轨迹')
+
+    rerender(<AgentTrajectory events={[]} connectionState="reconnecting" />)
+
+    expect(within(trajectory).getByRole('status')).toHaveTextContent('轨迹加载中')
+    expect(within(trajectory).getByRole('status')).toHaveTextContent('活动流正在重连')
   })
 
-  it('groups the latest three turns and expands only the newest turn', () => {
+  it('selects the latest three turns by each group maximum DB id and sorts events by id', () => {
     render(
       <AgentTrajectory
         events={[
-          event(1, 'turn.started', 'turn-1'),
-          event(2, 'message.completed', 'turn-1', { message_id: 'm-1', content: '第一轮' }),
-          event(3, 'turn.started', 'turn-2'),
-          event(4, 'message.completed', 'turn-2', { message_id: 'm-2', content: '第二轮' }),
-          event(5, 'turn.started', 'turn-3'),
-          event(6, 'message.completed', 'turn-3', { message_id: 'm-3', content: '第三轮' }),
-          event(7, 'turn.started', 'turn-4'),
-          event(8, 'message.completed', 'turn-4', { message_id: 'm-4', content: '第四轮' }),
-          event(9, 'message.user', null, { content: '无法可靠归组的旧事件' }),
+          event(40, 'message.completed', 'turn-four', { content: '第四轮终态', message_id: 'm-4' }),
+          event(3, 'turn.started', 'turn-three'),
+          event(100, 'message.completed', 'turn-one', { content: '旧轮晚到终态', message_id: 'm-1' }),
+          event(1, 'turn.started', 'turn-one'),
+          event(30, 'message.completed', 'turn-three', { content: '第三轮终态', message_id: 'm-3' }),
+          event(2, 'turn.started', 'turn-two'),
+          event(20, 'message.completed', 'turn-two', { content: '应被截掉的第二轮', message_id: 'm-2' }),
+          event(4, 'turn.started', 'turn-four'),
         ]}
       />,
     )
 
-    expect(screen.queryByText('第一轮')).not.toBeInTheDocument()
-    expect(screen.queryByText('无法可靠归组的旧事件')).not.toBeInTheDocument()
-    expect(screen.getByText('第二轮')).toBeInTheDocument()
-    expect(screen.getByText('第三轮')).toBeInTheDocument()
-    expect(screen.getByText('第四轮')).toBeInTheDocument()
+    expect(screen.queryByText('应被截掉的第二轮')).not.toBeInTheDocument()
+    expect(screen.getByText('第三轮终态')).toBeInTheDocument()
+    expect(screen.getByText('第四轮终态')).toBeInTheDocument()
+    expect(screen.getByText('旧轮晚到终态')).toBeInTheDocument()
 
     const turns = screen.getAllByTestId('agent-trajectory-turn')
     expect(turns).toHaveLength(3)
+    expect(turns[0]).toHaveAttribute('data-turn-id', 'turn-three')
+    expect(turns[1]).toHaveAttribute('data-turn-id', 'turn-four')
+    expect(turns[2]).toHaveAttribute('data-turn-id', 'turn-one')
     expect(turns[0]).not.toHaveAttribute('open')
     expect(turns[1]).not.toHaveAttribute('open')
     expect(turns[2]).toHaveAttribute('open')
+
+    const newestSteps = within(turns[2] as HTMLElement).getAllByRole('listitem')
+    expect(newestSteps[0]).toHaveAttribute('data-event-id', '1')
+    expect(newestSteps[1]).toHaveAttribute('data-event-id', '100')
   })
 
-  it('maps persisted events into an educational Agent Loop with tool results', () => {
+  it('labels each turn from its own orchestrator fact without pretending unknown history is LangGraph', () => {
     render(
       <AgentTrajectory
         events={[
-          event(10, 'turn.started', 'turn-rag'),
-          event(11, 'message.user', 'turn-rag', { content: '导出权限最多能申请多久？' }),
-          event(12, 'intent.detected', 'turn-rag', {
-            intent: 'policy_question',
-            security_flagged: false,
+          langGraphStart(1, 'turn-graph'),
+          event(2, 'message.completed', 'turn-graph', { content: '图轮完成', message_id: 'm-1' }),
+          event(3, 'turn.started', 'turn-legacy'),
+          event(4, 'message.completed', 'turn-legacy', { content: '旧轮完成', message_id: 'm-2' }),
+          event(5, 'message.user', 'turn-unknown', { content: '缺少编排器事实' }),
+        ]}
+      />,
+    )
+
+    expect(screen.getByText('LangGraph · Flow 2 · accesspilot-langgraph-v1.3')).toBeInTheDocument()
+    expect(screen.getByText('Legacy · ConversationService')).toBeInTheDocument()
+    expect(screen.getByText('Unknown · 缺少编排器事实')).toBeInTheDocument()
+  })
+
+  it('maps every T36 lifecycle category and never calls non-retrieval tools RAG', () => {
+    render(
+      <AgentTrajectory
+        events={[
+          langGraphStart(10, 'turn-all'),
+          event(11, 'message.user', 'turn-all', { content: '申请客户导出权限' }),
+          event(12, 'intent.detected', 'turn-all', { intent: 'request_access', security_flagged: false }),
+          event(13, 'agent.node.started', 'turn-all', {
+            step_id: 'stp-route', node_code: 'route_intent', public_label: '识别意图与路由', status: 'running',
           }),
-          event(13, 'tool.summary', 'turn-rag', {
-            tool: 'search_policies',
-            status: 'grounded',
-            summary: '返回 POL-003：最长 30 天',
+          event(14, 'agent.node.completed', 'turn-all', {
+            step_id: 'stp-route', node_code: 'route_intent', public_label: '识别意图与路由', status: 'success',
           }),
-          event(14, 'draft.updated', 'turn-rag', {
-            draft: { entitlement_id: 'insighthub.customer_export' },
-            missing_fields: ['justification'],
-            can_enter_approval: false,
-            draft_revision: 2,
+          event(15, 'agent.route.selected', 'turn-all', { step_id: 'stp-route', route_code: 'request_access' }),
+          event(16, 'model.started', 'turn-all', {
+            step_id: 'stp-model', operation: 'parse_input', provider_mode: 'api', attempt: 1,
           }),
-          event(15, 'business.status', 'turn-rag', { status: 'collecting' }),
-          event(16, 'message.assistant', 'turn-rag', { content: '请补充业务理由' }),
-          event(17, 'message.completed', 'turn-rag', {
-            message_id: 'm-rag',
-            content: '政策规定最长 30 天',
+          event(17, 'model.completed', 'turn-all', {
+            step_id: 'stp-model', operation: 'parse_input', provider_mode: 'api', attempt: 1,
+            status: 'parsed', extracted_fields: ['entitlement_id', 'duration_days'],
+          }),
+          event(18, 'retrieval.started', 'turn-all', { step_id: 'stp-rag', retriever: 'pgvector' }),
+          event(19, 'retrieval.completed', 'turn-all', {
+            step_id: 'stp-rag', retriever: 'pgvector', status: 'grounded', match_count: 2,
+            evidence_codes: ['POL-003', 'POL-004'],
+          }),
+          event(20, 'tool.started', 'turn-all', {
+            step_id: 'stp-tool', tool: 'resolve_entitlement', tool_call_id: 'tool-1',
+          }),
+          event(21, 'tool.completed', 'turn-all', {
+            step_id: 'stp-tool', tool: 'resolve_entitlement', tool_call_id: 'tool-1',
+            status: 'success', summary: '唯一匹配客户导出权限',
+          }),
+          event(22, 'tool.summary', 'turn-all', {
+            tool: 'list_eligible_access', status: 'success', summary: '共 2 项可申请权限',
+          }),
+          event(23, 'draft.updated', 'turn-all', {
+            draft: { entitlement_id: 'insighthub.customer_export' }, missing_fields: ['justification'],
+            can_enter_approval: false, draft_revision: 3,
+          }),
+          event(24, 'business.status', 'turn-all', { status: 'awaiting_confirmation' }),
+          event(25, 'agent.input.required', 'turn-all', {
+            step_id: 'stp-hitl', pending_input_id: 'pending-1', kind: 'confirmation', draft_revision: 3,
+          }),
+          event(26, 'agent.input.resumed', 'turn-all', {
+            step_id: 'stp-hitl', pending_input_id: 'pending-1', kind: 'confirmation', decision: 'confirm',
+          }),
+          event(27, 'security.notice', 'turn-all', { code: 'SAFE_BOUNDARY', message: '安全边界已生效' }),
+          event(28, 'message.completed', 'turn-all', {
+            message_id: 'm-all', content: '申请信息已确认', business_status: 'ready_to_submit',
           }),
         ]}
       />,
     )
 
-    const trajectory = screen.getByLabelText('turn-rag Agent Loop')
-    expect(within(trajectory).getByText('Orchestrator')).toBeInTheDocument()
-    expect(within(trajectory).getByText('Input')).toBeInTheDocument()
-    expect(within(trajectory).getByText('Router')).toBeInTheDocument()
-    expect(within(trajectory).getByText('RAG · pgvector')).toBeInTheDocument()
-    expect(within(trajectory).getByText('Agent state')).toBeInTheDocument()
-    expect(within(trajectory).getByText('Decision / state')).toBeInTheDocument()
-    expect(within(trajectory).getByText('Output')).toBeInTheDocument()
-    expect(within(trajectory).getByText('调用 search_policies')).toBeInTheDocument()
-    expect(within(trajectory).getByText(/^返回：返回 POL-003：最长 30 天/)).toBeInTheDocument()
-    expect(within(trajectory).getByText('政策规定最长 30 天')).toBeInTheDocument()
-    expect(within(trajectory).queryByText('请补充业务理由')).not.toBeInTheDocument()
+    const trajectory = screen.getByLabelText('turn-all Agent Loop')
+    for (const label of [
+      'Orchestrator', 'Input', 'Router', 'Node', 'Model · DeepSeek', 'RAG · pgvector',
+      'Read-only tool · resolve_entitlement', 'Legacy tool · list_eligible_access',
+      'State', 'HITL', 'Guardrail', 'Output',
+    ]) {
+      expect(within(trajectory).getAllByText(label).length).toBeGreaterThan(0)
+    }
+    expect(within(trajectory).getByText('识别意图与路由开始')).toBeInTheDocument()
+    expect(within(trajectory).getByText('识别意图与路由完成')).toBeInTheDocument()
+    expect(within(trajectory).getByText('已选择分支 request_access')).toBeInTheDocument()
+    expect(within(trajectory).getAllByText(/DeepSeek Parser · 第 1 次/)).toHaveLength(2)
+    expect(within(trajectory).getByText(/命中 2 条 · POL-003、POL-004/)).toBeInTheDocument()
+    expect(within(trajectory).getByText('等待申请人确认')).toBeInTheDocument()
+    expect(within(trajectory).getByText('已按 confirm 恢复执行')).toBeInTheDocument()
+    expect(screen.getByText('完成', { selector: '.agent-trajectory-status' })).toBeInTheDocument()
+    expect(within(trajectory).getAllByText('RAG · pgvector')).toHaveLength(2)
+  })
+
+  it('renders running, waiting HITL, recoverable error, completed, and interrupted states', () => {
+    const { rerender } = render(
+      <AgentTrajectory
+        events={[
+          langGraphStart(1, 'turn-running'),
+          event(2, 'agent.node.started', 'turn-running', {
+            step_id: 'stp-1', node_code: 'route_intent', public_label: '识别意图与路由', status: 'running',
+          }),
+        ]}
+        isRunning
+      />,
+    )
+    expect(screen.getByText('运行中', { selector: '.agent-trajectory-status' })).toBeInTheDocument()
+
+    rerender(<AgentTrajectory events={[
+      langGraphStart(1, 'turn-waiting'),
+      event(2, 'agent.input.required', 'turn-waiting', {
+        step_id: 'stp-1', pending_input_id: 'pending-1', kind: 'confirmation', draft_revision: 2,
+      }),
+    ]} />)
+    expect(screen.getByText('等待 HITL', { selector: '.agent-trajectory-status' })).toBeInTheDocument()
+
+    rerender(<AgentTrajectory events={[
+      langGraphStart(1, 'turn-error'),
+      event(2, 'error.recoverable', 'turn-error', { code: 'MODEL_UNAVAILABLE', message: '模型暂时不可用' }),
+    ]} />)
+    expect(screen.getByText('可恢复错误', { selector: '.agent-trajectory-status' })).toBeInTheDocument()
+
+    rerender(<AgentTrajectory events={[
+      langGraphStart(1, 'turn-complete'),
+      event(2, 'message.completed', 'turn-complete', { message_id: 'm-1', content: '已完成' }),
+    ]} />)
+    expect(screen.getByText('完成', { selector: '.agent-trajectory-status' })).toBeInTheDocument()
+
+    rerender(<AgentTrajectory events={[
+      langGraphStart(1, 'turn-interrupted'),
+      event(2, 'turn.interrupted', 'turn-interrupted', { reason: 'client_cancelled', retryable: true }),
+    ]} />)
+    expect(screen.getByText('已中断', { selector: '.agent-trajectory-status' })).toBeInTheDocument()
+  })
+
+  it('ignores unknown event contents and projects safe details from a per-type whitelist', () => {
+    const forbiddenValues = [
+      '原始 checkpoint 值', '隐藏思维链', '系统提示词', 'token-secret-value',
+      'csrf-secret-value', 'authorization-secret-value', '内部预算 99', '内部异常栈', '未投影的草稿事实',
+    ]
+    render(
+      <AgentTrajectory
+        events={[
+          langGraphStart(1, 'turn-safe'),
+          event(2, 'model.completed', 'turn-safe', {
+            step_id: 'stp-1', operation: 'parse_input', provider_mode: 'mock', attempt: 1,
+            status: 'parsed', extracted_fields: ['duration_days'],
+            checkpoint: forbiddenValues[0], hidden_reasoning: forbiddenValues[1], system_prompt: forbiddenValues[2],
+          }),
+          event(3, 'draft.updated', 'turn-safe', {
+            draft_revision: 4, missing_fields: [], can_enter_approval: true,
+            draft: { justification: forbiddenValues[8] },
+          }),
+          event(4, 'error.recoverable', 'turn-safe', {
+            code: 'SAFE_ERROR', message: '请稍后重试', token: forbiddenValues[3], csrf: forbiddenValues[4],
+            authorization: forbiddenValues[5], quota: forbiddenValues[6], stack: forbiddenValues[7],
+          }),
+          event(5, 'mystery.debug', 'turn-safe', { raw: '未知事件原始内容' }),
+        ]}
+      />,
+    )
+
+    const trajectory = screen.getByLabelText('Agent 运行轨迹')
+    expect(within(trajectory).getByText('1 个未知事件已安全忽略')).toBeInTheDocument()
+    expect(trajectory).not.toHaveTextContent('未知事件原始内容')
+    for (const forbidden of forbiddenValues) expect(trajectory).not.toHaveTextContent(forbidden)
     expect(within(trajectory).getAllByText('安全事件详情').length).toBeGreaterThan(0)
+    expect(within(trajectory).queryAllByRole('button')).toHaveLength(0)
+    for (const action of ['恢复', '重放', '编辑', '提交', '执行工具']) {
+      expect(within(trajectory).queryByRole('button', { name: action })).not.toBeInTheDocument()
+    }
   })
 
-  it('names other read-only tools and presents guardrail, error, and interruption events safely', () => {
+  it('does not label resolve, list, or legacy search tool summaries as RAG without retrieval facts', () => {
     render(
       <AgentTrajectory
         events={[
-          event(20, 'turn.started', 'turn-safe'),
-          event(21, 'tool.summary', 'turn-safe', {
-            tool: 'resolve_entitlement',
-            status: 'success',
-            summary: '唯一匹配客户导出权限',
+          langGraphStart(1, 'turn-tools'),
+          event(2, 'tool.completed', 'turn-tools', {
+            step_id: 'stp-1', tool: 'resolve_entitlement', tool_call_id: 'tool-1', status: 'success', summary: '已匹配',
           }),
-          event(22, 'security.notice', 'turn-safe', {
-            code: 'PROMPT_INJECTION_BLOCKED',
-            message: '已忽略越权指令',
-            hidden_reasoning: '不得显示的内部推理',
+          event(3, 'tool.completed', 'turn-tools', {
+            step_id: 'stp-2', tool: 'list_policy_catalog', tool_call_id: 'tool-2', status: 'success', summary: '已列出',
           }),
-          event(23, 'error.recoverable', 'turn-safe', {
-            code: 'MODEL_REPLY_UNAVAILABLE',
-            message: '暂时无法理解，可以重试',
+          event(4, 'tool.summary', 'turn-tools', {
+            tool: 'search_policies', status: 'grounded', summary: 'Legacy 摘要',
           }),
-          event(24, 'turn.interrupted', 'turn-safe', {
-            reason: 'client_cancelled',
-            retryable: true,
-          }),
+          event(5, 'message.completed', 'turn-tools', { message_id: 'm-1', content: '已完成' }),
         ]}
       />,
     )
 
+    expect(screen.queryByText('RAG · pgvector')).not.toBeInTheDocument()
     expect(screen.getByText('Read-only tool · resolve_entitlement')).toBeInTheDocument()
-    expect(screen.getByText(/返回：唯一匹配客户导出权限/)).toBeInTheDocument()
-    expect(screen.getByText('Guardrail')).toBeInTheDocument()
-    expect(screen.getByText('Recoverable error')).toBeInTheDocument()
-    expect(screen.getByText('Interrupted')).toBeInTheDocument()
-    expect(screen.queryByText('不得显示的内部推理')).not.toBeInTheDocument()
+    expect(screen.getByText('Read-only tool · list_policy_catalog')).toBeInTheDocument()
+    expect(screen.getByText('Legacy tool · search_policies')).toBeInTheDocument()
   })
 })

@@ -1,6 +1,6 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Tickets
 
-**状态：** 用户已确认串行实施；T26–T38 `Verified`，T39–T42 尚未开始；用户已授权 T38 仅本地提交，T37 已本地提交 `e1e47cc`，未授权推送、合并、部署或修改正式简历
+**状态：** 用户已确认串行实施；T26–T39 `Verified`，T40–T42 尚未开始；用户已授权 T39 仅本地提交，T38 已本地提交 `0aa953c`，未授权推送、合并、部署或修改正式简历
 **更新时间：** 2026-08-20
 **继承基线：** AccessPilot v1.2，`product_verified=true`；T32 实现基线 HEAD `7ad8a01`，历史证据不自动证明 v1.3
 **Canonical Spec：** `docs/specs/accesspilot-langgraph-agent-loop-v1.3.md`
@@ -377,7 +377,7 @@ canary。
 
 ## T39 — 「对话 / 轨迹」只读 UI 与最近三轮
 
-**状态：** 尚未开始
+**状态：** `Verified`；三条验收标准通过，独立验收 P0/P1/P2=0/0/1；reduced-motion 下折叠箭头仍保留 150ms transition 的 P2 已记录且不阻塞，验收证据见 [T39 验收证据包](../evidence/accesspilot-v1.3-t39-acceptance-2026-08-20.md)
 
 **目标：** 用真实事件呈现可访问、不可操作的 Agent Loop 轨迹。
 
@@ -389,7 +389,7 @@ canary。
 2. 最近三轮按 DB event ID 展示真实引擎、节点、模型、RAG、工具、State、HITL 和终态，最新轮默认展开；Legacy/Unknown 不伪装为 LangGraph。
 3. 空、加载、运行中、可恢复错误、完成和未知事件稳定渲染；详情不显示 Spec 禁止内容，也没有恢复/重放/编辑/提交按钮。
 
-**测试/运行验证：** Vitest/Testing Library 覆盖 Tab、三轮排序、引擎、全状态、未知事件和零副作用；ESLint、TypeScript、build；1440×900、1024×768、390×844 与键盘 smoke。
+**测试/运行验证：** TDD 红灯 `8 failed / 8 passed` 后转为 T39 定向 16 项通过；实现阶段受影响 WorkbenchRuntime/ChatThread/streaming-runtime 14 项通过。独立验收实测 T39+受影响 38 项、完整 Web 103 项、ESLint、两套 TypeScript、Vite 生产 build 与 `git diff --check` 全部通过；1440×900、1024×768、390×844 无水平溢出，键盘、双 panel 保活和 Tab 切换 API resource `4 → 4` 通过。
 
 **依赖：** T38。
 
@@ -467,4 +467,4 @@ canary。
 
 - T26–T40 分层建立 AC-01–AC-12；T41 在同一 revision 汇总判定 AC-01–AC-13；T42 单独完成 AC-14；
 - 数据库、checkpoint、Graph State、JSON、SSE、UI 和证据按依赖串行，不并发修改共享权威源；
-- **当前停点：T38 `Verified`，用户已授权仅本地提交；未进入 T39。** T37 已本地提交 `e1e47cc`，仍未授权推送、合并、部署或修改正式简历。
+- **当前停点：T39 `Verified`，用户已授权仅本地提交；未进入 T40。** T38 已本地提交 `0aa953c`，仍未授权推送、合并、部署或修改正式简历。

@@ -11,6 +11,7 @@ import {
   Sparkles,
 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 
 import { approvalRoleFor } from './approval'
 import {
@@ -134,16 +135,23 @@ function useEntitlementName(entitlementCode: string | null): string | null {
   return entitlementNameForCode(fact, entitlementCode)
 }
 
+const assistantViews = ['conversation', 'trajectory'] as const
+type AssistantView = typeof assistantViews[number]
+
 function WorkbenchPage({ onLogout }: { onLogout: () => Promise<void> }) {
   const workbench = useWorkbench()
   const approvalRole = approvalRoleFor(workbench.identity)
   const [showOperations, setShowOperations] = useState(false)
   const [activeView, setActiveView] = useState<'assistant' | 'access' | 'policy' | 'request'>('assistant')
-  const [assistantView, setAssistantView] = useState<'conversation' | 'trajectory'>('conversation')
+  const [assistantView, setAssistantView] = useState<AssistantView>('conversation')
   const [logoutBusy, setLogoutBusy] = useState(false)
   const [logoutError, setLogoutError] = useState<string | null>(null)
   const [isConfirming, setIsConfirming] = useState(false)
   const confirmationInFlightRef = useRef(false)
+  const assistantTabRefs = useRef<Record<AssistantView, HTMLButtonElement | null>>({
+    conversation: null,
+    trajectory: null,
+  })
   const aui = useAui()
   const isRunning = useAuiState((state) => state.thread.isRunning)
   const entitlementName = useEntitlementName(workbench.draft?.entitlement_id ?? null)
@@ -173,6 +181,26 @@ function WorkbenchPage({ onLogout }: { onLogout: () => Promise<void> }) {
     } finally {
       setLogoutBusy(false)
     }
+  }
+  const handleAssistantTabKeyDown = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    currentView: AssistantView,
+  ) => {
+    const currentIndex = assistantViews.indexOf(currentView)
+    let nextView: AssistantView | null = null
+    if (event.key === 'ArrowRight') {
+      nextView = assistantViews[(currentIndex + 1) % assistantViews.length] ?? null
+    } else if (event.key === 'ArrowLeft') {
+      nextView = assistantViews[(currentIndex - 1 + assistantViews.length) % assistantViews.length] ?? null
+    } else if (event.key === 'Home') {
+      nextView = assistantViews[0]
+    } else if (event.key === 'End') {
+      nextView = assistantViews[assistantViews.length - 1]
+    }
+    if (nextView === null) return
+    event.preventDefault()
+    setAssistantView(nextView)
+    assistantTabRefs.current[nextView]?.focus()
   }
 
   return (
@@ -275,23 +303,29 @@ function WorkbenchPage({ onLogout }: { onLogout: () => Promise<void> }) {
             <div className="assistant-view-tabs" role="tablist" aria-label="助手视图切换">
               <button
                 id="conversation-tab"
+                ref={(node) => { assistantTabRefs.current.conversation = node }}
                 type="button"
                 role="tab"
                 aria-selected={assistantView === 'conversation'}
                 aria-controls="conversation-panel"
+                tabIndex={assistantView === 'conversation' ? 0 : -1}
                 className={assistantView === 'conversation' ? 'is-active' : ''}
                 onClick={() => setAssistantView('conversation')}
+                onKeyDown={(event) => handleAssistantTabKeyDown(event, 'conversation')}
               >
                 对话
               </button>
               <button
                 id="trajectory-tab"
+                ref={(node) => { assistantTabRefs.current.trajectory = node }}
                 type="button"
                 role="tab"
                 aria-selected={assistantView === 'trajectory'}
                 aria-controls="trajectory-panel"
+                tabIndex={assistantView === 'trajectory' ? 0 : -1}
                 className={assistantView === 'trajectory' ? 'is-active' : ''}
                 onClick={() => setAssistantView('trajectory')}
+                onKeyDown={(event) => handleAssistantTabKeyDown(event, 'trajectory')}
               >
                 轨迹
               </button>
@@ -304,35 +338,38 @@ function WorkbenchPage({ onLogout }: { onLogout: () => Promise<void> }) {
               <span>{workbench.error}</span>
             </div>
           ) : null}
-          {assistantView === 'conversation' ? (
-            <div
-              className="assistant-view-panel conversation-view-panel"
-              id="conversation-panel"
-              role="tabpanel"
-              aria-labelledby="conversation-tab"
-            >
-              <ChatThread
-                confirmation={(
-                  <ConfirmationSummary
-                    identity={workbench.identity}
-                    draft={workbench.draft}
-                    entitlementName={entitlementName}
-                    isBusy={isRunning || isConfirming}
-                    onConfirm={confirm}
-                  />
-                )}
-              />
-            </div>
-          ) : (
-            <div
-              className="assistant-view-panel trajectory-view-panel"
-              id="trajectory-panel"
-              role="tabpanel"
-              aria-labelledby="trajectory-tab"
-            >
-              <AgentTrajectory events={workbench.events} />
-            </div>
-          )}
+          <div
+            className="assistant-view-panel conversation-view-panel"
+            id="conversation-panel"
+            role="tabpanel"
+            aria-labelledby="conversation-tab"
+            hidden={assistantView !== 'conversation'}
+          >
+            <ChatThread
+              confirmation={(
+                <ConfirmationSummary
+                  identity={workbench.identity}
+                  draft={workbench.draft}
+                  entitlementName={entitlementName}
+                  isBusy={isRunning || isConfirming}
+                  onConfirm={confirm}
+                />
+              )}
+            />
+          </div>
+          <div
+            className="assistant-view-panel trajectory-view-panel"
+            id="trajectory-panel"
+            role="tabpanel"
+            aria-labelledby="trajectory-tab"
+            hidden={assistantView !== 'trajectory'}
+          >
+            <AgentTrajectory
+              events={workbench.events}
+              connectionState={workbench.connectionState}
+              isRunning={isRunning}
+            />
+          </div>
         </section>
 
         <aside className="right-rail" aria-label="申请状态">
