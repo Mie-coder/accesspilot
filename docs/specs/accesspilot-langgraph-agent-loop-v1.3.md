@@ -1,6 +1,6 @@
 # AccessPilot v1.3「真实 LangGraph Agent Loop 与只读运行轨迹」Spec
 
-**状态：** T26–T42 `Verified`；`product_verified=true`，`interview_ready=pending_user_verification`；T42 独立验收修复轮 P0/P1/P2=0/0/0，仅本地提交；未授权推送、合并、部署或修改正式简历
+**状态：** T26–T42 `Verified`；`product_verified=true`，`interview_ready=pending_user_verification`；整体最终验收与 Claude Opus 5 / DeepSeek 双评审 P0/P1=0/0，结论为“可交给用户决定是否发布”；仅本地提交，未授权推送、合并、部署或修改正式简历
 **更新时间：** 2026-08-21
 **继承基线：** AccessPilot v1.2，`product_verified=true`；历史验证结果不能自动证明 v1.3
 **上游规格：** `docs/specs/accesspilot-productized-agent-v1.2.md`
@@ -626,6 +626,6 @@ Claim Ledger 能从“LangGraph 主链、Postgres checkpoint、interrupt/resume�
 
 ## 15. 工作流停点
 
-用户已选择 Claude Code + DeepSeek 双评审；两份只读结果已完成，接受项已回流本修订版，裁决见评审决策记录。
+用户已选择 Claude Opus 5 + DeepSeek 双评审；两份只读结果已完成，接受项已回流本修订版，裁决见[最终评审决策记录](../reviews/accesspilot-v1.3-final-acceptance-decisions-2026-08-21.md)。
 
-用户已确认 T26–T42 按张串行实施。T26–T42 已按各自证据完成实现、受影响回归和独立验收；T41 的全量门禁、两轮 parity、真实浏览器主链、重启恢复和完整 Legacy 回滚已在同一内容 revision 通过，修复轮独立验收 P0/P1/P2=0/0/0，因此设置 `product_verified=true`。T42 已交付六条可反查 Claim、只绑定 T41 实测的 Product Manifest、限制披露、候选表述、Agent Loop 讲解图与 Demo 索引；首轮三项证据链 P1 已修复，同一独立验收者复核 P0/P1/P2=0/0/0。正式简历未修改，`interview_ready` 保持 `pending_user_verification`；T41 已本地提交 `9e757fd`，T42 仅本地提交，仍未授权推送、合并或部署。下一步进入 v1.3 整体最终验收。
+用户已确认 T26–T42 按张串行实施。T26–T42 已按各自证据完成实现、受影响回归和独立验收；T41 的全量门禁、两轮 parity、真实浏览器主链、重启恢复和完整 Legacy 回滚已在同一内容 revision 通过，修复轮独立验收 P0/P1/P2=0/0/0，因此设置 `product_verified=true`。T42 已交付六条可反查 Claim、只绑定 T41 实测的 Product Manifest、限制披露、候选表述、Agent Loop 讲解图与 Demo 索引，同一独立验收者最终复核 P0/P1/P2=0/0/0。整体最终验收再由 Claude Opus 5 与 DeepSeek 只读交叉评审，两者 P0/P1 均为 0；主控接受并修正文档治理 P2，最终结论为“可交给用户决定是否发布”。正式简历未修改，`interview_ready` 保持 `pending_user_verification`；所有变更仅本地提交，仍未授权推送、合并或部署。

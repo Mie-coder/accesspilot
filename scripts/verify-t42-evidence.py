@@ -17,11 +17,38 @@ CLAIM_LEDGER = ROOT / "docs/evidence/accesspilot-v1.3-claim-ledger.md"
 PRODUCT_MANIFEST = ROOT / "docs/evidence/accesspilot-v1.3-product-manifest.md"
 INTERVIEW_PACK = ROOT / "docs/evidence/accesspilot-v1.3-interview-evidence-pack.md"
 DOC_INDEX = ROOT / "docs/README.md"
+FINAL_REVIEW_PACK = ROOT / (
+    "docs/reviews/"
+    "accesspilot-v1.3-final-acceptance-review-pack-2026-08-21.md"
+)
+CLAUDE_FINAL_REVIEW = ROOT / (
+    "docs/reviews/"
+    "accesspilot-v1.3-final-acceptance-claude-opus-review-2026-08-21.md"
+)
+DEEPSEEK_FINAL_REVIEW = ROOT / (
+    "docs/reviews/"
+    "accesspilot-v1.3-final-acceptance-deepseek-review-2026-08-21.md"
+)
+FINAL_REVIEW_DECISIONS = ROOT / (
+    "docs/reviews/"
+    "accesspilot-v1.3-final-acceptance-decisions-2026-08-21.md"
+)
+FINAL_ACCEPTANCE = ROOT / (
+    "docs/evidence/accesspilot-v1.3-final-acceptance-2026-08-21.md"
+)
+FINAL_ACCEPTANCE_ARTIFACTS = (
+    FINAL_REVIEW_PACK,
+    CLAUDE_FINAL_REVIEW,
+    DEEPSEEK_FINAL_REVIEW,
+    FINAL_REVIEW_DECISIONS,
+    FINAL_ACCEPTANCE,
+)
 T42_TEXT_ARTIFACTS = (
     CLAIM_LEDGER,
     PRODUCT_MANIFEST,
     INTERVIEW_PACK,
     VERIFIER,
+    *FINAL_ACCEPTANCE_ARTIFACTS,
 )
 
 REQUIRED_CLAIMS = {
@@ -45,6 +72,14 @@ T42_ALLOWED_CHANGES = {
     "docs/evidence/accesspilot-v1.3-claim-ledger.md",
     "docs/evidence/accesspilot-v1.3-product-manifest.md",
     "docs/evidence/accesspilot-v1.3-interview-evidence-pack.md",
+}
+FINAL_ACCEPTANCE_ALLOWED_CHANGES = {
+    "README.md",
+    "docs/reviews/accesspilot-v1.3-final-acceptance-review-pack-2026-08-21.md",
+    "docs/reviews/accesspilot-v1.3-final-acceptance-claude-opus-review-2026-08-21.md",
+    "docs/reviews/accesspilot-v1.3-final-acceptance-deepseek-review-2026-08-21.md",
+    "docs/reviews/accesspilot-v1.3-final-acceptance-decisions-2026-08-21.md",
+    "docs/evidence/accesspilot-v1.3-final-acceptance-2026-08-21.md",
 }
 
 METRIC_SOURCE_TOKENS = {
@@ -167,7 +202,11 @@ def _verify_revision(errors: list[str]) -> None:
 
 def _verify_change_scope(errors: list[str]) -> None:
     changed = _changed_paths()
-    allowed = UPSTREAM_OWNED_CHANGES | T42_ALLOWED_CHANGES
+    allowed = (
+        UPSTREAM_OWNED_CHANGES
+        | T42_ALLOWED_CHANGES
+        | FINAL_ACCEPTANCE_ALLOWED_CHANGES
+    )
     unexpected = sorted(changed - allowed)
     if unexpected:
         errors.append(f"out-of-scope modified paths: {unexpected}")
@@ -461,6 +500,7 @@ def _verify_index(index: str, errors: list[str]) -> None:
         CLAIM_LEDGER.name,
         PRODUCT_MANIFEST.name,
         INTERVIEW_PACK.name,
+        *(path.name for path in FINAL_ACCEPTANCE_ARTIFACTS),
     ):
         if filename not in index:
             errors.append(f"docs/README.md does not index {filename}")
@@ -585,6 +625,9 @@ def main() -> int:
     manifest = _read(PRODUCT_MANIFEST, errors)
     interview_pack = _read(INTERVIEW_PACK, errors)
     index = _read(DOC_INDEX, errors)
+    final_artifact_text = {
+        path: _read(path, errors) for path in FINAL_ACCEPTANCE_ARTIFACTS
+    }
 
     if claim_ledger:
         _verify_claims(claim_ledger, errors)
@@ -603,6 +646,7 @@ def main() -> int:
         (PRODUCT_MANIFEST, manifest),
         (INTERVIEW_PACK, interview_pack),
         (DOC_INDEX, index),
+        *final_artifact_text.items(),
     ):
         if text:
             _verify_links(path, text, errors)
@@ -612,6 +656,7 @@ def main() -> int:
         INTERVIEW_PACK: interview_pack,
         VERIFIER: VERIFIER.read_text(encoding="utf-8"),
     }
+    loaded_t42_text.update(final_artifact_text)
     for path in T42_TEXT_ARTIFACTS:
         text = loaded_t42_text[path]
         if text:

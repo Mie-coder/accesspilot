@@ -6,8 +6,9 @@ AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent�
 
 - **稳定基线：MVP v1.0** — T01–T08 已完成本地实现和验收；没有推送、部署或接入真实企业系统。
 - **本地完成版本：v1.1** — T09–T17 已完成本地实现与验证；没有推送、合并、部署或接入真实企业系统。
-- **当前本地版本：v1.2 T18–T25 产品与面试证据产物已完成** — `product_verified=true`；`interview_ready=pending_user_verification`。API 425、Web 87、固定评测 101/101、四角色真实浏览器主链、三视口和攻击矩阵已通过。详见 [Product Manifest](docs/evidence/accesspilot-v1.2-product-manifest.md) 与 [Interview Evidence Pack](docs/evidence/accesspilot-v1.2-interview-evidence-pack.md)。只剩用户本人无稿讲解和两道迁移题门禁；未推送、合并或部署。
-- **当前能力：** 产品工作台只接受 `accesspilot_session → AuthSession → EmployeeRecord` 身份链；旧 Workspace/Demo 入口返回 404，旧 Workspace cookie 单独访问返回 401。登录页明确标注“作品集 Mock 登录，非真实身份认证”，不实现密码、注册、OIDC 或真实 SSO。业务写请求要求精确 Origin 与内存 CSRF，Session 刷新轮换 CSRF，退出只吊销 Session、不删除 Workspace。其余能力包括多意图路由、只读工具白名单、确定性权限名称解析、8 条基本政策主题问答、基于本轮证据的 `grounded`/`insufficient_evidence`/`retrieval_unavailable` 三态政策回答、自审批禁止规则，以及当前轮增量 SSE、事件回放、取消、断线重连和刷新恢复。产品工作台还提供类型化业务卡片：权限按 `eligible`、`owned`、`pending`、`expiring_soon`、`expired` 五态展示；权限名称解析按 `matched`、`ambiguous`、`no_match` 三态展示候选和重新校验结果；政策按三态展示证据、提示和下一步；申请页按事实展示草稿、提交、风险审查、两级审批、开通与恢复时间线，断线时在业务页面显示可恢复的重连状态。
+- **历史产品基线：v1.2 T18–T25** — 产品、四角色主链与证据包已完成；历史结果保留用于追溯，但不自动证明 v1.3。
+- **当前本地版本：v1.3 T26–T42 全部 Verified** — `product_verified=true`；`interview_ready=pending_user_verification`。固定产品 revision 上 API 868、Web 109 均零 skip，33 个语义场景连续两轮零差异，fresh product eval 101/101，真实 flow 2 浏览器主链、重启恢复和完整 Legacy 回滚均通过；Claude Opus 5 与 DeepSeek 最终评审 P0/P1 均为 0。详见 [v1.3 Product Manifest](docs/evidence/accesspilot-v1.3-product-manifest.md) 与 [整体最终验收](docs/evidence/accesspilot-v1.3-final-acceptance-2026-08-21.md)。当前仅有本地提交，未推送、合并或部署。
+- **当前能力：** JSON 与 SSE 入口按 Workspace sticky flow 进入同一 Legacy 或生产 `CompiledStateGraph`；flow 2 使用 official PostgreSQL checkpointer、持久 interrupt/resume、lease/fence、精确 accepted head 和崩溃接管，并保留 flow 1 一键回滚。产品工作台只接受 `accesspilot_session → AuthSession → EmployeeRecord` 身份链；登录页明确标注“作品集 Mock 登录，非真实身份认证”。其余能力包括确定性安全路由、只读工具白名单、权限名称解析、pgvector grounded RAG、自审批禁止规则、当前轮增量 SSE、事件回放、断线恢复，以及不展示思维链的最近三轮只读 Agent 轨迹。正式 Case、Decision Packet、两级审批和幂等 IAM/Grant 始终由 PostgreSQL 领域状态机负责，模型不是授权源。
 - **后续演进：** provider token 延迟、政策召回率和生产 SLA 尚未测量；它们不属于本地 deterministic_offline 单样本结论。
 
 ## 项目目标
@@ -15,7 +16,7 @@ AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent�
 - 多轮对话补全结构化申请草稿；
 - 使用 Structured Output 和 Tool Calling；
 - 通过状态机管理确认、审批、开通和错误恢复；
-- 使用主 Agent 与只读风险审查 Agent 协作；
+- 使用确定性领域状态机约束只读风险审查，模型不负责审批或授权；
 - 使用 RAG 检索政策条款并返回稳定的政策编号；
 - 区分“审批通过”和“权限已经开通”；
 - 记录审计事件，并通过幂等键安全重试。
@@ -49,6 +50,9 @@ AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent�
 - T23：权限管理员显式开通、服务端幂等键、unknown 原操作恢复、并发单 Grant 和申请人跨 Session 重读已完成；固定 T23-01 5/5。
 - T24：四角色闭环、攻击矩阵、SSE Session 失效和产品验收已完成；固定评测累计 101/101，`product_verified=true`。
 - T25：三份 ADR、Demo 主线、Claim Ledger、迁移题与 DeepSeek 最终交叉评审产物已完成；`interview_ready` 仍待用户本人验证。
+- T26–T40：完成 LangGraph 1.2 兼容性验证、类型化生产图、official PostgresSaver、申请收集与 pgvector RAG、interrupt/resume、lease/fence/故障恢复、真实轨迹，以及 JSON/SSE sticky 双入口和 Legacy 回滚。
+- T41：同一产品 revision 完成全量 release gate、两轮 parity、真实三视口四角色主链、API 重启恢复和 disposable PostgreSQL 回滚；`product_verified=true`。
+- T42：六条 Claim、Product Manifest、限制披露、Agent Loop 讲解图与 Demo 索引完成；正式简历未修改，`interview_ready=pending_user_verification`。
 
 登录页的四个账号只能证明会话隔离与 ACL 边界，不是真实 SSO 或生产级认证；访问者仍可选择任一虚构账号。真实系统仍必须由可信登录态确定操作者身份。
 
@@ -161,6 +165,8 @@ pnpm --filter @accesspilot/web exec vite --host 127.0.0.1 --port 5173
 
 ## 固定评测与统一检查
 
+v1.3 的发布门禁使用 `./scripts/verify-t41.sh`：固定 T41 revision 实测 API 868/Web 109 零 skip、33 个语义场景连续两轮零差异、fresh product eval 15/15 scenarios 与 101/101 cases、rollback 9/9。对应来源见 [`docs/evidence/accesspilot-v1.3-t41-acceptance-2026-08-20.md`](docs/evidence/accesspilot-v1.3-t41-acceptance-2026-08-20.md)；下列 T08–T19 数字是历史分母，不能与 v1.3 混用。
+
 T08 历史清单在 `c683d84` 有 12 条；在 T19 阶段，`eval01/05/06` 明确延期到 T20/T22（完整四角色黄金路径由 T24 恢复），旧 Workspace 隔离 `eval11` 已由 T19 的 AuthSession 隔离证据取代。当前 runner 只将其余 8 条 compatible 案例作为通过证据，不收集延期/取代项，也不以 skip 计入结果。`eval07/08` 使用预置 approved Case 与确定性 Sequenced/Counting IAM，继续真实验证 timeout→recover 和单次幂等开通，不用 404/409 替代旧语义。
 
 v1.1 T17 历史记录为 30/30 @ `c683d84`。当前 T19 compatible/new registry 排除已被 T19 产品边界取代的 `T17-01` 和 `T17-09`，唯一计数为 active T17 24 + T18 11 + T19 23 = 58；这不是同分母历史对比：
@@ -207,17 +213,22 @@ docker compose ps
 - 旧 Workspace cookie 不参与鉴权；Session、调用配额和数据隔离面向单机演示，不等于生产级多租户、防滥用或限流体系。
 - 离线提取、向量和风险审查是透明的确定性回退，不等同于 DeepSeek/百炼真实效果。
 - `/health` 只表示进程存活，`/ready` 才检查数据库；两者都不会调用外部模型或 IAM。
-- 当前前端主包约 524 KB，T17 正式构建报告 561.02 KB chunk warning（P2）；不影响本地功能，但不应视为最终性能优化结果。
+- v1.3 正式构建保留约 588.78 kB 单 chunk warning（P3）；不影响本地功能，但不应视为最终性能优化结果。
 - T17 尚未测量 provider token latency、policy recall@k 或 production SLA；本地 deterministic_offline 单样本不能外推这些生产指标。
 - 当前未配置备份、集中日志、监控告警、任务队列、高可用或线上部署。
 - P2 延期边界：legacy JSON 路径以及 `set_actor`/`reset`/`exit_demo`/submit 等旧控制面仍是整行读写，极端并发下可能有最后写入者覆盖；SSE 当前轮锁已覆盖主路径。
 - P2 延期边界：当前确定性适配器的流内容与规范化 `assistant_message` 一致；未来接入真实 Answer Provider 时仍需明确 canonical message 定义。
 - P2 UX 限制：没有活动 Cursor 的数字澄清文案暂固定引用 `111`，不影响零副作用语义，但尚未做通用化文案。
+- v1.3 P2：reduced-motion 下轨迹折叠箭头仍有 150 ms 过渡；后台 cleanup task 异常观察性仍可增强。两项均不影响已验证的键盘、唯一终态、lease/head 或断线闭合合同。
+- v1.3 运行观察：strict serializer allowlist 在依赖或状态类型变化时需要维护；活跃 SSE 下本地首次 SIGINT 可能等待。正式托管前仍需补充优雅停机与集中观察方案。
 
 ## 架构文档
 
 - [AccessPilot v1.1 产品功能书（历史基线）](docs/product/accesspilot-product-function-book-v1.1.md)
 - [AccessPilot v1.2 精简产品说明书（T18–T20 已完成）](docs/product/accesspilot-product-function-book-v1.2.md)
+- [AccessPilot v1.3 Canonical Spec（T26–T42 已完成）](docs/specs/accesspilot-langgraph-agent-loop-v1.3.md)
+- [AccessPilot v1.3 Product Manifest](docs/evidence/accesspilot-v1.3-product-manifest.md)
+- [AccessPilot v1.3 整体最终验收](docs/evidence/accesspilot-v1.3-final-acceptance-2026-08-21.md)
 - [访问申请与权限开通流程](docs/architecture/access-flow.md)
 - [数据库 ER 图](docs/architecture/data-model-er.md)
 - [项目实现计划](docs/plans/accesspilot-mvp.md)

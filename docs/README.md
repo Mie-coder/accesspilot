@@ -11,9 +11,9 @@
 - `learning/`：课程、复盘、学习记录和教学资源。
 - `superpowers/`：早期教学阶段形成的历史实施计划，保留用于追溯，不作为当前产品入口。
 
-根目录 `README.md` 同时记录 v1.1 历史基线和当前本地完成的 v1.2 T18–T25；Mock 边界、未测指标和个人掌握度不得误写成已验证能力。
+根目录 `README.md` 同时记录 v1.1/v1.2 历史基线和当前本地完成的 v1.3 T26–T42；Mock 边界、未测指标和个人掌握度不得误写成已验证能力。
 
-## AccessPilot v1.2 当前入口与进度
+## AccessPilot v1.2 历史入口
 
 - 产品定义：`product/accesspilot-product-function-book-v1.2.md`
 - Canonical Spec：`specs/accesspilot-productized-agent-v1.2.md`
@@ -24,7 +24,7 @@
 - Claim Ledger：`evidence/accesspilot-v1.2-claim-ledger.md`
 - 最终 DeepSeek 评审：`reviews/accesspilot-v1.2-final-acceptance-deepseek-review-2026-08-12.md`
 
-T18–T25 产品与证据产物已完成，`product_verified=true`；`interview_ready=pending_user_verification`。当前仅有本地提交，不推送、合并或部署；真实能力以根目录 `README.md`、对应测试和 evidence 为准。
+T18–T25 的历史产品与证据产物已完成，`product_verified=true`；`interview_ready=pending_user_verification`。该历史交付仅有本地提交，没有推送、合并或部署；当前真实能力以根目录 `README.md`、对应测试和 v1.3 evidence 为准。
 
 ## AccessPilot v1.3 证据入口
 
@@ -36,4 +36,10 @@ T18–T25 产品与证据产物已完成，`product_verified=true`；`interview_
 - [面试候选表述、Agent Loop 讲解图与 Demo 索引](evidence/accesspilot-v1.3-interview-evidence-pack.md)
 - [T42 定向文档审计](../scripts/verify-t42-evidence.py)
 
-v1.3 的 T26–T42 已全部 `Verified`，T41 设置 `product_verified=true`；T42 独立验收修复轮 P0/P1/P2=0/0/0。`interview_ready=pending_user_verification`；候选表述不是正式简历变更，也不代表用户本人已完成无稿复现。
+- [最终验收交叉评审包](reviews/accesspilot-v1.3-final-acceptance-review-pack-2026-08-21.md)
+- [Claude Opus 5 最终评审](reviews/accesspilot-v1.3-final-acceptance-claude-opus-review-2026-08-21.md)
+- [DeepSeek 最终评审](reviews/accesspilot-v1.3-final-acceptance-deepseek-review-2026-08-21.md)
+- [最终交叉评审决策](reviews/accesspilot-v1.3-final-acceptance-decisions-2026-08-21.md)
+- [整体最终验收](evidence/accesspilot-v1.3-final-acceptance-2026-08-21.md)
+
+v1.3 的 T26–T42 已全部 `Verified`，T41 设置 `product_verified=true`；T42 独立验收修复轮 P0/P1/P2=0/0/0。Claude Opus 5 与 DeepSeek 最终评审 P0/P1 均为 0，结论为“可交给用户决定是否发布”。`interview_ready=pending_user_verification`；候选表述不是正式简历变更，也不代表用户本人已完成无稿复现。

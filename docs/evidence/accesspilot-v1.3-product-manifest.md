@@ -4,6 +4,8 @@
 **产品证据 revision：** `9e757fd433f10fbff22fba9654c54cc3b4e9bec2`
 **产品状态：** `product_verified=true`
 **面试状态：** `interview_ready=pending_user_verification`
+
+**整体最终验收：** [Claude Opus 5 / DeepSeek 双评审与主控裁决](accesspilot-v1.3-final-acceptance-2026-08-21.md) P0/P1=0/0；结论为“可交给用户决定是否发布”
 **唯一当前指标源：** [T41 验收证据包](accesspilot-v1.3-t41-acceptance-2026-08-20.md)
 
 本 Manifest 只转录 T41 在同一新 revision 上的实测结果，不从 v1.2 拷贝门禁数字，也不用 Spec 目标值代替实测。T41 浏览器主证使用的 `apps/ + scripts/` 内容身份为 `ffcdb3151df94fe4795b989a23f798e150869060c1073548d602f46b011c9e8a`；该内容与 T41 本地提交中的产品/门禁内容一致。
