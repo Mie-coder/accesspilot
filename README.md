@@ -1,237 +1,131 @@
 # AccessPilot
 
-AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent。它演示员工如何通过多轮对话提交权限申请，并经过风险审查、人工审批和实际权限开通。
+**用自然语言发起权限申请，让审批、开通与每一步依据都可追溯。**
 
-## 当前版本与进度
+[项目介绍](#1-项目介绍) · [系统架构](#2-系统架构) · [项目截图](#3-项目截图) · [解决的问题](#4-解决的问题)
 
-- **稳定基线：MVP v1.0** — T01–T08 已完成本地实现和验收；没有推送、部署或接入真实企业系统。
-- **本地完成版本：v1.1** — T09–T17 已完成本地实现与验证；没有推送、合并、部署或接入真实企业系统。
-- **历史产品基线：v1.2 T18–T25** — 产品、四角色主链与证据包已完成；历史结果保留用于追溯，但不自动证明 v1.3。
-- **v1.3 已验收基线：T26–T42 全部 Verified** — `product_verified=true`；`interview_ready=pending_user_verification`。固定产品 revision 上 API 868、Web 109 均零 skip，33 个语义场景连续两轮零差异，fresh product eval 101/101，真实 flow 2 浏览器主链、重启恢复和完整 Legacy 回滚均通过；Claude Opus 5 与 DeepSeek 最终评审 P0/P1 均为 0。详见 [v1.3 Product Manifest](docs/evidence/accesspilot-v1.3-product-manifest.md) 与 [整体最终验收](docs/evidence/accesspilot-v1.3-final-acceptance-2026-08-21.md)。这些数字对应上述固定 revision，不自动覆盖后续修改。
-- **v1.3 对话与权限体验补充（2026-09-08）** — 包含上下文语义理解、简短理由续答、调用轨迹、决策材料和权限状态展示；本轮范围、实际验收及保留限制见 [补充交付记录](docs/evidence/accesspilot-v1.3-experience-release-2026-09-08.md)。
-- **当前能力：** JSON 与 SSE 入口按 Workspace sticky flow 进入同一 Legacy 或生产 `CompiledStateGraph`；flow 2 使用 official PostgreSQL checkpointer、持久 interrupt/resume、lease/fence、精确 accepted head 和崩溃接管，并保留 flow 1 一键回滚。产品工作台只接受 `accesspilot_session → AuthSession → EmployeeRecord` 身份链；登录页明确标注“作品集 Mock 登录，非真实身份认证”。其余能力包括确定性安全路由、只读工具白名单、权限名称解析、pgvector grounded RAG、自审批禁止规则、当前轮增量 SSE、事件回放、断线恢复，以及不展示思维链的最近三轮只读 Agent 轨迹。正式 Case、Decision Packet、两级审批和幂等 IAM/Grant 始终由 PostgreSQL 领域状态机负责，模型不是授权源。
-- **后续演进：** provider token 延迟、政策召回率和生产 SLA 尚未测量；它们不属于本地 deterministic_offline 单样本结论。
+## 1. 项目介绍
 
-## 项目目标
+AccessPilot 是一个企业权限申请场景的 AI Agent 全栈演示项目。员工可以先问“我能申请什么权限”，再通过对话补充权限、使用期限和业务理由。系统将需求整理为结构化申请，生成审批材料，交给对应负责人审批，最后由权限管理员执行开通。
 
-- 多轮对话补全结构化申请草稿；
-- 使用 Structured Output 和 Tool Calling；
-- 通过状态机管理确认、审批、开通和错误恢复；
-- 使用确定性领域状态机约束只读风险审查，模型不负责审批或授权；
-- 使用 RAG 检索政策条款并返回稳定的政策编号；
-- 区分“审批通过”和“权限已经开通”；
-- 记录审计事件，并通过幂等键安全重试。
+项目覆盖申请人、直属经理、数据负责人、权限管理员四种角色，演示一份申请从提出到授权落地的完整过程。
 
-所有员工、系统、权限、审批和政策内容都是原创虚构数据，与任何真实企业内部数据无关。
+> 当前产品版本为 v1.3。所有员工、系统、权限与政策均为虚构数据；登录使用 Mock Login，权限开通连接模拟 IAM，未接入真实企业系统。
 
-## 当前进度
+### 主要功能
 
-- T01：DeepSeek 严格结构化提取、确认提交守卫、正式申请与审计事务已完成；
-- T02：百炼/离线 512 维向量、pgvector Top 4 和只读风险审查已完成；
-- T03：直属经理到数据所有者的串行审批、越权/乱序/重复守卫与审计已完成；
-- T04：幂等 IAM 开通、失败重试、超时未知查询恢复和唯一授权已完成；
-- T05：安全事件白名单、SSE `Last-Event-ID` 回放、对话入口和 Workspace 模型配额已完成；
-- T06：assistant-ui `LocalRuntime + ChatModelAdapter`、申请草稿卡、明确确认、正式提交与刷新恢复已完成；
-- T07：按当前演示身份过滤的审批收件箱、政策/审批/开通/审计详情、故障恢复与只读回放已完成；
-- T08：12 条固定评测、容器化配置和本地最终验收已完成。
-- T09：Workspace 后端演示身份、身份迁移、刷新恢复和申请/审批越权守卫已完成；
-- T10：按后端身份查询可自助申请权限与当前有效 `AccessGrant` 已完成；
-- T11：7 类意图路由、只读工具执行器、咨询/草稿隔离、基础敏感信息拒绝与脱敏已完成。
-- T12：历史产品身份与 Demo 控制面分层、Workspace/Cookie 隔离、预算边界和三档视口验收已完成；T19 已关闭旧 Demo 控制台和匿名入口；
-- T13：自然语言权限名称经当前身份目录确定性解析，歧义与未知权限 fail-closed，业务字段变化使确认失效，已完成并本地验证；
-- T14：当前轮增量 SSE、Workspace 回放后长连接、稳定游标与关联 ID、取消/唯一终态、刷新恢复和 Nginx 禁缓冲已完成并本地验证；
-- T15：政策问答与提示词攻击防护、8 条基本政策主题、三态证据回答、自审批规则（`POL-006`）和复合攻击安全回归已完成并本地验证；模型输出、草稿、事件和错误正文均通过敏感信息边界检查。
-- T16：权限、政策与申请状态业务卡片已完成；权限五态、名称解析三态、政策证据三态、申请生命周期时间线、加载/空/错误/安全拒绝和断线重连状态均已接入产品导航并本地验证。
-- T17：v1.1 历史基线在 `c683d84` 冻结为 10 个场景、30/30；后端全量 339 passed（1 warning）、前端 14 files/48 passed、Ruff、MyPy（41 sources）、Alembic（无漂移/head 0006）、TypeScript app+node、ESLint 和正式构建均通过。脱敏单样本观测来自本机 direct-ASGI `deterministic_offline`：首事件 7.666417 ms、首个非空 `message.delta` 35.480167 ms、完成 39.017833 ms、计费模型调用 1 次；Workspace 重连回放 2 条、重复 0 条；复合攻击 4/4 阻断。上述延迟不是 provider token、p50/p95 或生产 SLA，不代表真实模型质量。
-- T18：ConversationCursor、纯数字 `111` 期限上下文、失效/消费与 draft revision/CAS 已完成并独立验收；固定 T18 评测 11/11。
-- T19：四账号 Mock Login、AuthSession/Principal、Origin/CSRF、Cookie、身份注入、旧入口关闭、Cursor session 绑定和 0008 迁移已完成；固定 T19-01 23/23；独立 verifier 结论 PASS（P0=0、P1=0）。
-- T20：共享正式 Case、requester/approver/admin 资源级 SQL ACL、跨 Session 重读与私有 Workspace 边界已完成；固定 T20-01 14/14；独立 verifier PASS（P0=0、P1=0）。
-- T21：唯一冻结 Decision Packet、四类来源、受限脱敏 DeepSeek、诚实 unavailable、并发唯一和审批 Packet 前置已完成；固定 T21-01 16/16；独立 verifier PASS（P0=0、P1=0）。
-- T22：独立 Session 的经理→数据负责人串行审批、期望步骤、角色/ID 双重守卫、并发与 IDOR 失败闭合已完成；固定 T22-01 5/5；独立 verifier PASS（P0=0、P1=0）。
-- T23：权限管理员显式开通、服务端幂等键、unknown 原操作恢复、并发单 Grant 和申请人跨 Session 重读已完成；固定 T23-01 5/5。
-- T24：四角色闭环、攻击矩阵、SSE Session 失效和产品验收已完成；固定评测累计 101/101，`product_verified=true`。
-- T25：三份 ADR、Demo 主线、Claim Ledger、迁移题与 DeepSeek 最终交叉评审产物已完成；`interview_ready` 仍待用户本人验证。
-- T26–T40：完成 LangGraph 1.2 兼容性验证、类型化生产图、official PostgresSaver、申请收集与 pgvector RAG、interrupt/resume、lease/fence/故障恢复、真实轨迹，以及 JSON/SSE sticky 双入口和 Legacy 回滚。
-- T41：同一产品 revision 完成全量 release gate、两轮 parity、真实三视口四角色主链、API 重启恢复和 disposable PostgreSQL 回滚；`product_verified=true`。
-- T42：六条 Claim、Product Manifest、限制披露、Agent Loop 讲解图与 Demo 索引完成；正式简历未修改，`interview_ready=pending_user_verification`。
+| 功能 | 可以做什么 |
+| --- | --- |
+| 对话式权限申请 | 结合当前可申请目录与会话上下文理解口语，逐项追问权限、期限和理由；支持修改草稿与明确确认。 |
+| 权限目录与状态 | 查询可申请权限，查看已有授权及有效期；将“已拥有”与“即将过期”分别提示。 |
+| 政策检索与问答 | 使用 RAG 检索政策，返回可追溯的条款编号，并区分有依据、证据不足和服务不可用。 |
+| 冻结审批材料 | 汇总已验证事实、申请人陈述、政策依据和 AI 建议；保存申请时的材料，便于事后回查。 |
+| 人工审批 | 按目录规则走经理审批或经理→数据负责人双审批，校验角色、审批顺序并禁止自审批。 |
+| 权限开通与恢复 | 审批完成后由管理员显式开通；通过幂等键、失败重试和未知结果查询避免重复授权。 |
+| 申请历史与审计 | 分别展示申请、审批和开通状态，查看责任人、时间线及授权记录。 |
+| Agent 运行轨迹 | 查看每轮处理结果、模型调用尝试、后端工具执行和历史事件；支持 SSE 推送与断线回放。 |
 
-登录页的四个账号只能证明会话隔离与 ACL 边界，不是真实 SSO 或生产级认证；访问者仍可选择任一虚构账号。真实系统仍必须由可信登录态确定操作者身份。
+一条典型业务流程：
 
-## 目录结构
+**提出需求 → 补全草稿 → 明确确认并提交 → 冻结审批材料 → 人工审批 → 管理员开通 → 查看授权。**
 
-```text
-apps/api/                    FastAPI 后端、数据库迁移与 pytest 测试
-apps/web/                    React + Vite 前端与组件测试
-docs/                        产品规格、Tickets、架构、ADR 与学习资料
-deploy/                      Nginx 等部署配置
-scripts/                     启动、评测与本地验收脚本
-compose.yaml                 前后端、PostgreSQL 的容器编排
-pyproject.toml               Python 依赖与质量工具配置
-package.json                 前端 Workspace 的统一命令入口
-CONTEXT.md                   项目业务术语表
-```
+AI 负责理解输入和提供建议。身份、申请资格、审批路线及授权结果由后端业务规则决定。
 
-这是前后端分离的 Monorepo：React 和 FastAPI 分别位于 `apps/web` 与 `apps/api`，通过 HTTP API/SSE 通信，只是共享同一个 Git 仓库、文档和交付配置。详细职责见 [`apps/README.md`](apps/README.md) 与 [`docs/README.md`](docs/README.md)。教学记录集中在 [`docs/learning`](docs/learning/README.md)，不参与应用运行。
+### 技术栈
 
-本地开发还会生成 `.venv/`、`node_modules/`、`postgres-data/`、测试缓存和浏览器测试缓存。这些目录已被 Git 忽略，只是依赖或本地运行数据，不属于产品源码，也不应合并进 `apps/`。
+| 层次 | 技术 | 主要用途 |
+| --- | --- | --- |
+| 前端 | React 19、TypeScript、Vite、assistant-ui | 对话界面、草稿卡片、审批工作台与运行轨迹 |
+| API 与领域逻辑 | Python、FastAPI、Pydantic、SQLAlchemy | 接口校验、业务状态转换、事务和资源访问控制 |
+| Agent 编排 | LangGraph、PostgresSaver | 图执行、持久化检查点、中断确认与恢复 |
+| 模型与检索 | DeepSeek、百炼 Embedding、pgvector | 意图理解、字段提取、只读建议及政策向量检索 |
+| 数据与通信 | PostgreSQL、HTTP JSON、SSE | 业务事实持久化、增量响应与事件回放 |
+| 工程与验证 | Alembic、pytest、Vitest、Testing Library、Ruff、MyPy、ESLint | 数据库迁移、行为测试、类型和静态检查 |
+| 本地运行 | Docker Compose、Nginx、pnpm | 服务编排、前端构建与反向代理 |
 
-## 本地开发
+无模型密钥时可使用确定性离线适配器演练流程；口语语义理解与真实模型效果需要配置相应提供方。模型密钥仅在后端使用。
 
-需要 Python 3.11+、Node.js 22+、pnpm 11，以及启用了 pgvector 的 PostgreSQL。先创建只保存在本机的配置：
+## 2. 系统架构
+
+复用项目已有的 **Archify 系统架构图**，重点展示 LangGraph 执行路径、业务服务和持久化状态之间的分工。
+
+![AccessPilot 系统架构：React、FastAPI、LangGraph、业务服务、PostgreSQL 与模拟 IAM](docs/images/readme/architecture.png)
+
+- **交互层：** React 通过 JSON API 和 SSE 访问 FastAPI，展示对话、业务卡片与安全事件。
+- **编排层：** 按 Workspace 绑定的执行版本进入 LangGraph 或保留的 Legacy 路径；规则先处理明确输入，模型辅助理解不确定的表达。
+- **业务层：** 后端校验申请资格与确认状态，保存正式申请和审批材料，执行人工审批及幂等开通。
+- **存储层：** PostgreSQL 业务表保存申请、审批与授权事实；PostgresSaver 保存图执行位置和恢复状态。检查点本身不具有授权效力。
+
+正式审批和开通经受控业务 API 执行。模型与只读工具无法直接批准申请或创建授权。
+
+进一步阅读：[业务流程](docs/architecture/access-flow.md) · [数据模型](docs/architecture/data-model-er.md) · [v1.3 编排规格](docs/specs/accesspilot-langgraph-agent-loop-v1.3.md)
+
+## 3. 项目截图
+
+以下截图于 **2026-09-08** 从本地运行的应用重新截取，展示现有虚构演示数据，未使用设计稿或组件测试页面替代。
+
+### 权限助手
+
+左侧以对话收集需求，右侧同步展示申请草稿和最近活动；补全字段后仍需用户明确确认。
+
+![权限助手：对话入口、申请草稿与最近活动](docs/images/readme/workbench.png)
+
+### 我的权限
+
+集中展示可申请和已拥有的权限、使用期限与到期提醒。
+
+![我的权限：可申请、已拥有及即将过期状态](docs/images/readme/access.png)
+
+### 政策中心
+
+浏览政策主题和条款编号，作为查询申请资格、审批要求与期限规则的入口。
+
+![政策中心：八类虚构权限政策及问题查询入口](docs/images/readme/policies.png)
+
+### 我的申请
+
+申请逐行排列，审批与开通状态独立展示。选择一条申请，可以继续查看授权记录、冻结材料和生命周期。
+
+![我的申请：申请列表、审批结果与已开通授权](docs/images/readme/requests.png)
+
+## 4. 解决的问题
+
+| 场景中的问题 | 项目的处理方式 |
+| --- | --- |
+| 员工不知道权限编号，也不清楚需要补什么信息 | 从可申请目录出发，结合上下文理解需求，并用多轮追问收集结构化字段。存在歧义时继续澄清。 |
+| 查询政策和正式申请混在一起，容易误触发操作 | 区分咨询、查询和申请意图；正式提交受字段校验与明确确认约束。 |
+| 审批人要在聊天记录、政策和申请信息之间反复查找 | 将申请事实、条款、理由和 AI 建议整理为冻结材料，并标明来源与适用范围。 |
+| 模型可能误解需求或给出不可靠建议 | 候选权限必须经过后端目录校验；AI 建议与业务事实分开，审批路线和授权不由模型决定。 |
+| “审批通过”容易被误认为“权限已经可用” | 分开保存审批与开通状态，以实际授权记录及有效期判断是否已开通。 |
+| 网络超时、重复点击或进程中断可能导致状态不清或重复执行 | 使用事务、幂等键、执行租约与检查点恢复；开通结果未知时查询原操作。 |
+| 用户难以知道 Agent 做了什么、调用了几次模型 | 展示持久化的安全执行事件、调用尝试和工具结果，同时保留业务审计记录。 |
+
+这些能力在虚构业务环境中实现和验证，尚无真实企业上线后的效率、成本或 SLA 数据。当前未实现真实 SSO、真实 IAM 接入和权限到期自动回收；政策中描述的回收要求不代表该能力已落地。
+
+<details>
+<summary>本地运行与更多文档</summary>
+
+需要 Python 3.11+、Node.js 22+、pnpm 11 和 Docker Compose。先复制配置文件，并填写本地 PostgreSQL 连接信息；如需真实语义理解，再配置模型密钥。
 
 ```bash
 cp .env.example .env
-```
-
-`.env` 已被 Git 忽略。没有配置 DeepSeek/百炼 Key 时，后端会明确使用确定性离线适配器；它适合本地流程和测试，但不代表真实模型质量。
-
-```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
-
-alembic upgrade head
-python -m accesspilot.bootstrap
-uvicorn accesspilot.main:app --host 127.0.0.1 --port 8000
-```
-
-`accesspilot.bootstrap` 会幂等写入全部虚构目录，并用当前配置的百炼适配器或离线适配器重建政策向量。另开终端运行检查：
-
-```bash
-source .venv/bin/activate
-
-pytest apps/api/tests -v
-ruff check apps/api/src apps/api/tests
-mypy apps/api/src
-alembic check
-```
-
-集成测试需要本地 PostgreSQL/pgvector；DeepSeek 与百炼测试默认使用假客户端或确定性离线适配器，不消耗真实额度。真实密钥只能放在本地 `.env`，不得提交到 Git：
-
-```dotenv
-DEEPSEEK_API_KEY=你的本地密钥
-DASHSCOPE_API_KEY=你的本地密钥
-```
-
-需要手动验证真实适配器时运行：
-
-```bash
-python -m accesspilot.smoke dashscope-embedding
-python -m accesspilot.smoke deepseek-risk
-```
-
-Smoke 输出只包含安全业务结果或向量维度，不打印密钥和完整向量。
-
-前端使用 Node.js 20.19+ 与 pnpm：
-
-```bash
 pnpm install
-pnpm --filter @accesspilot/web test
-pnpm --filter @accesspilot/web lint
-pnpm --filter @accesspilot/web build
-pnpm --filter @accesspilot/web exec vite --host 127.0.0.1 --port 5173
-```
 
-开发服务器会把 `/api` 和 `/health` 代理到 `http://127.0.0.1:8000`。浏览器使用 HttpOnly `accesspilot_session` cookie，CSRF 明文只保留在可读 cookie/内存中；开发 Origin 必须精确为 `http://127.0.0.1:5173`，不要混用 `localhost`。DeepSeek 与百炼密钥始终留在 FastAPI 的本地 `.env`。
-
-### 一键启动与重置模式
-
-正常启动并保留现有申请、审批等本地数据：
-
-```bash
-./scripts/start-local.sh
-```
-
-也可以显式写出 `start` 模式：
-
-```bash
+docker compose up -d db
+alembic upgrade head
 ./scripts/start-local.sh start
 ```
 
-需要清空所有本地业务数据后再启动时使用 `reset` 模式：
+默认工作台：`http://127.0.0.1:5173`；API 文档：`http://127.0.0.1:8000/docs`。开发时保持这一 Origin，不要与 `localhost` 混用。`.env` 不应提交到 Git。
 
-```bash
-./scripts/start-local.sh reset
-```
+- [应用目录说明](apps/README.md)
+- [文档索引](docs/README.md)
+- [v1.3 基线验收](docs/evidence/accesspilot-v1.3-final-acceptance-2026-08-21.md)
+- [对话与权限体验补充验收](docs/evidence/accesspilot-v1.3-experience-release-2026-09-08.md)
 
-`reset` 模式要求再次输入 `RESET` 才会永久删除 AccessPilot 专用 PostgreSQL 数据卷。申请、审批、授权、聊天、Workspace、Session 和审计记录会被清空；源码、`.env`、依赖和 Docker 镜像不受影响。`start` 与 `reset` 模式都会启动 PostgreSQL、执行 Alembic 迁移与幂等基础目录初始化，并启动 API 和前端。
+测试结果按对应记录中的代码版本与验证范围阅读。
 
-完整关闭前端、后端和 PostgreSQL，同时保留本地数据：
-
-```bash
-./scripts/start-local.sh stop
-```
-
-脚本完成后会输出前端工作台、后端 API、API 文档、健康检查地址和各自用途。启动完成后，在当前终端输入 `stop` 并回车，或按 `Control + C`，都会完整关闭前端、后端和 PostgreSQL，同时保留本地数据。外部 `stop` 模式仍可用于启动终端丢失等异常场景。
-
-## 固定评测与统一检查
-
-v1.3 的发布门禁使用 `./scripts/verify-t41.sh`：固定 T41 revision 实测 API 868/Web 109 零 skip、33 个语义场景连续两轮零差异、fresh product eval 15/15 scenarios 与 101/101 cases、rollback 9/9。对应来源见 [`docs/evidence/accesspilot-v1.3-t41-acceptance-2026-08-20.md`](docs/evidence/accesspilot-v1.3-t41-acceptance-2026-08-20.md)；下列 T08–T19 数字是历史分母，不能与 v1.3 混用。
-
-T08 历史清单在 `c683d84` 有 12 条；在 T19 阶段，`eval01/05/06` 明确延期到 T20/T22（完整四角色黄金路径由 T24 恢复），旧 Workspace 隔离 `eval11` 已由 T19 的 AuthSession 隔离证据取代。当前 runner 只将其余 8 条 compatible 案例作为通过证据，不收集延期/取代项，也不以 skip 计入结果。`eval07/08` 使用预置 approved Case 与确定性 Sequenced/Counting IAM，继续真实验证 timeout→recover 和单次幂等开通，不用 404/409 替代旧语义。
-
-v1.1 T17 历史记录为 30/30 @ `c683d84`。当前 T19 compatible/new registry 排除已被 T19 产品边界取代的 `T17-01` 和 `T17-09`，唯一计数为 active T17 24 + T18 11 + T19 23 = 58；这不是同分母历史对比：
-
-```bash
-./scripts/run-evals.sh
-./scripts/verify-local.sh
-```
-
-T17 的脱敏评测摘要保存在 [`docs/evidence/accesspilot-v1.1-evaluation-2026-08-11.json`](docs/evidence/accesspilot-v1.1-evaluation-2026-08-11.json)，作品集证据和限制见 [`docs/evidence/accesspilot-v1.1-portfolio-evidence.md`](docs/evidence/accesspilot-v1.1-portfolio-evidence.md)，最终验收见 [`docs/reviews/accesspilot-t17-final-acceptance-review-2026-08-11.md`](docs/reviews/accesspilot-t17-final-acceptance-review-2026-08-11.md)。JSON 的 `source.git_revision=a45b5f7` 是 T16 基线加 T17 工作树运行来源；评测运行时不能预先写入包含自身文档修改的未来提交哈希。
-
-统一脚本运行后端全量测试、Ruff、MyPy、Alembic 漂移检查、前端测试、ESLint、TypeScript/生产构建和固定评测。Docker 配置及 1440px/390px 真实浏览器检查仍需单独执行并保留证据。
-
-## 本地容器运行
-
-请先在 `.env` 中替换 `POSTGRES_PASSWORD`，并让 `ACCESSPILOT_COMPOSE_DATABASE_URL` 使用同一密码。若密码含 `@`、`:`、`/` 等 URL 保留字符，需要在连接串中做百分号编码；Compose 不会直接拼接原始密码。Docker Compose 会按顺序启动 pgvector、运行 Alembic、写入目录与政策向量、启动 API，再由非 root Nginx 提供前端和 SSE 反向代理：
-
-```bash
-docker compose config --quiet
-docker compose build
-docker compose up -d
-
-curl --fail http://127.0.0.1:8080/health
-curl --fail http://127.0.0.1:8080/ready
-docker compose ps
-```
-
-浏览器访问 `http://127.0.0.1:8080`。普通停止使用 `docker compose down`，它会保留 PostgreSQL 具名卷；只有明确要删除全部本地 Demo 数据时才使用 `docker compose down -v`。
-
-当前仓库只提供可部署的本地 Compose 包，没有执行推送或部署。Compose 本地入口 Origin 是精确的 `http://127.0.0.1:8080`；真正放到公网前，必须在外层终止 TLS、设置 `ACCESSPILOT_AUTH_COOKIE_SECURE=true`、关闭数据库公开端口、使用密钥管理服务，并用真实可信登录态替换 Mock Login。
-
-### 腾讯云部署前说明（本轮未执行）
-
-- 服务器只开放必要的 SSH、80 和 443；Compose 中数据库端口继续绑定 `127.0.0.1`，不得加入公网安全组。
-- 通过服务器的密钥管理或受控文件传输写入 `.env`，不要把真实 Key、数据库密码或服务器地址提交到 Git。
-- 由宿主机 Nginx/Caddy 在 TLS 后代理到 `127.0.0.1:8080`，并保留本仓库针对 `/api/events` 的禁缓冲和长连接配置。
-- TLS 生效后设置 `ACCESSPILOT_AUTH_COOKIE_SECURE=true`，并将 Compose 的 `ACCESSPILOT_COMPOSE_WEB_ORIGIN` 配置为唯一 HTTPS Origin，再验证 `/health`、`/ready`、SSE 重连和完整黄金路径。Vite 本地开发仍使用 `ACCESSPILOT_WEB_ORIGIN=http://127.0.0.1:5173`。
-- 上线前补充 PostgreSQL 卷备份、日志采集、监控告警和回滚方案，并再次获得用户明确部署授权。
-
-## 已知限制
-
-- 全部人员、权限、政策和 IAM 都是原创虚构数据；IAM 是幂等模拟器，不连接真实企业系统。
-- Mock Login 账号选择和客户端展示的 `employee_id` 只用于作品集演示，不是 SSO、身份认证或生产授权边界。
-- 旧 Workspace cookie 不参与鉴权；Session、调用配额和数据隔离面向单机演示，不等于生产级多租户、防滥用或限流体系。
-- 离线提取、向量和风险审查是透明的确定性回退，不等同于 DeepSeek/百炼真实效果。
-- `/health` 只表示进程存活，`/ready` 才检查数据库；两者都不会调用外部模型或 IAM。
-- v1.3 正式构建保留约 588.78 kB 单 chunk warning（P3）；不影响本地功能，但不应视为最终性能优化结果。
-- T17 尚未测量 provider token latency、policy recall@k 或 production SLA；本地 deterministic_offline 单样本不能外推这些生产指标。
-- 当前未配置备份、集中日志、监控告警、任务队列、高可用或线上部署。
-- P2 延期边界：legacy JSON 路径以及 `set_actor`/`reset`/`exit_demo`/submit 等旧控制面仍是整行读写，极端并发下可能有最后写入者覆盖；SSE 当前轮锁已覆盖主路径。
-- P2 延期边界：当前确定性适配器的流内容与规范化 `assistant_message` 一致；未来接入真实 Answer Provider 时仍需明确 canonical message 定义。
-- P2 UX 限制：没有活动 Cursor 的数字澄清文案暂固定引用 `111`，不影响零副作用语义，但尚未做通用化文案。
-- v1.3 P2：reduced-motion 下轨迹折叠箭头仍有 150 ms 过渡；后台 cleanup task 异常观察性仍可增强。两项均不影响已验证的键盘、唯一终态、lease/head 或断线闭合合同。
-- v1.3 运行观察：strict serializer allowlist 在依赖或状态类型变化时需要维护；活跃 SSE 下本地首次 SIGINT 可能等待。正式托管前仍需补充优雅停机与集中观察方案。
-
-## 架构文档
-
-- [AccessPilot v1.1 产品功能书（历史基线）](docs/product/accesspilot-product-function-book-v1.1.md)
-- [AccessPilot v1.2 精简产品说明书（T18–T20 已完成）](docs/product/accesspilot-product-function-book-v1.2.md)
-- [AccessPilot v1.3 Canonical Spec（T26–T42 已完成）](docs/specs/accesspilot-langgraph-agent-loop-v1.3.md)
-- [AccessPilot v1.3 Product Manifest](docs/evidence/accesspilot-v1.3-product-manifest.md)
-- [AccessPilot v1.3 整体最终验收](docs/evidence/accesspilot-v1.3-final-acceptance-2026-08-21.md)
-- [访问申请与权限开通流程](docs/architecture/access-flow.md)
-- [数据库 ER 图](docs/architecture/data-model-er.md)
-- [项目实现计划](docs/plans/accesspilot-mvp.md)
-- [术语表](CONTEXT.md)
-- [架构决策记录](docs/adr/)
+</details>
