@@ -400,6 +400,18 @@ function buildEntries(detail: RequestDetail | null): TimelineEntry[] {
   })
 }
 
+function grantStatus(grant: { grant_id?: string | null; starts_at?: string | null; expires_at?: string | null }): string {
+  if (grant.grant_id === undefined) return '开通状态待核实'
+  if (grant.grant_id === null) return '尚未开通'
+  const start = Date.parse(grant.starts_at ?? '')
+  const end = Date.parse(grant.expires_at ?? '')
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return '授权记录待核实'
+  const now = Date.now()
+  if (start > now) return '授权待生效'
+  if (end <= now) return '授权已过期'
+  return '权限已开通'
+}
+
 export function RequestTimelineView({
   detail,
   loading,
@@ -423,26 +435,22 @@ export function RequestTimelineView({
       </div>
 
       <p className="timeline-note case-source-note">
-        正式共享 Case 来自 PostgreSQL，可跨登录 Session 重读；未提交草稿和聊天仍只属于创建它们的私有 Workspace。
+        审批通过不等于权限已开通。开通状态依据授权记录及有效期；选择一行的“查看详情”可查看完整过程。
       </p>
 
       {cases && cases.length > 0 ? (
-        <ul className="case-summary-list" aria-label="我的正式 Case">
-          {cases.map((item) => (
-            <li key={item.request_id}>
-              <button
-                type="button"
-                className={item.request_id === selectedRequestId ? 'is-selected' : ''}
-                aria-current={item.request_id === selectedRequestId ? 'true' : undefined}
-                onClick={() => onSelectRequest?.(item.request_id)}
-              >
-                <strong>{item.entitlement_name}</strong>
-                <span>{statusLabel(item.approval_status ?? item.request_status)}</span>
-                <small>{formatTime(item.created_at)}</small>
-              </button>
-            </li>
-          ))}
-        </ul>
+        <table className="request-list" aria-label="我的申请列表">
+          <thead><tr><th>申请权限</th><th>申请 / 审批状态</th><th>开通状态</th><th>申请时间</th><th>操作</th></tr></thead>
+          <tbody>{cases.map(item => <tr key={item.request_id} className={item.request_id === selectedRequestId ? 'is-selected' : ''}>
+            <td data-label="申请权限"><strong>{item.entitlement_name}</strong></td>
+            <td data-label="申请 / 审批状态">{item.approval_status === 'approved' ? '审批已通过' : statusLabel(item.approval_status ?? item.request_status)}</td>
+            <td data-label="开通状态">{grantStatus(item)}</td>
+            <td data-label="申请时间"><time>{formatTime(item.created_at)}</time></td>
+            <td><button type="button" aria-label={`查看${item.entitlement_name}详情`}
+              aria-current={item.request_id === selectedRequestId ? 'true' : undefined}
+              onClick={() => onSelectRequest?.(item.request_id)}>查看详情</button></td>
+          </tr>)}</tbody>
+        </table>
       ) : null}
 
       {detail ? (
@@ -456,9 +464,10 @@ export function RequestTimelineView({
         <section className="grant-fact" aria-labelledby="grant-fact-title">
           <div>
             <p className="eyebrow">PERSISTED GRANT</p>
-            <h3 id="grant-fact-title">Grant 授权事实</h3>
+            <h3 id="grant-fact-title">{grantStatus(detail.provisioning) === '权限已开通' ? '权限已开通' : '授权记录'}</h3>
           </div>
-          <strong>{detail.provisioning.grant_id}</strong>
+          <p>{grantStatus(detail.provisioning)} · 本地演示环境</p>
+          <details className="packet-technical"><summary>技术详情</summary><p>授权记录编号：{detail.provisioning.grant_id}</p></details>
           <p>
             生效 {formatTime(detail.provisioning.starts_at)}，到期 {formatTime(detail.provisioning.expires_at)}
           </p>
@@ -467,7 +476,7 @@ export function RequestTimelineView({
 
       {detail ? (
         <p className="timeline-note">
-          边界：v1.2 不包含到期回收或撤销；这里只读展示服务端持久化的 Grant 事实。
+          本地演示使用模拟权限系统，未接入真实企业资源。尚未实现到期回收或撤销；此处展示已持久化的授权记录与有效期。
         </p>
       ) : null}
 

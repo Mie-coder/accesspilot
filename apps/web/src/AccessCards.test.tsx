@@ -151,7 +151,7 @@ describe('AccessCardsView', () => {
     render(<AccessCardsView {...baseProps} />)
 
     for (const label of ['可申请', '已拥有', '审批中', '即将过期', '已过期']) {
-      expect(screen.getByText(label)).toBeInTheDocument()
+      expect(screen.getAllByText(label).length).toBeGreaterThan(0)
     }
     expect(screen.getAllByText('脱敏客户数据导出').length).toBeGreaterThan(0)
     expect(screen.getByText('等待直属经理审批')).toBeInTheDocument()
@@ -286,4 +286,15 @@ describe('AccessCardsView', () => {
     expect(cards[0]?.getAttribute('aria-labelledby')).not.toBe(cards[1]?.getAttribute('aria-labelledby'))
     expect(new Set([...document.querySelectorAll('h3')].map((heading) => heading.id)).size).toBe(2)
   })
+})
+
+it('keeps ownership alongside expiry reminder and distinguishes future grants', () => {
+  render(<AccessCardsView {...baseProps} overview={[overview[3]!, { ...overview[1]!, state: 'pending', next_step: '等待生效' }]} />)
+  const expiring = screen.getByRole('article', { name: '代码仓库维护' })
+  expect(within(expiring).getByText('已拥有')).toBeInTheDocument()
+  expect(within(expiring).getByText('即将过期')).toBeInTheDocument()
+  expect(within(expiring).getByText(/当前可使用/)).toBeInTheDocument()
+  const future = screen.getByRole('article', { name: 'InsightHub 仪表盘查看' })
+  expect(within(future).getByText('待生效')).toBeInTheDocument()
+  expect(within(future).queryByText('已拥有')).not.toBeInTheDocument()
 })

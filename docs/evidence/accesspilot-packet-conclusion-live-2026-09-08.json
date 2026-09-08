@@ -1,0 +1,21 @@
+{
+  "fixture": true,
+  "provider_calls": 1,
+  "model": "deepseek-v4-flash",
+  "generation_mode": "provider",
+  "advisory": {
+    "assessment": "clear",
+    "summary": "建议通过。本次申请字段完整，授权期限7天未超过180天上限，风险等级为low且适用manager审批，符合POL-001要求。",
+    "unknowns": [],
+    "recommendations": [
+      "人工核验业务理由中所述客户演示场景的真实性。",
+      "按manager审批流程执行，确保审批人与申请人不同。"
+    ],
+    "citations": [
+      "POL-001"
+    ]
+  },
+  "availability_message": null,
+  "persisted_packet": false,
+  "token_usage_measured": false
+}

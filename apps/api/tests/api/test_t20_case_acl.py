@@ -752,3 +752,33 @@ def test_acl_gets_and_refusals_never_call_models_or_iam_or_write_business_facts(
     assert risk_model.calls == 0
     assert iam.provision_calls == 0
     assert iam.query_calls == 0
+
+
+def test_case_summary_reports_grant_facts_without_inferring_from_approval(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    client = build_client(database_session_factory)
+    request_id, workspace_id = submit_case(client, database_session_factory)
+    with database_session_factory() as session:
+        case = session.scalar(select(ApprovalCaseRecord).where(
+            ApprovalCaseRecord.request_id == UUID(request_id)))
+        assert case is not None
+        case.approval_status = "approved"
+        session.commit()
+    item = client.get("/api/requests/mine").json()["items"][0]
+    assert item["approval_status"] == "approved"
+    assert item["grant_id"] is None and item["starts_at"] is None
+    start = datetime.now(UTC) + timedelta(days=1)
+    with database_session_factory() as session:
+        grant = AccessGrantRecord(workspace_id=workspace_id, request_id=UUID(request_id),
+                                  idempotency_key=str(uuid4()), starts_at=start,
+                                  expires_at=start + timedelta(days=7))
+        session.add(grant)
+        session.commit()
+        grant_id = str(grant.id)
+    items = [item for item in client.get("/api/requests/mine").json()["items"]
+             if item["request_id"] == request_id]
+    assert len(items) == 1
+    assert items[0]["grant_id"] == grant_id
+    assert datetime.fromisoformat(items[0]["starts_at"]) == start
+    assert datetime.fromisoformat(items[0]["expires_at"]) == start + timedelta(days=7)

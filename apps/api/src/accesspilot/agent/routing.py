@@ -239,7 +239,12 @@ def route_message(content: str) -> IntentRoute:
     elif security_probe and not _has_request_business_signal(normalized):
         intent = "security_probe"
     elif (
-        _contains_any(
+        (
+            "权限" in normalized
+            and _contains_any(normalized, ("我需要", "我想要", "帮我开", "给我开"))
+        )
+        or re.search(r"(?:就|选|要|还是|换成).*(?:这个|那个)|刚才那个", normalized) is not None
+        or _contains_any(
             normalized,
             (
                 "申请",

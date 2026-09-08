@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
 import { AgentTrajectory } from './AgentTrajectory'
@@ -273,4 +273,81 @@ describe('AgentTrajectory', () => {
     expect(screen.getByText('Read-only tool · list_policy_catalog')).toBeInTheDocument()
     expect(screen.getByText('Legacy tool · search_policies')).toBeInTheDocument()
   })
+})
+
+it('counts recorded provider attempts by logical step and distinguishes missing history', () => {
+  const { rerender } = render(<AgentTrajectory events={[
+    event(1, 'turn.started', 'zero', { model_usage_recorded: true }),
+    event(2, 'message.completed', 'zero'),
+  ]} />)
+  expect(screen.getByText('本轮模型调用 0 次')).toBeInTheDocument()
+  expect(screen.getByText('规则处理：未调用模型')).toBeInTheDocument()
+  rerender(<AgentTrajectory events={[
+    event(1, 'turn.started', 'two', { model_usage_recorded: true }),
+    event(2, 'model.started', 'two', {
+      step_id: 'intent', operation: 'route_intent', provider_mode: 'api', attempt: 1,
+    }),
+    event(3, 'model.completed', 'two', {
+      step_id: 'intent', operation: 'route_intent', provider_mode: 'api', attempt: 1, status: 'parsed',
+    }),
+    event(4, 'model.started', 'two', {
+      step_id: 'parse', operation: 'parse_input', provider_mode: 'api', attempt: 1,
+    }),
+    event(5, 'model.completed', 'two', {
+      step_id: 'parse', operation: 'parse_input', provider_mode: 'api', attempt: 1, status: 'malformed',
+    }),
+    event(6, 'model.started', 'two', {
+      step_id: 'parse', operation: 'parse_input', provider_mode: 'api', attempt: 2,
+    }),
+    event(7, 'model.started', 'two', {
+      step_id: 'parse', operation: 'parse_input', provider_mode: 'api', attempt: 2,
+    }),
+    event(8, 'tool.completed', 'two', { tool: 'list_eligible_access', status: 'success' }),
+  ]} />)
+  expect(screen.getByText('本轮模型调用 3 次')).toBeInTheDocument()
+  expect(screen.getByText('意图理解：调用模型 1 次')).toBeInTheDocument()
+  expect(screen.getByText('申请字段提取：调用模型 2 次')).toBeInTheDocument()
+  expect(screen.getByText(/查询可申请权限/)).toBeInTheDocument()
+  rerender(<AgentTrajectory events={[event(1, 'turn.started', 'old')]} />)
+  expect(screen.getByText('模型调用次数未记录')).toBeInTheDocument()
+  expect(screen.queryByText('本轮模型调用 0 次')).not.toBeInTheDocument()
+})
+
+it('names chat turns, reveals older history and keeps request submission outside chat counts', () => {
+  const history = [
+    event(1, 'turn.started', 'query', { model_usage_recorded: true }),
+    event(2, 'message.user', 'query', { content: '我能申请什么权限' }),
+    event(3, 'message.completed', 'query', { intent: 'discover_eligible_access', content: '有三项权限' }),
+    event(4, 'turn.started', 'choose'),
+    event(5, 'message.user', 'choose', { content: '申请仪表盘' }),
+    event(6, 'tool.summary', 'choose', { tool: 'resolve_entitlement', status: 'matched' }),
+    event(7, 'draft.updated', 'choose', { missing_fields: ['duration_days', 'justification'] }),
+    event(8, 'message.completed', 'choose', { intent: 'request_access', content: '请输入期限' }),
+    event(9, 'turn.started', 'duration', { model_usage_recorded: true }),
+    event(10, 'message.user', 'duration', { content: '7天' }),
+    event(11, 'draft.updated', 'duration', { missing_fields: ['justification'] }),
+    event(12, 'message.completed', 'duration', { intent: 'request_access', content: '请输入理由' }),
+    event(13, 'turn.started', 'reason', { model_usage_recorded: true }),
+    event(14, 'message.user', 'reason', { content: '用于给客户演示' }),
+    event(15, 'draft.updated', 'reason', { missing_fields: [] }),
+    event(16, 'message.completed', 'reason', { intent: 'request_access', content: '请确认' }),
+    event(17, 'turn.started', 'confirm', { model_usage_recorded: true }),
+    event(18, 'message.user', 'confirm', { content: '确认提交' }),
+    event(19, 'message.completed', 'confirm', { intent: 'request_access', business_status: 'ready_to_submit', content: '已确认，可创建申请' }),
+  ]
+  const { rerender } = render(<AgentTrajectory events={[...history, history[18]!]} />)
+  expect(screen.getByText('确认申请信息')).toBeInTheDocument()
+  expect(screen.getByText('补充申请理由')).toBeInTheDocument()
+  expect(screen.getByText('补充申请期限')).toBeInTheDocument()
+  expect(screen.getByText('你说：确认提交')).toBeInTheDocument()
+  expect(screen.getByText('处理结果：已确认，可创建申请')).toBeInTheDocument()
+  expect(screen.getAllByTestId('agent-trajectory-turn')).toHaveLength(3)
+  fireEvent.click(screen.getByRole('button', { name: /查看更早轮次/ }))
+  rerender(<AgentTrajectory events={history} />)
+  expect(screen.getAllByTestId('agent-trajectory-turn')).toHaveLength(5)
+  expect(screen.getByText('查询可申请权限')).toBeInTheDocument()
+  expect(screen.getByText('选择申请权限')).toBeInTheDocument()
+  const newest = screen.getAllByTestId('agent-trajectory-turn').at(-1)!
+  expect(newest.querySelector('summary')).not.toHaveTextContent('confirm')
+  expect(within(newest).getAllByText('确认提交', { exact: true })).toHaveLength(1)
 })

@@ -31,8 +31,10 @@ from sqlalchemy import select
 
 from accesspilot.agent.deepseek import DeepSeekStructuredReplyModel
 from accesspilot.agent.fault_injection import FaultPoint, hit_fault
+from accesspilot.agent.request_context import build_request_context, ground_request_model
 from accesspilot.agent.routing import (
     ConversationIntent,
+    DeterministicIntentRouter,
     IntentRoute,
     IntentRouter,
     IntentRoutingFailed,
@@ -40,6 +42,7 @@ from accesspilot.agent.routing import (
     route_with_validation,
 )
 from accesspilot.agent.safety import redact_sensitive_content
+from accesspilot.agent.semantic_routing import fast_understanding, offline_route, understand_intent
 from accesspilot.agent.state import (
     BoundedMessage,
     BusinessStatus,
@@ -71,6 +74,7 @@ from accesspilot.agent.trace import (
 from accesspilot.auth import Principal
 from accesspilot.conversation import (
     SECURITY_MESSAGE,
+    DeterministicStructuredReplyModel,
     _explicit_confirmation_from_text,
     compose_tool_answer,
     entitlement_resolution_message,
@@ -818,11 +822,12 @@ def route_graph_input(
     *,
     router: IntentRouter,
     numeric_cursor_active: bool,
+    resolved_route: IntentRoute | None = None,
 ) -> DeterministicGraphRoute:
     """Select one graph branch without services, tools, models, or writes."""
 
     try:
-        route = route_with_validation(content, router)
+        route = resolved_route or route_with_validation(content, router)
     except IntentRoutingFailed:
         raise GraphRuntimeContractError("intent routing failed") from None
     if _is_numeric_input(content):
@@ -861,6 +866,73 @@ def route_graph_input(
     )
 
 
+def _understand_graph_intent(
+    state: GraphState,
+    runtime: Runtime[GraphRuntimeContext],
+    snapshot: _AuthoritativeSnapshot,
+) -> tuple[IntentRoute, ParsedReply | None]:
+    """Persist the closed route before branching; quota/result replay is fenced."""
+
+    model = _context_value(runtime, "structured_reply_model")
+    workspace_token = _context_value(runtime, "workspace_token")
+    factory = _context_value(runtime, "session_factory")
+    if not isinstance(model, DeepSeekStructuredReplyModel) or not isinstance(workspace_token, str):
+        raise GraphRuntimeContractError("semantic router is unavailable")
+    if not callable(factory):
+        raise GraphRuntimeContractError("database service is unavailable")
+    context = _step_context(state, runtime)
+    service = _step_service(runtime)
+    previous = service.read_model_attempt(
+        context, workspace_token=workspace_token, attempt=1, operation="route_intent",
+    )
+    if previous is not None and previous.status == "completed":
+        if previous.result_reference is None:
+            raise GraphRuntimeContractError("completed route is unavailable")
+        return IntentRoute.model_validate_json(previous.result_reference), None
+    with factory() as session:
+        request_context = build_request_context(
+            session, workspace_token=workspace_token,
+            expected_field=snapshot.cursor.expected_field if snapshot.cursor else None,
+        )
+    fast = fast_understanding(
+        state.safe_user_text, context=request_context,
+        safe_reason=is_safe_justification_cursor_reply(
+            state.safe_user_text, IntentRoute(intent="request_access"),
+        ),
+    )
+    if previous is None and fast is not None:
+        return fast.route, fast.reply
+    reservation = service.reserve_model_attempt(
+        context, workspace_token=workspace_token, attempt=1, operation="route_intent",
+    )
+    if reservation.status == "completed":
+        if reservation.result_reference is None:
+            raise GraphRuntimeContractError("completed route is unavailable")
+        return IntentRoute.model_validate_json(reservation.result_reference), None
+    contextual = model.with_request_context(request_context)
+    trace = _optional_trace(runtime)
+    turn_id, input_seq = _trace_turn_context(state, runtime)
+    if trace is not None:
+        trace.model_started(
+            workspace_id=state.workspace_ref, graph_run_id=state.graph_run_id,
+            input_seq=input_seq, turn_id=turn_id, operation="route_intent",
+            provider_mode="api", attempt=1,
+        )
+    route, understanding_status = understand_intent(contextual, state.safe_user_text)
+    hit_fault(FaultPoint.AFTER_QUOTA_COMMIT_BEFORE_CHECKPOINT)
+    if trace is not None:
+        trace.model_completed(
+            workspace_id=state.workspace_ref, graph_run_id=state.graph_run_id,
+            input_seq=input_seq, turn_id=turn_id, operation="route_intent",
+            provider_mode="api", attempt=1, status=understanding_status,
+            extracted_fields=["intent"] if understanding_status == "parsed" else [],
+        )
+    service.complete_model_attempt(
+        context, workspace_token=workspace_token, attempt=1, operation="route_intent", route=route,
+    )
+    return route, None
+
+
 def _route_intent(
     state: GraphState,
     runtime: Runtime[GraphRuntimeContext],
@@ -873,14 +945,29 @@ def _route_intent(
         runtime,
         include_quota=False,
     )
+    model = _context_value(runtime, "structured_reply_model")
+    semantic_routing = issubclass(type(model), DeepSeekStructuredReplyModel) and isinstance(
+        router, DeterministicIntentRouter,
+    )
+    resolved_route = None
+    fast_reply = None
+    if semantic_routing:
+        resolved_route, fast_reply = _understand_graph_intent(state, runtime, snapshot)
+    elif issubclass(type(model), DeterministicStructuredReplyModel):
+        resolved_route = offline_route(
+            state.safe_user_text,
+            route_with_validation(state.safe_user_text, cast(IntentRouter, router)),
+        )
     decision = route_graph_input(
         state.safe_user_text,
         router=cast(IntentRouter, router),
         numeric_cursor_active=snapshot.cursor is not None,
+        resolved_route=resolved_route,
     )
     cursor = snapshot.cursor
     if (
-        cursor is not None
+        not semantic_routing
+        and cursor is not None
         and cursor.expected_field == "justification"
         and decision.intent in {"help", "request_access"}
         and is_obvious_question(state.safe_user_text)
@@ -890,9 +977,19 @@ def _route_intent(
             security_flagged=decision.security_flagged,
             selected_route="help",
         )
-    elif decision.intent == "help" and is_request_collection_follow_up(
-        state.safe_user_text,
-        snapshot.draft.missing_fields(),
+    elif not semantic_routing and decision.intent == "help" and (
+        is_request_collection_follow_up(
+            state.safe_user_text,
+            snapshot.draft.missing_fields(),
+        )
+        or (
+            cursor is not None
+            and cursor.expected_field == "justification"
+            and is_safe_justification_cursor_reply(
+                state.safe_user_text,
+                IntentRoute(intent=decision.intent, security_probe=decision.security_flagged),
+            )
+        )
     ):
         decision = DeterministicGraphRoute(
             intent="request_access",
@@ -913,6 +1010,7 @@ def _route_intent(
         "intent": decision.intent,
         "security_flagged": decision.security_flagged,
         "selected_route": decision.selected_route,
+        "draft_patch": _candidate_patch(fast_reply) if fast_reply is not None else None,
         "tool_name": None,
         "safe_tool_result": None,
         "policy_status": None,
@@ -975,6 +1073,18 @@ def _call_model_attempt(
             attempt=attempt,
         )
     try:
+        if isinstance(model, DeepSeekStructuredReplyModel):
+            session_factory = _context_value(runtime, "session_factory")
+            if not callable(session_factory):
+                raise GraphRuntimeContractError("database service is unavailable")
+            snapshot = _read_authoritative_snapshot(
+                state.workspace_ref, runtime, include_quota=False,
+            )
+            with session_factory() as context_session:
+                model = ground_request_model(
+                    model, context_session, workspace_token=workspace_token,
+                    expected_field=snapshot.cursor.expected_field if snapshot.cursor else None,
+                )
         raw_parsed = model.parse_reply(
             state.safe_user_text,
             correction=correction,
@@ -1066,6 +1176,13 @@ def _parse_request_patch(
     workspace_token = _context_value(runtime, "workspace_token")
     if not isinstance(workspace_token, str):
         raise GraphRuntimeContractError("workspace binding is unavailable")
+    if state.draft_patch is not None:
+        return {"draft_patch": state.draft_patch}
+    if (
+        isinstance(_context_value(runtime, "structured_reply_model"), DeepSeekStructuredReplyModel)
+        and _explicit_confirmation_from_text(state.safe_user_text) is not None
+    ):
+        return {"draft_patch": None}
     context = _step_context(state, runtime)
     service = _step_service(runtime)
     # A replay that already committed its authoritative draft must not spend
@@ -1090,7 +1207,10 @@ def _parse_request_patch(
         security_probe=state.security_flagged,
     )
     if (
-        snapshot.cursor is not None
+        not isinstance(
+            _context_value(runtime, "structured_reply_model"), DeepSeekStructuredReplyModel,
+        )
+        and snapshot.cursor is not None
         and snapshot.cursor.expected_field == "justification"
         and is_safe_justification_cursor_reply(state.safe_user_text, route)
     ):
@@ -1272,7 +1392,7 @@ def _compose_safe_answer(
     recoverable_error = None
     if state.intent == "unknown":
         recoverable_error = {
-            "code": "NUMERIC_CONTEXT_REQUIRED",
+            "code": "INTENT_UNCLEAR",
             "message": message,
         }
     return {
@@ -1828,6 +1948,10 @@ def _persist_draft_cas(
         if (
             cursor is not None
             and cursor.expected_field == "justification"
+            and state.draft_patch is not None
+            and state.draft_patch.entitlement_id is None
+            and state.draft_patch.duration_days is None
+            and state.draft_patch.justification is not None
             and is_safe_justification_cursor_reply(state.safe_user_text, route)
         ):
             completed = service.persist_justification_cursor(

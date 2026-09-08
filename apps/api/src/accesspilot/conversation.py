@@ -8,21 +8,26 @@ from dataclasses import dataclass, field
 from functools import partial
 from threading import Lock
 from typing import Literal, Protocol
+from uuid import uuid4
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session, sessionmaker
 
+from accesspilot.agent.deepseek import DeepSeekStructuredReplyModel
 from accesspilot.agent.embeddings import DeterministicEmbeddingModel
+from accesspilot.agent.request_context import build_request_context, ground_request_model
 from accesspilot.agent.routing import (
     ConversationIntent,
     DeterministicIntentRouter,
     IntentRoute,
     IntentRouter,
     IntentRoutingFailed,
+    is_explicit_help_query,
     route_with_validation,
 )
 from accesspilot.agent.safety import redact_sensitive_content
+from accesspilot.agent.semantic_routing import fast_understanding, offline_route, understand_intent
 from accesspilot.agent.state import ConversationPhase
 from accesspilot.agent.structured_reply import (
     ReplyParsingFailed,
@@ -33,6 +38,7 @@ from accesspilot.db.models import EntitlementRecord
 from accesspilot.domain.models import ParsedReply, RequestDraft
 from accesspilot.events import (
     ModelQuota,
+    append_turn_terminal,
     append_workspace_event,
     consume_model_call,
     get_model_quota,
@@ -212,16 +218,20 @@ class LegacyConversationOrchestrator:
         content: str,
         auth_session_id: str | None,
     ) -> ConversationTurn:
-        return handle_chat_message(
-            self.session_factory,
-            workspace_service=self.workspace_service,
-            workspace_token=workspace_token,
-            content=content,
-            model=self.model,
-            router=self.router,
-            policy_service=self.policy_service,
-            auth_session_id=auth_session_id,
-        )
+        id_token = _CURRENT_TURN_ID.set(str(uuid4()))
+        try:
+            return handle_chat_message(
+                self.session_factory,
+                workspace_service=self.workspace_service,
+                workspace_token=workspace_token,
+                content=content,
+                model=self.model,
+                router=self.router,
+                policy_service=self.policy_service,
+                auth_session_id=auth_session_id,
+            )
+        finally:
+            _CURRENT_TURN_ID.reset(id_token)
 
     def prepare(
         self,
@@ -257,6 +267,8 @@ class LegacyConversationOrchestrator:
 def _explicit_confirmation_from_text(content: str) -> bool | None:
     """确认是写入门控，只从用户明确原文推导，不信任模型布尔值。"""
 
+    if _is_obvious_question(content):
+        return None
     normalized = content.casefold()
     if any(marker in normalized for marker in ("不确认", "暂不确认", "不要提交")):
         return False
@@ -333,7 +345,7 @@ def _merge_reply(current: RequestDraft, reply: ParsedReply) -> RequestDraft:
 def _missing_field_question(field_name: str) -> str:
     questions = {
         "employee_id": "请提供你的虚构员工编号，例如 EMP-001。",
-        "entitlement_id": "请提供要申请的权限编号，例如 insighthub.customer_export。",
+        "entitlement_id": "请告诉我想申请的权限名称；不确定时，我可以列出当前可申请的权限。",
         "duration_days": "请提供申请期限（天）。",
         "justification": "请说明申请这项权限的业务理由。",
     }
@@ -548,13 +560,29 @@ def _is_safe_justification_cursor_reply(
 ) -> bool:
     """只在理由 Cursor 中接受切题且无安全标记的自然语言续答。"""
 
+    normalized = content.casefold().strip()
+    # Cursor supplies the meaning of free text. Explicit commands still use
+    # their normal parser; they must never become a justification verbatim.
+    field_command = (
+        re.search(r"\d+\s*天|\bemp-\d+\b|\b[a-z][a-z0-9_]*\.[a-z]", normalized)
+        is not None
+        or normalized.startswith(("申请", "改成", "改为", "换成", "换为", "取消", "算了"))
+        or any(marker in normalized for marker in (
+            "确认提交", "确认申请", "我确认", "不确认", "暂不确认", "不要提交",
+            "不申请", "不办了", "换个话题",
+        ))
+        or normalized.strip("。！!，, ") in {"确认", "提交", "好的", "好", "是的"}
+    )
     return (
-        route.intent == "request_access"
+        route.intent in {"help", "request_access"}
         and not route.security_probe
+        and not field_command
+        and not is_explicit_help_query(content)
+        and normalized.strip("？?！!。.,， ") not in {"请帮助", "help", "功能"}
+        and not _is_obvious_question(content)
         and not _is_numeric_input(content)
         and not contains_protected_internal_content(content)
         and re.search(r"[^\W\d_]", content) is not None
-        and _is_request_collection_follow_up(content, ["justification"])
     )
 
 
@@ -604,7 +632,8 @@ def compose_tool_answer(route: IntentRoute, result: ToolResult | None) -> str:
     if route.intent == "security_probe":
         return SECURITY_MESSAGE
     if route.intent == "unknown":
-        return "我需要更多上下文才能理解这条数字消息，请说明它是期限、权限编号还是其他内容。"
+        return ("我暂时没能可靠理解这条消息，理解服务可能暂不可用。请说明你想查询权限还是申请权限，"
+                "也可以打开“我的权限”查看可申请目录、“政策中心”查看规则。")
     return "我可以帮你查询可申请权限、当前有效授权、申请状态，或发起权限申请。"
 
 
@@ -1033,7 +1062,10 @@ def _process_chat_message(
             session_factory,
             workspace_token=workspace_token,
             event_type="turn.started",
-            payload={"turn_id": turn_id},
+            payload={
+                "turn_id": turn_id, "model_usage_recorded": True,
+                "orchestrator": "legacy", "flow_version": 1,
+            },
         )
     visible_draft = workspace.draft
     if (
@@ -1043,13 +1075,59 @@ def _process_chat_message(
     ):
         visible_draft = None
     active_router = router or DeterministicIntentRouter()
-    try:
-        route = route_with_validation(normalized_content, active_router)
-    except IntentRoutingFailed as error:
-        raise ConversationInputError("暂时无法可靠识别该请求意图") from error
     active_cursor = workspace.active_cursor()
+    semantic_routing = isinstance(model, DeepSeekStructuredReplyModel) and isinstance(
+        active_router, DeterministicIntentRouter,
+    )
+    fast_reply: ParsedReply | None = None
+    if semantic_routing:
+        assert isinstance(model, DeepSeekStructuredReplyModel)
+        with session_factory() as context_session:
+            context = build_request_context(
+                context_session, workspace_token=workspace_token,
+                expected_field=active_cursor.expected_field if active_cursor else None,
+            )
+        fast = fast_understanding(
+            normalized_content, context=context,
+            safe_reason=_is_safe_justification_cursor_reply(
+                normalized_content, IntentRoute(intent="request_access"),
+            ),
+        )
+        if fast is not None:
+            route, fast_reply = fast.route, fast.reply
+        else:
+            with session_factory() as quota_session:
+                consume_model_call(quota_session, workspace_token=workspace_token)
+            contextual_model = model.with_request_context(context)
+            if turn_id is not None:
+                _append_event(
+                    session_factory, workspace_token=workspace_token,
+                    event_type="model.started",
+                    payload={"turn_id": turn_id, "step_id": "route_intent",
+                             "operation": "route_intent", "provider_mode": "api", "attempt": 1},
+                )
+            route, understanding_status = understand_intent(contextual_model, normalized_content)
+            if turn_id is not None:
+                _append_event(
+                    session_factory, workspace_token=workspace_token,
+                    event_type="model.completed",
+                    payload={"turn_id": turn_id, "step_id": "route_intent",
+                             "operation": "route_intent", "provider_mode": "api", "attempt": 1,
+                             "status": understanding_status,
+                             "extracted_fields": (
+                                 ["intent"] if understanding_status == "parsed" else []
+                             )},
+                )
+    else:
+        try:
+            route = route_with_validation(normalized_content, active_router)
+        except IntentRoutingFailed as error:
+            raise ConversationInputError("暂时无法可靠识别该请求意图") from error
+        if isinstance(model, DeterministicStructuredReplyModel):
+            route = offline_route(normalized_content, route)
     if (
-        active_cursor is not None
+        not semantic_routing
+        and active_cursor is not None
         and active_cursor.expected_field == "justification"
         and route.intent in {"help", "request_access"}
         and _is_obvious_question(normalized_content)
@@ -1057,11 +1135,19 @@ def _process_chat_message(
         # 明显问句是在换题，不能因包含“测试/申请”等理由关键词被写入草稿。
         route = IntentRoute(intent="help", security_probe=route.security_probe)
     if (
-        route.intent == "help"
+        not semantic_routing
+        and route.intent == "help"
         and visible_draft is not None
-        and _is_request_collection_follow_up(
-            normalized_content,
-            visible_draft.missing_fields(),
+        and (
+            _is_request_collection_follow_up(
+                normalized_content,
+                visible_draft.missing_fields(),
+            )
+            or (
+                active_cursor is not None
+                and active_cursor.expected_field == "justification"
+                and _is_safe_justification_cursor_reply(normalized_content, route)
+            )
         )
     ):
         # 已经进入申请收集时，“做数据核对”这类简短回答是当前缺失字段。
@@ -1100,7 +1186,8 @@ def _process_chat_message(
     safe_content = _redact_sensitive_content(normalized_content)
     current_draft = visible_draft or RequestDraft(employee_id=workspace.actor_id)
     is_justification_cursor_reply = (
-        active_cursor is not None
+        not semantic_routing
+        and active_cursor is not None
         and active_cursor.expected_field == "justification"
         and _is_safe_justification_cursor_reply(normalized_content, route)
     )
@@ -1176,7 +1263,7 @@ def _process_chat_message(
             tool_results=[result] if result is not None else [],
             draft_revision=workspace.draft_revision,
             error_code=(
-                "NUMERIC_CONTEXT_REQUIRED" if route.intent == "unknown" else None
+                "INTENT_UNCLEAR" if route.intent == "unknown" else None
             ),
         )
         if _PERSIST_TERMINAL.get():
@@ -1199,7 +1286,7 @@ def _process_chat_message(
     with session_factory() as session:
         quota = (
             get_model_quota(session, workspace_token=workspace_token)
-            if is_justification_cursor_reply
+            if is_justification_cursor_reply or fast_reply is not None
             else consume_model_call(session, workspace_token=workspace_token)
         )
     _append_event(
@@ -1226,13 +1313,38 @@ def _process_chat_message(
                     is_retry=True,
                 )
 
-        parsed = (
+        def record_parse_attempt(attempt: int, status: str | None = None) -> None:
+            if turn_id is None:
+                return
+            payload: dict[str, object] = {
+                "turn_id": turn_id, "step_id": "parse_input", "operation": "parse_input",
+                "provider_mode": (
+                    "api" if isinstance(model, DeepSeekStructuredReplyModel) else "mock"
+                ),
+                "attempt": attempt,
+            }
+            if status is not None:
+                payload.update(status=status, extracted_fields=[])
+            _append_event(
+                session_factory, workspace_token=workspace_token,
+                event_type="model.started" if status is None else "model.completed",
+                payload=payload,
+            )
+
+        with session_factory() as context_session:
+            request_model = ground_request_model(
+                model, context_session, workspace_token=workspace_token,
+                expected_field=active_cursor.expected_field if active_cursor else None,
+            )
+        parsed = fast_reply if fast_reply is not None else (
             ParsedReply(justification=normalized_content)
             if is_justification_cursor_reply
             else parse_reply_with_retry(
                 safe_content,
-                model,
+                request_model,
                 before_retry=consume_retry_quota,
+                on_started=record_parse_attempt,
+                on_completed=record_parse_attempt,
             )
         )
         parsed = normalize_request_candidate(
@@ -1536,16 +1648,46 @@ def handle_chat_message(
 ) -> ConversationTurn:
     """旧 JSON 入口：保留完整 terminal 事件和原有返回合同。"""
 
-    return _process_chat_message(
-        session_factory,
-        workspace_service=workspace_service,
-        workspace_token=workspace_token,
-        content=content,
-        model=model,
-        router=router,
-        policy_service=policy_service,
-        auth_session_id=auth_session_id,
-    )
+    turn_id = _CURRENT_TURN_ID.get()
+    try:
+        turn = _process_chat_message(
+            session_factory,
+            workspace_service=workspace_service,
+            workspace_token=workspace_token,
+            content=content,
+            model=model,
+            router=router,
+            policy_service=policy_service,
+            auth_session_id=auth_session_id,
+        )
+    except Exception:
+        if turn_id is not None:
+            with session_factory() as session:
+                append_turn_terminal(
+                    session, workspace_token=workspace_token, turn_id=turn_id,
+                    event_type="error.recoverable",
+                    payload={"turn_id": turn_id, "code": "CONVERSATION_UNAVAILABLE",
+                             "message": "本轮未完成，请重试。"},
+                )
+        raise
+    if turn_id is not None:
+        payload = normalized_outcome(turn)
+        current = workspace_service.get(workspace_token, auth_session_id=auth_session_id)
+        if current.draft is None:
+            payload.pop("draft", None)
+        if turn.business_status == "recoverable_error":
+            event_type = "error.recoverable"
+            payload.update(turn_id=turn_id, code=turn.error_code or "MODEL_REPLY_UNAVAILABLE",
+                           message=turn.assistant_message)
+        else:
+            event_type = "message.completed"
+            payload.update(turn_id=turn_id, message_id=turn_id, content=turn.assistant_message)
+        with session_factory() as session:
+            append_turn_terminal(
+                session, workspace_token=workspace_token, turn_id=turn_id,
+                event_type=event_type, payload=payload,
+            )
+    return turn
 
 
 def prepare_chat_message(

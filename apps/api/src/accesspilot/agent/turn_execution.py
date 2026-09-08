@@ -52,6 +52,7 @@ from accesspilot.db.models import (
     utc_now,
 )
 from accesspilot.db.workspace_store import hash_workspace_token
+from accesspilot.domain.models import RequestDraft
 from accesspilot.events import stage_workspace_event, validate_event_payload
 from accesspilot.workspaces import UnknownWorkspaceError
 
@@ -255,6 +256,7 @@ class TurnExecutionService:
                     payload={
                         "turn_id": input_turn_id,
                         "lease_expires_at": lease_expires_at,
+                        "model_usage_recorded": True,
                         # T36：LangGraph 入口记录最终解析引擎与图版本。
                         "orchestrator": "langgraph",
                         "flow_version": workspace.flow_version,
@@ -673,6 +675,50 @@ class TurnExecutionService:
             session.flush()
             return terminal.id
 
+    @staticmethod
+    def _project_collection_cursor(
+        workspace: WorkspaceRecord,
+        handle: TurnExecutionHandle,
+        *,
+        event_type: str,
+        payload: dict[str, object],
+    ) -> None:
+        """Project the successful question alongside its fenced terminal event."""
+
+        if event_type != "message.completed":
+            return
+        if payload.get("intent") in {
+            "help", "discover_eligible_access", "list_active_access", "request_status",
+            "policy_question",
+        }:
+            workspace.cursor_expected_field = None
+            workspace.cursor_consumed_at = utc_now()
+            return
+        if (
+            payload.get("intent") != "request_access"
+            or payload.get("business_status") != "collecting"
+        ):
+            return
+        if payload.get("draft_revision") != workspace.draft_revision:
+            raise StaleTurnFenceError("cursor projection revision changed")
+        draft = RequestDraft.model_validate(workspace.draft or {"employee_id": handle.actor_id})
+        if draft.employee_id != handle.actor_id:
+            raise StaleTurnFenceError("cursor projection actor changed")
+        missing = draft.missing_fields()
+        if not missing or missing[0] not in {"entitlement_id", "duration_days", "justification"}:
+            return
+        if (
+            workspace.cursor_expected_field is not None
+            and workspace.cursor_auth_session_id != str(handle.auth_session_ref)
+        ):
+            raise StaleTurnFenceError("cursor projection session changed")
+        workspace.cursor_actor_id = handle.actor_id
+        workspace.cursor_auth_session_id = str(handle.auth_session_ref)
+        workspace.cursor_expected_field = missing[0]
+        workspace.cursor_last_question_kind = missing[0]
+        workspace.cursor_issued_at = utc_now()
+        workspace.cursor_consumed_at = None
+
     def finalize_graph_turn_with_event(
         self,
         handle: TurnExecutionHandle,
@@ -748,6 +794,14 @@ class TurnExecutionService:
             if not AcceptedCheckpointHeadStore().promote(session, verified):
                 raise StaleTurnFenceError("checkpoint head promotion failed")
 
+            if event_type == "message.completed":
+                self._validate_auth_session(
+                    session, workspace_id=handle.workspace_id,
+                    auth_session_ref=handle.auth_session_ref, actor_id=handle.actor_id, now=now,
+                )
+            self._project_collection_cursor(
+                workspace, handle, event_type=event_type, payload=safe_payload,
+            )
             terminal = WorkspaceEventRecord(
                 workspace_id=handle.workspace_id,
                 event_type=event_type,
@@ -1121,6 +1175,10 @@ class TurnExecutionService:
             # The confirmation Cursor is answered by this resume turn (either
             # confirmed or re-routed); consume it so no stale Cursor remains.
             workspace.cursor_consumed_at = now
+            self._project_collection_cursor(
+                workspace, handle, event_type=event_type, payload=safe_payload,
+            )
+
 
             terminal = WorkspaceEventRecord(
                 workspace_id=handle.workspace_id,
@@ -1242,6 +1300,7 @@ class TurnExecutionService:
                     payload={
                         "turn_id": input_turn_id,
                         "lease_expires_at": lease_expires_at,
+                        "model_usage_recorded": True,
                         # T36：LangGraph 入口记录最终解析引擎与图版本。
                         "orchestrator": "langgraph",
                         "flow_version": workspace.flow_version,

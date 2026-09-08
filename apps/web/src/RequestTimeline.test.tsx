@@ -198,9 +198,9 @@ describe('RequestTimelineView', () => {
       />,
     )
 
-    expect(screen.getByText('Grant 授权事实')).toBeInTheDocument()
-    expect(screen.getByText(detail.provisioning.grant_id!)).toBeInTheDocument()
-    expect(screen.getByText(/v1\.2 不包含到期回收或撤销/)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: '授权记录' })).toBeInTheDocument()
+    expect(screen.getByText(new RegExp(detail.provisioning.grant_id!))).toBeInTheDocument()
+    expect(screen.getByText(/尚未实现到期回收或撤销/)).toBeInTheDocument()
   })
 
   it('renders the lifecycle in deterministic order with time, owner and next step', () => {
@@ -294,10 +294,10 @@ describe('RequestTimelineView', () => {
     expect(screen.queryByText('草稿')).not.toBeInTheDocument()
   })
 
-  it('explains the shared Case and private Workspace boundary', () => {
+  it('explains that approval does not imply provisioning', () => {
     render(<RequestTimelineView {...baseProps} />)
-    expect(screen.getByText(/PostgreSQL.*跨登录 Session/)).toBeInTheDocument()
-    expect(screen.getByText(/未提交草稿和聊天.*私有 Workspace/)).toBeInTheDocument()
+    expect(screen.getByText(/审批通过不等于权限已开通/)).toBeInTheDocument()
+    expect(screen.getByText(/开通状态依据授权记录及有效期/)).toBeInTheDocument()
   })
 
   it('renders recovery and terminal tones from timeout and retry audit facts in order', () => {
@@ -403,4 +403,28 @@ describe('RequestTimeline principal-scoped Case loading', () => {
     expect(readLatestRequest).not.toHaveBeenCalled()
     expect((await screen.findAllByText('脱敏客户数据导出')).length).toBeGreaterThan(0)
   })
+})
+
+
+it('uses rows and separates approval from grant validity without fetching each packet', () => {
+  const select = vi.fn()
+  const summaries = [
+    { grant_id: null, starts_at: null, expires_at: null },
+    { grant_id: 'active', starts_at: '2000-01-01T00:00:00Z', expires_at: '2099-01-01T00:00:00Z' },
+    { grant_id: 'future', starts_at: '2099-01-01T00:00:00Z', expires_at: '2100-01-01T00:00:00Z' },
+    { grant_id: 'expired', starts_at: '2000-01-01T00:00:00Z', expires_at: '2001-01-01T00:00:00Z' },
+  ].map((grant, index) => ({ ...grant, request_id: String(index), requester_id: 'EMP-001',
+    requester_name: '林晓', entitlement_code: 'fixture', entitlement_name: `权限${index}`,
+    duration_days: 7, justification: '演示', request_status: 'submitted', approval_status: 'approved',
+    created_at: '2026-09-08T00:00:00Z',
+  }))
+  render(<RequestTimelineView {...baseProps} detail={null} cases={summaries} onSelectRequest={select} selectedRequestId="0" />)
+  expect(screen.getByRole('table', { name: '我的申请列表' })).toBeInTheDocument()
+  expect(screen.getAllByText('审批已通过')).toHaveLength(4)
+  expect(screen.getByText('尚未开通')).toBeInTheDocument()
+  expect(screen.getByText('权限已开通')).toBeInTheDocument()
+  expect(screen.getByText('授权待生效')).toBeInTheDocument()
+  expect(screen.getByText('授权已过期')).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '查看权限2详情' }))
+  expect(select).toHaveBeenCalledWith('2')
 })

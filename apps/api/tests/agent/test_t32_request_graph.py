@@ -402,6 +402,22 @@ REQUEST_PARITY_SCENARIOS = (
         ),
         expected_field="justification",
     ),
+    *(
+        RequestParityScenario(
+            f"short_justification_{index}",
+            reason,
+            (),
+            _PARITY_PATH_AWAIT_NO_RESOLVE,
+            draft=RequestDraft(
+                employee_id="EMP-001",
+                entitlement_id="insighthub.dashboard_view",
+                duration_days=120,
+                confirmed=False,
+            ),
+            expected_field="justification",
+        )
+        for index, reason in enumerate(("演示需要", "季度汇报", "给新人培训"))
+    ),
     RequestParityScenario(
         "ambiguous_entitlement",
         "申请 insighthub 权限",
@@ -607,6 +623,17 @@ def test_request_collection_normalized_outcome_phase_quota_and_cursor_parity_twi
             turn_id=f"turn-t32-{scenario.name}-{uuid4()}",
             auth_session_id="t32-legacy-auth",
         )
+
+        if scenario.name.startswith("short_justification_"):
+            assert legacy_result.turn.draft.justification == scenario.content
+            assert legacy_result.turn.draft.duration_days == 120
+            assert legacy_result.turn.draft.confirmed is False
+            with database_session_factory() as session:
+                persisted = session.get(WorkspaceRecord, fixture.workspace_id)
+                assert persisted is not None and persisted.draft is not None
+                assert persisted.draft["justification"] == scenario.content
+                assert persisted.draft["duration_days"] == 120
+                assert persisted.draft["confirmed"] is False
 
         if graph_result is None:
             # Legacy parity at the await boundary: the confirmation card.

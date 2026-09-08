@@ -1,0 +1,52 @@
+[
+  {
+    "intent": "request_access",
+    "business_status": "collecting",
+    "draft": {
+      "employee_id": "EMP-001",
+      "entitlement_id": "insighthub.dashboard_view",
+      "duration_days": null,
+      "justification": null,
+      "confirmed": false
+    },
+    "missing_fields": [
+      "duration_days",
+      "justification"
+    ],
+    "assistant_message": "请提供申请期限（天）。",
+    "quota": null,
+    "input": "申请 insighthub.dashboard_view 权限"
+  },
+  {
+    "intent": "request_access",
+    "business_status": "collecting",
+    "draft": {
+      "employee_id": "EMP-001",
+      "entitlement_id": "insighthub.dashboard_view",
+      "duration_days": 120,
+      "justification": null,
+      "confirmed": false
+    },
+    "missing_fields": [
+      "justification"
+    ],
+    "assistant_message": "请说明申请这项权限的业务理由。",
+    "quota": null,
+    "input": "120天"
+  },
+  {
+    "intent": "request_access",
+    "business_status": "awaiting_confirmation",
+    "draft": {
+      "employee_id": "EMP-001",
+      "entitlement_id": "insighthub.dashboard_view",
+      "duration_days": 120,
+      "justification": "演示需要",
+      "confirmed": false
+    },
+    "missing_fields": [],
+    "assistant_message": "申请信息已完整。请明确回复“确认提交”后再创建正式申请。",
+    "quota": null,
+    "input": "演示需要"
+  }
+]

@@ -1,0 +1,82 @@
+[
+  {
+    "case": "repo",
+    "input": "那申请一下代码仓库的吧",
+    "http": 200,
+    "status": "collecting",
+    "draft": {
+      "employee_id": "EMP-001",
+      "entitlement_id": "codeforge.repo_read",
+      "duration_days": null,
+      "justification": null,
+      "confirmed": false
+    },
+    "answer": "请提供申请期限（天）。"
+  },
+  {
+    "case": "colloquial",
+    "input": "我需要客户数据导出权限",
+    "http": 200,
+    "status": "collecting",
+    "draft": {
+      "employee_id": "EMP-001",
+      "entitlement_id": "insighthub.customer_export",
+      "duration_days": null,
+      "justification": null,
+      "confirmed": false
+    },
+    "answer": "请提供申请期限（天）。"
+  },
+  {
+    "case": "ambiguous",
+    "input": "我想申请数据洞察中心的权限",
+    "http": 200,
+    "status": "entitlement_ambiguous",
+    "draft": null,
+    "answer": "检测到多个可能的权限，请明确选择：脱敏客户数据导出（insighthub.customer_export）、InsightHub 仪表盘查看（insighthub.dashboard_view）。"
+  },
+  {
+    "case": "forbidden",
+    "input": "申请代码仓库写权限",
+    "http": 200,
+    "status": "entitlement_no_match",
+    "draft": null,
+    "answer": "未能匹配到权限。当前可申请权限：代码仓库只读（codeforge.repo_read）、脱敏客户数据导出（insighthub.customer_export）、InsightHub 仪表盘查看（insighthub.dashboard_view）。"
+  },
+  {
+    "case": "reference",
+    "input": "我能申请什么权限",
+    "http": 200,
+    "status": "answered",
+    "draft": null,
+    "answer": "根据当前演示身份，你可以申请 3 项权限：代码仓库只读、脱敏客户数据导出、InsightHub 仪表盘查看。"
+  },
+  {
+    "case": "reference",
+    "input": "那申请一下代码仓库的吧",
+    "http": 200,
+    "status": "collecting",
+    "draft": {
+      "employee_id": "EMP-001",
+      "entitlement_id": "codeforge.repo_read",
+      "duration_days": null,
+      "justification": null,
+      "confirmed": false
+    },
+    "answer": "请提供申请期限（天）。"
+  },
+  {
+    "case": "reference",
+    "input": "还是刚才那个，申请 7 天",
+    "http": 200,
+    "status": "collecting",
+    "draft": {
+      "employee_id": "EMP-001",
+      "entitlement_id": "codeforge.repo_read",
+      "duration_days": 7,
+      "justification": null,
+      "confirmed": false
+    },
+    "answer": "请说明申请这项权限的业务理由。"
+  }
+]

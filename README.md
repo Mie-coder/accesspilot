@@ -7,7 +7,8 @@ AccessPilot 是一个完全使用虚构数据的企业系统访问申请 Agent�
 - **稳定基线：MVP v1.0** — T01–T08 已完成本地实现和验收；没有推送、部署或接入真实企业系统。
 - **本地完成版本：v1.1** — T09–T17 已完成本地实现与验证；没有推送、合并、部署或接入真实企业系统。
 - **历史产品基线：v1.2 T18–T25** — 产品、四角色主链与证据包已完成；历史结果保留用于追溯，但不自动证明 v1.3。
-- **当前本地版本：v1.3 T26–T42 全部 Verified** — `product_verified=true`；`interview_ready=pending_user_verification`。固定产品 revision 上 API 868、Web 109 均零 skip，33 个语义场景连续两轮零差异，fresh product eval 101/101，真实 flow 2 浏览器主链、重启恢复和完整 Legacy 回滚均通过；Claude Opus 5 与 DeepSeek 最终评审 P0/P1 均为 0。详见 [v1.3 Product Manifest](docs/evidence/accesspilot-v1.3-product-manifest.md) 与 [整体最终验收](docs/evidence/accesspilot-v1.3-final-acceptance-2026-08-21.md)。当前仅有本地提交，未推送、合并或部署。
+- **v1.3 已验收基线：T26–T42 全部 Verified** — `product_verified=true`；`interview_ready=pending_user_verification`。固定产品 revision 上 API 868、Web 109 均零 skip，33 个语义场景连续两轮零差异，fresh product eval 101/101，真实 flow 2 浏览器主链、重启恢复和完整 Legacy 回滚均通过；Claude Opus 5 与 DeepSeek 最终评审 P0/P1 均为 0。详见 [v1.3 Product Manifest](docs/evidence/accesspilot-v1.3-product-manifest.md) 与 [整体最终验收](docs/evidence/accesspilot-v1.3-final-acceptance-2026-08-21.md)。这些数字对应上述固定 revision，不自动覆盖后续修改。
+- **v1.3 对话与权限体验补充（2026-09-08）** — 包含上下文语义理解、简短理由续答、调用轨迹、决策材料和权限状态展示；本轮范围、实际验收及保留限制见 [补充交付记录](docs/evidence/accesspilot-v1.3-experience-release-2026-09-08.md)。
 - **当前能力：** JSON 与 SSE 入口按 Workspace sticky flow 进入同一 Legacy 或生产 `CompiledStateGraph`；flow 2 使用 official PostgreSQL checkpointer、持久 interrupt/resume、lease/fence、精确 accepted head 和崩溃接管，并保留 flow 1 一键回滚。产品工作台只接受 `accesspilot_session → AuthSession → EmployeeRecord` 身份链；登录页明确标注“作品集 Mock 登录，非真实身份认证”。其余能力包括确定性安全路由、只读工具白名单、权限名称解析、pgvector grounded RAG、自审批禁止规则、当前轮增量 SSE、事件回放、断线恢复，以及不展示思维链的最近三轮只读 Agent 轨迹。正式 Case、Decision Packet、两级审批和幂等 IAM/Grant 始终由 PostgreSQL 领域状态机负责，模型不是授权源。
 - **后续演进：** provider token 延迟、政策召回率和生产 SLA 尚未测量；它们不属于本地 deterministic_offline 单样本结论。
 

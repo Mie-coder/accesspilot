@@ -94,6 +94,8 @@ class DecisionAdvisoryContext(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    requester_verified: bool = False
+    entitlement_verified: bool = False
     duration_days: int = Field(gt=0)
     justification: str
     risk_level: Literal["low", "high", "critical"]
@@ -203,8 +205,15 @@ def _advisory_is_safe(
             *advisory.recommendations,
         ]
     )
-    return entitlement_code.casefold() not in text.casefold() and not _FORBIDDEN_OUTPUT.search(
-        text
+    missing_verified_field = re.search(
+        r"(?:缺少|缺失|未提供|未填写).{0,18}(?:身份|申请人|具体权限|权限名称|权限编码)"
+        r"|(?:身份|申请人|具体权限|权限名称|权限编码).{0,12}(?:缺少|缺失|未提供|未填写)",
+        text,
+    )
+    return (
+        entitlement_code.casefold() not in text.casefold()
+        and not _FORBIDDEN_OUTPUT.search(text)
+        and missing_verified_field is None
     )
 
 
@@ -214,6 +223,8 @@ def _advisory_context(
     policies: list[PolicyMatch],
 ) -> DecisionAdvisoryContext:
     return DecisionAdvisoryContext(
+        requester_verified=bool(request.requester_id),
+        entitlement_verified=request.entitlement_code == entitlement.code,
         duration_days=request.duration_days,
         justification=_redact_for_advisory(request.justification),
         risk_level=entitlement.risk_level,

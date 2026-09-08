@@ -623,3 +623,24 @@ describe('OperationsConsole T23 admin actions', () => {
     expect(readProvisioningTasks).toHaveBeenCalledOnce()
   })
 })
+
+it('uses Chinese audit titles and keeps original event types inside technical details', () => {
+  const types = ['request.submitted', 'decision_packet.created', 'risk_review.completed',
+    'approval.started', 'approval.step.approved', 'approval.step.rejected',
+    'provisioning.started', 'provisioning.retry_started', 'provisioning.unknown',
+    'provisioning.failed', 'provisioning.succeeded', 'provisioning.reconciled', 'future.event']
+  renderView({ detail: detail({ audit_events: types.map((event_type, index) => ({
+    audit_event_id: String(index), event_type, actor_type: 'system', actor_id: null,
+    details: {}, created_at: '2026-09-08T00:00:00Z',
+  })) }) })
+  const rows = document.querySelectorAll('.audit-timeline > li')
+  expect(rows).toHaveLength(types.length)
+  rows.forEach((row, index) => {
+    expect(row.querySelector('strong')?.textContent).not.toMatch(/[a-zA-Z]/)
+    const technical = row.querySelector('details')!
+    expect(technical).not.toHaveAttribute('open')
+    expect(technical).toHaveTextContent(types[index]!)
+  })
+  expect(screen.getByText('审批材料已生成并冻结')).toBeInTheDocument()
+  expect(screen.getByText('其他审计事件')).toBeInTheDocument()
+})

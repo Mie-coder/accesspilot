@@ -1,0 +1,25 @@
+{
+  "fixture": true,
+  "provider_calls": 1,
+  "model": "deepseek-v4-flash",
+  "generation_mode": "provider",
+  "advisory": {
+    "assessment": "clear",
+    "summary": "申请为低风险权限，期限7天远低于最大180天，业务理由为演示用途。申请人及权限已通过后端核验，政策检索中无高风险或客户数据导出相关适用项，未见风险信号。",
+    "unknowns": [
+      "业务理由（用于客户演示）的真实性仍需人工核对",
+      "具体权限内容未明示，但已由后端完成核验"
+    ],
+    "recommendations": [
+      "按manager审批路线进行常规人工审批",
+      "确认演示用途与7天期限相匹配，到期后自动回收即可"
+    ],
+    "citations": [
+      "POL-001",
+      "POL-006"
+    ]
+  },
+  "availability_message": null,
+  "persisted_packet": false,
+  "token_usage_measured": false
+}

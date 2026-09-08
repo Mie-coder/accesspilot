@@ -42,6 +42,7 @@ class TurnStartedPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     turn_id: str = Field(min_length=1, max_length=120)
+    model_usage_recorded: bool | None = None
     lease_expires_at: datetime | None = None
     # T36 §8.1：LangGraph 入口额外记录最终解析引擎与版本；Legacy 保持 v1.2。
     orchestrator: str | None = Field(default=None, min_length=1, max_length=40)
@@ -498,6 +499,7 @@ def append_turn_started(
             {
                 "turn_id": turn_id,
                 "lease_expires_at": now + timedelta(minutes=5),
+                "model_usage_recorded": True,
                 "orchestrator": orchestrator,
                 "flow_version": flow_version,
                 "graph_version": graph_version,

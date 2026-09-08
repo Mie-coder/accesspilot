@@ -1,0 +1,99 @@
+{
+  "draft": {
+    "draft": {
+      "employee_id": "EMP-001",
+      "entitlement_id": "codeforge.repo_read",
+      "duration_days": 7,
+      "justification": "演示需要",
+      "confirmed": false
+    },
+    "draft_revision": 3
+  },
+  "turns": [
+    {
+      "turn_id": "516a1fd0-d3ca-4fa3-ab6e-c973fee93883",
+      "models": [
+        {
+          "operation": "route_intent",
+          "attempt": 1
+        }
+      ],
+      "tools": [
+        {
+          "tool": "list_eligible_access",
+          "status": "success"
+        }
+      ],
+      "output": "根据当前演示身份，你可以申请 3 项权限：代码仓库只读、脱敏客户数据导出、InsightHub 仪表盘查看。"
+    },
+    {
+      "turn_id": "2a386a3c-2e94-4702-be55-f433cd8a2f0f",
+      "models": [
+        {
+          "operation": "route_intent",
+          "attempt": 1
+        }
+      ],
+      "tools": [
+        {
+          "tool": "list_eligible_access",
+          "status": "success"
+        }
+      ],
+      "output": "根据当前演示身份，你可以申请 3 项权限：代码仓库只读、脱敏客户数据导出、InsightHub 仪表盘查看。"
+    },
+    {
+      "turn_id": "02c2cf2d-76d5-42d4-93f6-0a7ae63a5c0d",
+      "models": [
+        {
+          "operation": "route_intent",
+          "attempt": 1
+        }
+      ],
+      "tools": [
+        {
+          "tool": "list_eligible_access",
+          "status": "success"
+        }
+      ],
+      "output": "根据当前演示身份，你可以申请 3 项权限：代码仓库只读、脱敏客户数据导出、InsightHub 仪表盘查看。"
+    },
+    {
+      "turn_id": "316ba33d-93d2-414c-bc40-6ed6de8bb935",
+      "models": [
+        {
+          "operation": "route_intent",
+          "attempt": 1
+        },
+        {
+          "operation": "parse_input",
+          "attempt": 1
+        }
+      ],
+      "tools": [
+        {
+          "tool": "resolve_entitlement",
+          "status": "matched"
+        }
+      ],
+      "output": "请提供申请期限（天）。"
+    },
+    {
+      "turn_id": "7688a10f-93e7-4467-8caa-a74418dc3f91",
+      "models": [],
+      "tools": [],
+      "output": "请说明申请这项权限的业务理由。"
+    },
+    {
+      "turn_id": "67a97812-09f7-48ad-b125-425a3f465899",
+      "models": [],
+      "tools": [
+        {
+          "tool": "validate_access_request",
+          "status": "success"
+        }
+      ],
+      "output": "申请信息已完整。请明确回复“确认提交”后再创建正式申请。"
+    }
+  ]
+}

@@ -817,3 +817,47 @@ def test_activate_missing_cursor_other_session_cursor_and_revision_conflict_roll
             )
             == 0
         )
+
+
+def test_semantic_route_quota_and_result_survive_replay_separately_from_extraction(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    from accesspilot.agent.routing import IntentRoute
+
+    fixture = _step_fixture(database_session_factory)
+    service = AgentStepOperationService(database_session_factory)
+    first = service.reserve_model_attempt(
+        fixture.context, workspace_token=fixture.token, attempt=1, operation="route_intent",
+    )
+    # Simulate provider return lost before completion: repeat reserves no extra quota.
+    repeated = service.reserve_model_attempt(
+        fixture.context, workspace_token=fixture.token, attempt=1, operation="route_intent",
+    )
+    assert first.quota.used == repeated.quota.used == 1
+    route = IntentRoute(intent="discover_eligible_access")
+    assert service.read_model_attempt(
+        fixture.context, workspace_token=fixture.token, attempt=1,
+    ) is None
+    service.complete_model_attempt(
+        fixture.context, workspace_token=fixture.token, attempt=1,
+        operation="route_intent", route=route,
+    )
+    replay = service.reserve_model_attempt(
+        fixture.context, workspace_token=fixture.token, attempt=1, operation="route_intent",
+    )
+    assert replay.result_reference == route.model_dump_json()
+    assert replay.quota.used == 1
+    assert service.read_model_attempt(
+        fixture.context, workspace_token=fixture.token, attempt=1, operation="route_intent",
+    ) == replay
+    extracted = service.reserve_model_attempt(
+        fixture.context, workspace_token=fixture.token, attempt=1,
+    )
+    assert extracted.quota.used == 2
+    assert extracted.operation_id != replay.operation_id
+    assert extracted.quota.retry_consumed == 0
+    with pytest.raises(StepExecutionRejected):
+        service.reserve_model_attempt(
+            fixture.context.model_copy(update={"lease_fence": 2}),
+            workspace_token=fixture.token, attempt=1, operation="route_intent",
+        )

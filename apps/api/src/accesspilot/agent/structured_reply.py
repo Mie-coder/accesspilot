@@ -33,19 +33,37 @@ def parse_reply_with_retry(
     user_reply: str,
     model: StructuredReplyModel,
     before_retry: Callable[[], None] | None = None,
+    on_started: Callable[[int], None] | None = None,
+    on_completed: Callable[[int, str], None] | None = None,
 ) -> ParsedReply:
     """解析用户回复；仅对结构化格式错误执行一次纠正重试。"""
 
+    def invoke(attempt: int) -> ParsedReply:
+        if on_started is not None:
+            on_started(attempt)
+        try:
+            result = (
+                model.parse_reply(user_reply)
+                if attempt == 1 else model.parse_reply(user_reply, correction=CORRECTION_PROMPT)
+            )
+        except Exception as error:
+            if on_completed is not None:
+                on_completed(
+                    attempt, "malformed" if isinstance(error, MalformedStructuredOutputError)
+                    else "unavailable",
+                )
+            raise
+        if on_completed is not None:
+            on_completed(attempt, "parsed")
+        return result
+
     try:
-        return model.parse_reply(user_reply)
+        return invoke(1)
     except MalformedStructuredOutputError:
         if before_retry is not None:
             before_retry()
         try:
-            return model.parse_reply(
-                user_reply,
-                correction=CORRECTION_PROMPT,
-            )
+            return invoke(2)
         except MalformedStructuredOutputError as error:
             # 两次格式错误后停止调用模型，交给图进入可恢复错误状态。
             raise ReplyParsingFailed("模型未能返回合法的结构化回复") from error

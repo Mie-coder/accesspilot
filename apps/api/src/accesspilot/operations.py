@@ -651,6 +651,7 @@ def list_requests_for_principal(
             EmployeeRecord,
             EntitlementRecord,
             ApprovalCaseRecord,
+            AccessGrantRecord,
         )
         .join(
             EmployeeRecord,
@@ -665,6 +666,13 @@ def list_requests_for_principal(
             and_(
                 ApprovalCaseRecord.request_id == AccessRequestRecord.id,
                 ApprovalCaseRecord.workspace_id == AccessRequestRecord.workspace_id,
+            ),
+        )
+        .outerjoin(
+            AccessGrantRecord,
+            and_(
+                AccessGrantRecord.request_id == AccessRequestRecord.id,
+                AccessGrantRecord.workspace_id == AccessRequestRecord.workspace_id,
             ),
         )
         .where(
@@ -688,8 +696,11 @@ def list_requests_for_principal(
             "request_status": request.request_status,
             "approval_status": case.approval_status if case is not None else None,
             "created_at": request.created_at,
+            "grant_id": str(grant.id) if grant is not None else None,
+            "starts_at": grant.starts_at if grant is not None else None,
+            "expires_at": grant.expires_at if grant is not None else None,
         }
-        for request, requester, entitlement, case in rows
+        for request, requester, entitlement, case, grant in rows
     ]
 
 

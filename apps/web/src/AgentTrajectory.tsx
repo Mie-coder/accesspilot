@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { ConnectionState, WorkspaceEvent } from './types'
 
 interface AgentTrajectoryProps {
@@ -94,6 +95,46 @@ function businessStatusLabel(status: string): string {
   return labels[status] ?? status
 }
 
+function modelPurpose(operation: unknown): string {
+  if (operation === 'route_intent') return '意图理解'
+  if (operation === 'parse_input') return '申请字段提取'
+  return '模型处理'
+}
+
+function recordedModelUsage(turn: TurnGroup): Map<string, number> | null {
+  if (!turn.events.some((event) => event.type === 'turn.started'
+    && event.payload.model_usage_recorded === true)) return null
+  const attempts = new Set<string>()
+  const counts = new Map<string, number>()
+  for (const event of turn.events) {
+    if (!['model.started', 'model.completed'].includes(event.type)
+      || event.payload.provider_mode !== 'api') continue
+    const step = optionalText(event.payload.step_id)
+    const attempt = optionalNumber(event.payload.attempt)
+    if (step === null || attempt === null) return null
+    const identity = `${step}:${attempt}`
+    if (attempts.has(identity)) continue
+    attempts.add(identity)
+    const purpose = modelPurpose(event.payload.operation)
+    counts.set(purpose, (counts.get(purpose) ?? 0) + 1)
+  }
+  return counts
+}
+
+function toolPurpose(tool: string): string {
+  const names: Record<string, string> = {
+    list_eligible_access: '查询可申请权限',
+    list_active_access: '查询已有权限',
+    get_latest_request_status: '查询申请进度',
+    resolve_entitlement: '匹配权限名称',
+    search_policies: '检索政策',
+    list_policy_catalog: '查询政策目录',
+    get_self_approval_policy: '查询审批规则',
+    validate_access_request: '校验申请条件',
+  }
+  return names[tool] ?? '执行后端工具'
+}
+
 function safeEventPayload(event: WorkspaceEvent): Record<string, unknown> {
   const payload = event.payload
   const safe: Record<string, unknown> = {
@@ -121,6 +162,7 @@ function safeEventPayload(event: WorkspaceEvent): Record<string, unknown> {
       addText('orchestrator')
       addNumber('flow_version')
       addText('graph_version')
+      addBoolean('model_usage_recorded')
       break
     case 'message.user':
     case 'message.assistant':
@@ -223,7 +265,7 @@ function stepCopy(event: WorkspaceEvent): StepCopy | null {
     const orchestrator = optionalText(payload.orchestrator)
     const detail = orchestrator === 'langgraph'
       ? `LangGraph 启动 Flow ${optionalNumber(payload.flow_version) ?? '未知'} · ${textValue(payload.graph_version, 'graph version 未知')}`
-      : orchestrator === null
+      : orchestrator === null || orchestrator === 'legacy'
         ? 'ConversationService 启动 Legacy 对话轮'
         : `已记录未识别的编排器 ${orchestrator}`
     return {
@@ -248,7 +290,7 @@ function stepCopy(event: WorkspaceEvent): StepCopy | null {
     const securityFlagged = booleanValue(payload.security_flagged)
     return {
       lane: 'Router',
-      title: '确定性意图事实',
+      title: '意图识别结果',
       detail: `意图：${intent}${securityFlagged ? ' · 命中安全检查' : ''}`,
       tone: securityFlagged ? 'warning' : 'agent',
       safePayload,
@@ -285,7 +327,9 @@ function stepCopy(event: WorkspaceEvent): StepCopy | null {
     const fieldCopy = fields.length > 0 ? ` · 识别字段：${fields.join('、')}` : ''
     return {
       lane: `Model · ${parser === 'DeepSeek Parser' ? 'DeepSeek' : parser === 'Offline Parser' ? 'Offline' : 'Unknown'}`,
-      title: completed ? '结构化解析完成' : '结构化解析开始',
+      title: payload.operation === 'route_intent'
+        ? `意图理解${completed ? '完成' : '开始'}`
+        : completed ? '结构化解析完成' : '结构化解析开始',
       detail: `${parser} · 第 ${attempt ?? '未知'} 次 · ${status}${fieldCopy}`,
       tone: status === 'malformed' || status === 'unavailable' ? 'warning' : 'model',
       safePayload,
@@ -316,7 +360,8 @@ function stepCopy(event: WorkspaceEvent): StepCopy | null {
     return {
       lane: `Read-only tool · ${tool}`,
       title: `${tool} ${completed ? '完成' : '开始'}`,
-      detail: completed ? `${summary ?? '工具已完成'} · 状态：${status}` : '只读工具调用中',
+      detail: `${toolPurpose(tool)} · 后端工具执行 · ${completed
+        ? `${summary ?? '工具已完成'} · 状态：${status}` : '执行中'}`,
       tone: status === 'error' ? 'warning' : 'tool',
       safePayload,
     }
@@ -327,7 +372,7 @@ function stepCopy(event: WorkspaceEvent): StepCopy | null {
     return {
       lane: `Legacy tool · ${tool}`,
       title: `${tool} Legacy 摘要`,
-      detail: `${textValue(payload.summary, '工具已完成')} · 状态：${status}`,
+      detail: `${toolPurpose(tool)} · 后端工具执行 · ${textValue(payload.summary, '工具已完成')} · 状态：${status}`,
       tone: 'tool',
       safePayload,
     }
@@ -419,7 +464,7 @@ function stepCopy(event: WorkspaceEvent): StepCopy | null {
 function groupTurns(events: WorkspaceEvent[]): TurnGroup[] {
   const groups = new Map<string, WorkspaceEvent[]>()
   const unknownCounts = new Map<string, number>()
-  const ordered = [...events]
+  const ordered = [...new Map(events.map((event) => [event.id, event])).values()]
     .filter((event) => Number.isSafeInteger(event.id) && event.id >= 0)
     .sort((left, right) => left.id - right.id)
 
@@ -443,7 +488,7 @@ function groupTurns(events: WorkspaceEvent[]): TurnGroup[] {
       maxEventId: turnEvents.at(-1)?.id ?? -1,
     }))
     .sort((left, right) => left.maxEventId - right.maxEventId)
-    .slice(-3)
+
 }
 
 function visibleEvents(group: TurnGroup): WorkspaceEvent[] {
@@ -502,8 +547,36 @@ function turnStatus(group: TurnGroup, isCurrentRunning: boolean): StatusCopy {
   return { label: '状态未知', tone: 'unknown' }
 }
 
-function shortTurnId(turnId: string): string {
-  return turnId.length <= 18 ? turnId : `${turnId.slice(0, 10)}…${turnId.slice(-5)}`
+function turnOverview(turn: TurnGroup, previous?: TurnGroup) {
+  const input = turn.events.find((event) => event.type === 'message.user')?.payload.content
+  const terminal = [...turn.events].reverse().find((event) => (
+    event.type === 'message.completed' || event.type === 'message.assistant'
+  ))
+  const output = terminal?.payload.assistant_message ?? terminal?.payload.content
+  const intent = terminal?.payload.intent ?? turn.events.find((event) => event.type === 'intent.detected')?.payload.intent
+  const labels: Record<string, string> = {
+    discover_eligible_access: '查询可申请权限', list_active_access: '查询已有权限',
+    policy_question: '咨询权限政策', request_status: '查询申请进度',
+  }
+  let title = typeof intent === 'string' ? labels[intent] : undefined
+  if (intent === 'request_access') {
+    const updated = turn.events.find((event) => event.type === 'draft.updated')
+    const previousUpdate = [...(previous?.events ?? [])].reverse().find((event) => event.type === 'draft.updated')
+    const previousMissing = stringList(previousUpdate?.payload.missing_fields)
+    const missing = stringList(updated?.payload.missing_fields)
+    if (terminal?.payload.business_status === 'ready_to_submit') title = '确认申请信息'
+    else if (turn.events.some((event) => ['tool.summary', 'tool.completed'].includes(event.type)
+      && event.payload.tool === 'resolve_entitlement'
+      && ['matched', 'success'].includes(String(event.payload.status)))) title = '选择申请权限'
+    else if (updated && previousMissing[0] === 'duration_days' && !missing.includes('duration_days')) title = '补充申请期限'
+    else if (updated && previousMissing[0] === 'justification' && !missing.includes('justification')) title = '补充申请理由'
+  }
+  const userText = textValue(input, '用户原话未记录')
+  return {
+    title: title ?? (typeof input === 'string' ? `对话：${input.replace(/\s+/g, ' ').slice(0, 36)}` : '对话记录'),
+    input: userText,
+    output: textValue(output, '处理结果尚未记录'),
+  }
 }
 
 export function AgentTrajectory({
@@ -511,7 +584,9 @@ export function AgentTrajectory({
   connectionState = 'connected',
   isRunning = false,
 }: AgentTrajectoryProps) {
-  const turns = groupTurns(events)
+  const [visibleCount, setVisibleCount] = useState(3)
+  const allTurns = groupTurns(events)
+  const turns = allTurns.slice(-visibleCount)
 
   return (
     <section
@@ -523,7 +598,7 @@ export function AgentTrajectory({
         <div>
           <p className="agent-trajectory-eyebrow">AGENT LOOP · READ ONLY</p>
           <h2 id="agent-trajectory-title">Agent 运行轨迹</h2>
-          <p>最近三轮仅按 PostgreSQL 全局事件 ID 展示已持久化的执行事实。</p>
+          <p>同一会话的聊天轮次，按事件顺序回看；每轮对话不代表一张工单。</p>
         </div>
         <span className="agent-trajectory-mode">只读 · 不提供运行操作</span>
       </header>
@@ -548,13 +623,20 @@ export function AgentTrajectory({
         </div>
       ) : (
         <div className="agent-trajectory-turns">
+          {allTurns.length > turns.length ? <button className="agent-trajectory-history" type="button"
+            onClick={() => setVisibleCount((count) => count + 3)}>
+            查看更早轮次（还有 {allTurns.length - turns.length} 轮）
+          </button> : null}
           {turns.map((turn, turnIndex) => {
             const steps = visibleEvents(turn)
               .map((currentEvent) => ({ event: currentEvent, copy: stepCopy(currentEvent) }))
               .filter((item): item is { event: WorkspaceEvent; copy: StepCopy } => item.copy !== null)
             const isNewest = turnIndex === turns.length - 1
+            const overview = turnOverview(turn, allTurns[allTurns.length - turns.length + turnIndex - 1])
             const engine = engineCopy(turn)
             const status = turnStatus(turn, isNewest && isRunning)
+            const usage = recordedModelUsage(turn)
+            const modelCalls = usage === null ? null : [...usage.values()].reduce((a, b) => a + b, 0)
             return (
               <details
                 className="agent-trajectory-turn"
@@ -565,13 +647,27 @@ export function AgentTrajectory({
               >
                 <summary>
                   <span className="agent-trajectory-turn-index">
-                    {isNewest ? '最新一轮' : `历史轮 ${turnIndex + 1}`}
+                    {isNewest ? '最新 · 聊天' : '聊天'}
                   </span>
-                  <strong>{shortTurnId(turn.turnId)}</strong>
-                  <span className={`agent-trajectory-engine is-${engine.tone}`}>{engine.label}</span>
+                  <strong>{overview.title}</strong>
                   <span className={`agent-trajectory-status is-${status.tone}`}>{status.label}</span>
                   <small>{steps.length} 个安全步骤</small>
                 </summary>
+                <div className="agent-trajectory-overview">
+                  <p>你说：{overview.input}</p>
+                  <p>处理结果：{overview.output}</p>
+                </div>
+                <div className="agent-trajectory-usage" role="note" aria-label="本轮调用记录">
+                  <strong>{modelCalls === null ? '模型调用次数未记录' : `本轮模型调用 ${modelCalls} 次`}</strong>
+                  {modelCalls === 0 ? <p>规则处理：未调用模型</p> : null}
+                  {usage === null ? <p>此轮没有完整计量标记，不能据此认定为零调用。</p>
+                    : [...usage].map(([purpose, count]) => <p key={purpose}>{purpose}：调用模型 {count} 次</p>)}
+                  <small>按已记录的调用尝试计数，包含失败和重试；恢复重放不重复计数。工具由后端执行。</small>
+                </div>
+                <details className="agent-trajectory-technical">
+                  <summary>技术详情 · {steps.length} 个安全步骤</summary>
+                  <p>轮次编号：{turn.turnId}</p>
+                  <span className={`agent-trajectory-engine is-${engine.tone}`}>{engine.label}</span>
                 {turn.ignoredUnknownCount > 0 ? (
                   <p className="agent-trajectory-unknown" role="note">
                     {turn.ignoredUnknownCount} 个未知事件已安全忽略
@@ -600,6 +696,7 @@ export function AgentTrajectory({
                     </li>
                   ))}
                 </ol>
+                </details>
               </details>
             )
           })}

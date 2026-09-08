@@ -26,9 +26,15 @@ export interface AuthSessionPayload {
 /** Fields accepted by the server-owned draft preview DTO. */
 export type DraftPreviewInput = Omit<RequestDraft, 'employee_id'>
 
-// Kept in module memory only.  The server rotates this value on every
-// GET /api/auth/session; it is never written to localStorage/sessionStorage.
+// Response fallback only; another tab can rotate the shared CSRF cookie.
+// Neither value is written to localStorage/sessionStorage.
 let csrfToken: string | null = null
+
+function currentCsrfToken(): string | null {
+  const cookie = document.cookie.split(';').map((part) => part.trim())
+    .find((part) => part.startsWith('accesspilot_csrf='))
+  return cookie ? cookie.slice('accesspilot_csrf='.length) : csrfToken
+}
 
 export function resetAuthClientState(): void {
   csrfToken = null
@@ -257,7 +263,8 @@ export async function* streamChatMessage(
     Accept: 'text/event-stream',
     'Content-Type': 'application/json',
   })
-  if (csrfToken) headers.set('X-CSRF-Token', csrfToken)
+  const token = currentCsrfToken()
+  if (token) headers.set('X-CSRF-Token', token)
   const response = await fetch('/api/chat/messages/stream', {
     method: 'POST',
     credentials: 'include',
@@ -333,8 +340,9 @@ async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
   const method = (init.method ?? 'GET').toUpperCase()
   const requestHeaders = new Headers(init.headers)
   requestHeaders.set('Accept', 'application/json')
-  if (method !== 'GET' && method !== 'HEAD' && !url.endsWith('/auth/login') && csrfToken) {
-    requestHeaders.set('X-CSRF-Token', csrfToken)
+  if (method !== 'GET' && method !== 'HEAD' && !url.endsWith('/auth/login')) {
+    const token = currentCsrfToken()
+    if (token) requestHeaders.set('X-CSRF-Token', token)
   }
   const response = await fetch(url, {
     ...init,

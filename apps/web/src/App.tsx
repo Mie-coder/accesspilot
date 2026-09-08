@@ -24,6 +24,7 @@ import {
 } from './api'
 import { AccessCards } from './AccessCards'
 import { AgentTrajectory } from './AgentTrajectory'
+import { TrajectoryBusinessOperations } from './TrajectoryBusinessOperations'
 import { ChatThread } from './ChatThread'
 import { ConfirmationSummary } from './ConfirmationSummary'
 import { DraftCard } from './DraftCard'
@@ -369,6 +370,9 @@ function WorkbenchPage({ onLogout }: { onLogout: () => Promise<void> }) {
               connectionState={workbench.connectionState}
               isRunning={isRunning}
             />
+            <TrajectoryBusinessOperations events={workbench.events}
+              requestResult={workbench.requestResult} decisionPacket={workbench.decisionPacket}
+              approvalCase={workbench.approvalCase} />
           </div>
         </section>
 

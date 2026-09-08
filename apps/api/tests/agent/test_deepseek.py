@@ -60,6 +60,31 @@ def test_valid_json_becomes_parsed_reply() -> None:
     assert result == ParsedReply(duration_days=14)
 
 
+def test_contextual_extraction_keeps_catalog_and_history_request_scoped() -> None:
+    client = FakeHttpClient(FakeResponse('{"entitlement_id":"codeforge.repo_read"}'))
+    model = DeepSeekStructuredReplyModel(
+        api_key="test-api-key", model_name="deepseek-v4-flash", client=client,
+    )
+    context = {
+        "eligible_permissions": [{"code": "codeforge.repo_read", "name": "代码仓库只读"}],
+        "recent_messages": [{"role": "user", "content": "我想看代码"}],
+        "current_entitlement": None,
+    }
+    contextual = model.with_request_context(context)
+    result = contextual.parse_reply("那申请一下代码仓库的吧")
+    assert result == ParsedReply(entitlement_id="codeforge.repo_read")
+    assert client.last_json is not None
+    messages = client.last_json["messages"]
+    assert "codeforge.repo_read" in messages[1]["content"]
+    assert "我想看代码" in messages[1]["content"]
+    assert messages[-1] == {"role": "user", "content": "那申请一下代码仓库的吧"}
+    contextual.parse_reply("那申请一下代码仓库的吧", correction="只返回 JSON")
+    assert "codeforge.repo_read" in client.last_json["messages"][1]["content"]
+    model.parse_reply("申请 14 天")
+    assert len(client.last_json["messages"]) == 2
+
+
+
 def test_invalid_json_becomes_retryable_model_error() -> None:
     with pytest.raises(MalformedStructuredOutputError):
         validate_reply_json('{"duration_days": 14, "approved": true}')

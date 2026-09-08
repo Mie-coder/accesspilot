@@ -12,10 +12,27 @@ import {
 
 afterEach(() => {
   resetAuthClientState()
+  document.cookie = 'accesspilot_csrf=; Max-Age=0; Path=/'
   vi.unstubAllGlobals()
 })
 
 describe('T19 auth client contract', () => {
+  it.each(['json', 'stream'])('uses the cookie rotated by another tab for %s writes', async (transport) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({ csrf_token: 'csrf-old' }))
+      .mockResolvedValueOnce(Response.json({ detail: 'test response' }, { status: 422 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await login('EMP-001')
+    document.cookie = 'accesspilot_csrf=csrf-from-other-tab; Path=/'
+
+    const write = transport === 'stream' ? streamChatMessage('我能申请什么权限').next() : logout()
+    await expect(write).rejects.toMatchObject({ status: 422 })
+
+    expect(new Headers(fetchMock.mock.calls[1]?.[1]?.headers).get('X-CSRF-Token'))
+      .toBe('csrf-from-other-tab')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('keeps CSRF in memory and sends it on writes after login', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(Response.json({

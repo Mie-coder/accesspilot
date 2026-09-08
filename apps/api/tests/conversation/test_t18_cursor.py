@@ -235,6 +235,10 @@ def test_numeric_follow_up_uses_duration_cursor_instead_of_help(
             "awaiting_confirmation",
             "confirmation",
         ),
+        ("演示需要", "演示需要", "awaiting_confirmation", "confirmation"),
+        ("季度汇报", "季度汇报", "awaiting_confirmation", "confirmation"),
+        ("给新人培训", "给新人培训", "awaiting_confirmation", "confirmation"),
+        ("取消", None, "answered", None),
         ("111", None, "collecting", "justification"),
         ("帮助", None, "answered", None),
         ("今天天气怎么样", None, "answered", None),
@@ -829,3 +833,38 @@ def test_normalized_json_outcome_can_be_rebuilt_in_sse_terminal_payload() -> Non
     assert data["payload"]["draft_revision"] == outcome["draft_revision"]
     assert data["payload"]["draft"] == outcome["draft"]
     assert data["payload"]["assistant_message"] == outcome["assistant_message"]
+
+
+@pytest.mark.parametrize("content", [
+    "申请7天", "改成14天", "换成代码仓库", "EMP-002",
+    "确认提交", "不要提交", "取消", "算了", "帮助",
+    "我有哪些已有权限", "申请进度", "为什么需要理由？",
+    "password=fake-secret", "insighthub.raw_customer_export",
+])
+def test_reason_cursor_does_not_consume_commands_as_plain_text(content: str) -> None:
+    assert not conversation_module.is_safe_justification_cursor_reply(
+        content, route_message(content),
+    )
+
+
+def test_short_reason_without_cursor_does_not_resume_abandoned_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token, service, factory = isolated_numeric_context(monkeypatch)
+    service.save_draft(
+        token,
+        RequestDraft(
+            employee_id="EMP-001", entitlement_id="insighthub.dashboard_view",
+            duration_days=120, confirmed=False,
+        ),
+        auth_session_id=AUTH_SESSION_ID,
+    )
+    service.clear_cursor(token, auth_session_id=AUTH_SESSION_ID)
+    turn = handle_chat_message(
+        factory, workspace_service=service, workspace_token=token,
+        content="演示需要", model=ExplodingReplyModel(),
+    )
+    assert turn.intent == "help"
+    assert turn.draft.justification is None
+    assert turn.draft.duration_days == 120
+    assert turn.draft.confirmed is False

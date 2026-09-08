@@ -66,15 +66,16 @@ const statusLabels: Record<string, string> = {
 
 const eventLabels: Record<string, string> = {
   'request.submitted': '申请人提交正式申请',
+  'decision_packet.created': '审批材料已生成并冻结',
   'risk_review.completed': '风险审查完成',
   'approval.started': '审批路线已创建',
   'approval.step.approved': '人工审批通过',
   'approval.step.rejected': '人工审批驳回',
-  'provisioning.started': '开始调用 IAM',
-  'provisioning.retry_started': '使用原幂等键重试 IAM',
-  'provisioning.unknown': 'IAM 响应未知，等待查询',
-  'provisioning.failed': 'IAM 明确返回失败',
-  'provisioning.succeeded': 'IAM 开通成功',
+  'provisioning.started': '开始调用权限系统',
+  'provisioning.retry_started': '使用原幂等键重试权限系统',
+  'provisioning.unknown': '权限系统响应未知，等待查询',
+  'provisioning.failed': '权限系统明确返回失败',
+  'provisioning.succeeded': '权限系统开通成功',
   'provisioning.reconciled': '授权事实已对账恢复',
 }
 
@@ -477,7 +478,11 @@ export function OperationsView({
               {detail.audit_events.map((event) => (
                 <li key={event.audit_event_id}>
                   <span className="audit-dot" aria-hidden="true" />
-                  <div><strong>{eventLabels[event.event_type] ?? event.event_type}</strong><p>{event.actor_id ?? event.actor_type}</p></div>
+                  <div>
+                    <strong>{eventLabels[event.event_type] ?? '其他审计事件'}</strong>
+                    <p>{event.actor_id ?? event.actor_type}</p>
+                    <details className="audit-technical"><summary>技术详情</summary><p>事件标识：{event.event_type}</p></details>
+                  </div>
                   <time>{formatTime(event.created_at)}</time>
                 </li>
               ))}

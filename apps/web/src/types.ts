@@ -255,6 +255,9 @@ export interface CaseSummary {
   justification: string
   request_status: string
   approval_status: string | null
+  grant_id?: string | null
+  starts_at?: string | null
+  expires_at?: string | null
   created_at: string
 }
 

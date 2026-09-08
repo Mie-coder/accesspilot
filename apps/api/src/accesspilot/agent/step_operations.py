@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from accesspilot.agent.identity import confirm_operation_id, operation_id
+from accesspilot.agent.routing import IntentRoute
 from accesspilot.db.models import (
     AgentPendingInputRecord,
     AgentStepExecutionRecord,
@@ -159,10 +160,13 @@ class AgentStepOperationService:
         return workspace
 
     @staticmethod
-    def _step_key_for_attempt(attempt: int) -> str:
+    def _step_key_for_attempt(
+        attempt: int,
+        operation: Literal["parse_request_patch", "route_intent"] = "parse_request_patch",
+    ) -> str:
         if attempt not in {1, 2}:
             raise ValueError("model attempt must be 1 or 2")
-        return f"parse_request_patch:quota:{attempt}"
+        return f"{operation}:quota:{attempt}"
 
     @staticmethod
     def _operation(
@@ -204,18 +208,42 @@ class AgentStepOperationService:
             raise StepOperationConflict("step operation identity does not match")
         return step
 
+    def read_model_attempt(
+        self,
+        context: AgentStepContext,
+        *,
+        workspace_token: str,
+        attempt: int,
+        operation: Literal["parse_request_patch", "route_intent"] = "parse_request_patch",
+    ) -> ModelAttemptOperation | None:
+        """Prefer an existing fenced result before reevaluating mutable context."""
+
+        context = self._validated_context(context)
+        step_key = self._step_key_for_attempt(attempt, operation)
+        with self._session_factory() as session, session.begin():
+            self._lock_execution(session, context)
+            step = self._load_step(session, context, step_key=step_key)
+            workspace = self._lock_workspace(session, context, workspace_token=workspace_token)
+            if step is None:
+                return None
+            return ModelAttemptOperation(
+                operation_id=step.operation_id, status=step.status,
+                quota=_quota(workspace), result_reference=step.result_reference,
+            )
+
     def reserve_model_attempt(
         self,
         context: AgentStepContext,
         *,
         workspace_token: str,
         attempt: int,
+        operation: Literal["parse_request_patch", "route_intent"] = "parse_request_patch",
     ) -> ModelAttemptOperation:
         """Reserve an attempt and increment its quota in the same transaction."""
 
         context = self._validated_context(context)
-        step_key = self._step_key_for_attempt(attempt)
-        operation = self._operation(context, step_key=step_key)
+        step_key = self._step_key_for_attempt(attempt, operation)
+        operation_id_value = self._operation(context, step_key=step_key)
         with self._session_factory() as session, session.begin():
             self._lock_execution(session, context)
             step = self._load_step(session, context, step_key=step_key)
@@ -235,13 +263,13 @@ class AgentStepOperationService:
                     graph_run_id=context.graph_run_id,
                     input_seq=context.input_seq,
                     step_key=step_key,
-                    operation_id=operation,
+                    operation_id=operation_id_value,
                     status="reserved",
                 )
                 session.add(step)
                 session.flush()
             return ModelAttemptOperation(
-                operation_id=operation,
+                operation_id=operation_id_value,
                 status=step.status,
                 quota=_quota(workspace),
                 result_reference=step.result_reference,
@@ -253,13 +281,22 @@ class AgentStepOperationService:
         *,
         workspace_token: str,
         attempt: int,
+        operation: Literal["parse_request_patch", "route_intent"] = "parse_request_patch",
+        route: IntentRoute | None = None,
     ) -> ModelAttemptOperation:
         """Record only that local quota accounting completed, never provider output."""
 
         context = self._validated_context(context)
-        safe_reference = "quota_consumed"
-        step_key = self._step_key_for_attempt(attempt)
-        operation = self._operation(context, step_key=step_key)
+        if operation == "route_intent":
+            if route is None:
+                raise ValueError("a validated route is required")
+            safe_reference = IntentRoute.model_validate(route).model_dump_json()
+        else:
+            if route is not None:
+                raise ValueError("parse quota cannot store a route")
+            safe_reference = "quota_consumed"
+        step_key = self._step_key_for_attempt(attempt, operation)
+        operation_id_value = self._operation(context, step_key=step_key)
         with self._session_factory() as session, session.begin():
             self._lock_execution(session, context)
             step = self._load_step(session, context, step_key=step_key)
@@ -278,7 +315,7 @@ class AgentStepOperationService:
                 workspace_token=workspace_token,
             )
             return ModelAttemptOperation(
-                operation_id=operation,
+                operation_id=operation_id_value,
                 status="completed",
                 quota=_quota(workspace),
                 result_reference=step.result_reference,

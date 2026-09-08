@@ -16,6 +16,13 @@ class InvalidRouter:
         return {"intent": "approve_access", "security_probe": False}
 
 
+@pytest.mark.parametrize("message", [
+    "那申请一下代码仓库的吧", "我需要客户数据导出权限", "帮我开一下代码仓库只读权限",
+])
+def test_colloquial_access_requests_enter_field_collection(message: str) -> None:
+    assert route_message(message).intent == "request_access"
+
+
 class BrokenRouter:
     def route(self, content: str) -> object:
         raise RuntimeError("router unavailable")

@@ -27,7 +27,7 @@ const stateLabels: Record<AccessOverviewItem['state'], string> = {
   eligible: '可申请',
   owned: '已拥有',
   pending: '审批中',
-  expiring_soon: '即将过期',
+  expiring_soon: '已拥有',
   expired: '已过期',
 }
 
@@ -52,6 +52,8 @@ function formatDate(value: string | null): string {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
   }).format(date)
 }
 
@@ -61,13 +63,17 @@ function AccessItemCard({ item, index }: { item: AccessOverviewItem; index: numb
   return (
     <article className={`access-fact-card is-${item.state}`} aria-labelledby={headingId}>
       <div className="access-fact-topline">
-        <span className={`access-state-pill is-${item.state}`}>{stateLabels[item.state]}</span>
+        <span className={`access-state-pill is-${item.state === 'expiring_soon' ? 'owned' : item.state}`}>{item.state === 'pending' && item.grant_id ? '待生效' : stateLabels[item.state]}</span>
+        {item.state === 'expiring_soon' ? <span className="access-state-pill is-expiring_soon">即将过期</span> : null}
         <span className={`risk-pill is-${item.risk_level}`}><ShieldAlert size={12} />{risk}</span>
       </div>
       <h3 id={headingId}>{item.name}</h3>
       <p className="access-code">{item.code}</p>
+      {['owned', 'expiring_soon'].includes(item.state) ? <p className="access-next-step">当前可使用（演示环境授权已生效）。</p> : null}
+      {item.state === 'expiring_soon' ? <small>剩余有效期不超过 7 天，提醒不影响当前使用。</small> : null}
       <dl className="access-fact-meta">
         <div><dt>系统</dt><dd>{item.system_name} · {item.system_code}</dd></div>
+        {item.starts_at ? <div><dt>生效时间</dt><dd>{formatDate(item.starts_at)}</dd></div> : null}
         {item.expires_at ? <div><dt>到期时间</dt><dd>{formatDate(item.expires_at)}</dd></div> : null}
         {item.max_duration_days !== null ? <div><dt>最长申请</dt><dd>{item.max_duration_days} 天</dd></div> : null}
       </dl>
