@@ -63,6 +63,7 @@ class Settings(BaseSettings):
         default="text-embedding-v4",
         validation_alias="DASHSCOPE_EMBEDDING_MODEL",
     )
+    embedding_mode: Literal["auto", "deterministic-offline"] = "auto"
     dashscope_base_url: str = Field(
         default="https://dashscope.aliyuncs.com/compatible-mode/v1",
         validation_alias="DASHSCOPE_BASE_URL",

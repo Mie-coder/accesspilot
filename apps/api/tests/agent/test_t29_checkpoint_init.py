@@ -56,3 +56,22 @@ def test_ordinary_start_script_contains_no_migration_or_checkpoint_setup() -> No
     assert ".setup(" not in source
     assert "checkpoint_init" not in source
 
+
+def test_local_start_runs_application_migrations_before_api_start() -> None:
+    root = Path(__file__).resolve().parents[4]
+    source = (root / "scripts" / "start-local.sh").read_text()
+
+    migration = source.index("python -m alembic upgrade head")
+    api_start = source.index("exec ./scripts/start-api.sh")
+    assert migration < api_start
+
+
+def test_local_start_forces_deterministic_offline_embeddings() -> None:
+    root = Path(__file__).resolve().parents[4]
+    source = (root / "scripts" / "start-local.sh").read_text()
+
+    offline_mode = source.index(
+        "export ACCESSPILOT_EMBEDDING_MODE=deterministic-offline"
+    )
+    api_start = source.index("exec ./scripts/start-api.sh")
+    assert offline_mode < api_start

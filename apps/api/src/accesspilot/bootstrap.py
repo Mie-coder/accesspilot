@@ -41,7 +41,10 @@ def bootstrap_database(
 
 
 def _configured_embedding(settings: Settings) -> tuple[EmbeddingModel, str]:
-    if settings.dashscope_api_key is None:
+    if (
+        settings.embedding_mode == "deterministic-offline"
+        or settings.dashscope_api_key is None
+    ):
         return DeterministicEmbeddingModel(), "deterministic-offline"
     return (
         DashScopeEmbeddingModel(

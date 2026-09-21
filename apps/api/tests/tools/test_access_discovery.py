@@ -4,6 +4,8 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import uuid4
 
+import pytest
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from accesspilot.db.models import (
@@ -13,6 +15,31 @@ from accesspilot.db.models import (
 )
 from accesspilot.db.seed import seed_catalog
 from accesspilot.tools.catalog import list_active_access, list_eligible_access
+
+
+@pytest.fixture(autouse=True)
+def isolate_employee_active_access(database_session: Session) -> None:
+    """Keep employee-scoped tool cases independent in the shared test DB."""
+
+    cutoff = datetime.now(UTC)
+    request_ids = list(
+        database_session.scalars(
+            select(AccessRequestRecord.id).where(
+                AccessRequestRecord.requester_id == "EMP-001"
+            )
+        ).all()
+    )
+    if not request_ids:
+        return
+    grants = database_session.scalars(
+        select(AccessGrantRecord).where(
+            AccessGrantRecord.request_id.in_(request_ids)
+        )
+    ).all()
+    for grant in grants:
+        grant.starts_at = cutoff - timedelta(days=2)
+        grant.expires_at = cutoff - timedelta(days=1)
+    database_session.commit()
 
 
 def create_workspace(
@@ -101,12 +128,16 @@ def test_eligible_access_returns_empty_success_and_unknown_identity_error(
     assert unknown.eligible_access is None
 
 
-def test_active_access_returns_only_current_employee_workspace_and_time_range(
+def test_active_access_follows_current_employee_across_private_workspaces(
     database_session: Session,
 ) -> None:
     seed_catalog(database_session)
     token, workspace = create_workspace(database_session)
-    _, other_workspace = create_workspace(database_session)
+    _, relogin_workspace = create_workspace(database_session)
+    _, other_actor_workspace = create_workspace(
+        database_session,
+        actor_id="EMP-002",
+    )
     now = datetime.now(UTC)
     active = add_grant(
         database_session,
@@ -140,11 +171,19 @@ def test_active_access_returns_only_current_employee_workspace_and_time_range(
         starts_at=now - timedelta(days=1),
         expires_at=now + timedelta(days=10),
     )
-    add_grant(
+    relogin_grant = add_grant(
         database_session,
-        workspace=other_workspace,
+        workspace=relogin_workspace,
         requester_id="EMP-001",
         entitlement_code="insighthub.customer_export",
+        starts_at=now - timedelta(days=1),
+        expires_at=now + timedelta(days=10),
+    )
+    add_grant(
+        database_session,
+        workspace=other_actor_workspace,
+        requester_id="EMP-002",
+        entitlement_code="codeforge.repo_read",
         starts_at=now - timedelta(days=1),
         expires_at=now + timedelta(days=10),
     )
@@ -158,21 +197,25 @@ def test_active_access_returns_only_current_employee_workspace_and_time_range(
 
     assert result.status == "success"
     assert result.active_access is not None
-    assert len(result.active_access) == 1
-    item = result.active_access[0]
-    assert item.grant_id == str(active.id)
-    assert item.code == "insighthub.dashboard_view"
-    assert item.name == "InsightHub 仪表盘查看"
-    assert item.system_name == "数据洞察中心"
-    assert item.starts_at == active.starts_at
-    assert item.expires_at == active.expires_at
+    assert [item.code for item in result.active_access] == [
+        "insighthub.customer_export",
+        "insighthub.dashboard_view",
+    ]
+    by_code = {item.code: item for item in result.active_access}
+    assert by_code["insighthub.customer_export"].grant_id == str(relogin_grant.id)
+    dashboard = by_code["insighthub.dashboard_view"]
+    assert dashboard.grant_id == str(active.id)
+    assert dashboard.name == "InsightHub 仪表盘查看"
+    assert dashboard.system_name == "数据洞察中心"
+    assert dashboard.starts_at == active.starts_at
+    assert dashboard.expires_at == active.expires_at
 
 
 def test_active_access_has_stable_empty_and_error_results(
     database_session: Session,
 ) -> None:
     seed_catalog(database_session)
-    token, _ = create_workspace(database_session)
+    token, _ = create_workspace(database_session, actor_id="EMP-004")
     unknown_employee_token, _ = create_workspace(
         database_session,
         actor_id="EMP-999",

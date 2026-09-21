@@ -32,6 +32,7 @@ class BrokenRouter:
     ("message", "intent"),
     [
         ("我能申请什么权限？", "discover_eligible_access"),
+        ("我可以申请哪些权限？", "discover_eligible_access"),
         ("我现在有什么权限？", "list_active_access"),
         ("现在有哪些基本政策？", "policy_question"),
         ("我能不能自己通过我自己的权限呀", "policy_question"),

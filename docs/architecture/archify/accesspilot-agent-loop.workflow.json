@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "AccessPilot Agent Loop 运行流",
+    "quality_profile": "showcase",
+    "viewBox": [800, 500]
+  },
+  "lanes": [
+    { "id": "transport", "label": "JSON / SSE 入口与输出" },
+    { "id": "runtime", "label": "LangGraph 运行时" },
+    { "id": "recovery", "label": "确认与 PostgreSQL 恢复" }
+  ],
+  "phases": [
+    { "id": "admission", "label": "准入与权威重读", "fromCol": 0, "toCol": 2 },
+    { "id": "execution", "label": "路由与受控执行", "fromCol": 3, "toCol": 4, "variant": "emphasis" },
+    { "id": "result", "label": "等待、恢复与输出", "fromCol": 5, "toCol": 5, "variant": "security" }
+  ],
+  "mainPath": ["input", "sticky", "begin", "work", "final"],
+  "nodes": [
+    { "id": "input", "lane": "transport", "col": 0, "type": "external", "label": "用户输入", "sublabel": "JSON 或 SSE" },
+    { "id": "sticky", "lane": "transport", "col": 1, "type": "security", "label": "Sticky Flow", "sublabel": "Workspace 固定 Flow 2" },
+    { "id": "final", "lane": "transport", "col": 5, "type": "frontend", "label": "安全业务结果", "sublabel": "消息 · 卡片 · SSE" },
+    { "id": "begin", "lane": "runtime", "col": 2, "type": "database", "label": "执行与重读", "sublabel": "lease · fence · 快照" },
+    { "id": "work", "lane": "runtime", "col": 4, "type": "messagebus", "label": "路由与受控执行", "sublabel": "RAG · 工具 · 草稿 CAS" },
+    { "id": "checkpoint", "lane": "recovery", "col": 4, "type": "database", "label": "Exact Head", "sublabel": "official PostgresSaver" },
+    { "id": "confirm", "lane": "recovery", "col": 5, "type": "security", "label": "确认门禁", "sublabel": "interrupt / resume" }
+  ],
+  "edges": [
+    { "id": "input-sticky", "from": "input", "to": "sticky", "role": "main" },
+    { "id": "sticky-begin", "from": "sticky", "to": "begin", "label": "同一图引擎", "variant": "security", "role": "main", "fromSide": "bottom", "toSide": "top" },
+    { "id": "begin-work", "from": "begin", "to": "work", "label": "确定性路由", "role": "main" },
+    { "id": "work-final", "from": "work", "to": "final", "label": "问答 / 查询 / 追问", "variant": "emphasis", "role": "return" },
+    { "id": "work-confirm", "from": "work", "to": "confirm", "label": "完整申请", "variant": "security", "role": "branch" },
+    { "id": "confirm-checkpoint", "from": "confirm", "to": "checkpoint", "label": "candidate → accepted", "variant": "security", "role": "main", "fromSide": "left", "toSide": "left", "route": "return-left", "labelDy": 50 },
+    { "id": "checkpoint-begin", "from": "checkpoint", "to": "begin", "label": "exact resume 后重读", "variant": "dashed", "role": "return", "fromSide": "left", "toSide": "left", "route": "return-left" },
+    { "id": "confirm-final", "from": "confirm", "to": "final", "label": "等待或确认结果", "variant": "emphasis", "role": "main" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "受控执行",
+      "items": [
+        "七类意图把安全回答、数字续答、政策 RAG、只读工具和申请收集分开",
+        "只有 request_access 修改草稿；模型不审批、不授权"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "恢复回路",
+      "items": [
+        "字段完整才 interrupt；candidate 经图停止和精确校验后才提升为 accepted head",
+        "resume 使用 exact locator，再重读身份、Workspace、revision 与业务事实"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "白盒边界",
+      "items": [
+        "业务表是身份、申请、审批和 Grant 的唯一权威；checkpoint 不是第二事实库",
+        "步骤事实脱敏投影为只读轨迹，不保存凭据、政策正文、向量或思维链"
+      ]
+    }
+  ]
+}

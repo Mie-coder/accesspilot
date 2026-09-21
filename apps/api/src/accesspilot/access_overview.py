@@ -1,6 +1,7 @@
 """权限业务卡片的确定性事实查询。
 
 该模块只读取当前 Workspace 绑定员工的目录、正式申请和真实授权。
+私有 Workspace 隔离对话与草稿；正式申请和授权跟随员工身份跨 Session 读取。
 卡片状态不从聊天文本或模型输出推断，调用方也不能通过请求体覆盖身份。
 """
 
@@ -184,14 +185,15 @@ def _select_grant(
         )
         return grant, state
 
-    expired = [grant for grant in grants if _as_utc(grant.expires_at) <= now]
-    if expired:
-        grant = max(expired, key=lambda item: (_as_utc(item.expires_at), str(item.id)))
-        return grant, "expired"
+    future = [grant for grant in grants if _as_utc(grant.starts_at) > now]
+    if future:
+        # 新授权等待生效时，不能被更早的过期历史覆盖。
+        grant = min(future, key=lambda item: (_as_utc(item.starts_at), str(item.id)))
+        return grant, "pending"
 
-    # 未来才生效的授权不是当前已拥有权限；保留其事实并让卡片继续等待。
-    grant = min(grants, key=lambda item: (_as_utc(item.starts_at), str(item.id)))
-    return grant, "pending"
+    expired = [grant for grant in grants if _as_utc(grant.expires_at) <= now]
+    grant = max(expired, key=lambda item: (_as_utc(item.expires_at), str(item.id)))
+    return grant, "expired"
 
 
 def get_access_overview(
@@ -200,7 +202,7 @@ def get_access_overview(
     workspace_token: str,
     at: datetime | None = None,
 ) -> AccessOverview:
-    """返回当前 Workspace/员工隔离后的权限生命周期卡片。"""
+    """返回当前 Workspace 绑定员工可见的权限生命周期卡片。"""
 
     if not workspace_token:
         raise AccessOverviewNotFoundError("Workspace 不存在")
@@ -233,7 +235,6 @@ def get_access_overview(
         session.scalars(
             select(AccessRequestRecord)
             .where(
-                AccessRequestRecord.workspace_id == workspace.id,
                 AccessRequestRecord.requester_id == workspace.actor_id,
             )
             .order_by(AccessRequestRecord.created_at, AccessRequestRecord.id)
@@ -244,25 +245,30 @@ def get_access_overview(
     approval_status_by_request: dict[object, str] = {}
     for case in session.scalars(
         select(ApprovalCaseRecord).where(
-            ApprovalCaseRecord.workspace_id == workspace.id,
-            ApprovalCaseRecord.request_id.in_(list(request_by_id)),
+            ApprovalCaseRecord.request_id.in_(list(request_by_id))
         )
     ).all():
-        approval_status_by_request[case.request_id] = case.approval_status
+        request = request_by_id.get(case.request_id)
+        if request is not None and case.workspace_id == request.workspace_id:
+            approval_status_by_request[case.request_id] = case.approval_status
 
     grants_by_code: dict[str, list[AccessGrantRecord]] = {}
     granted_request_ids: set[object] = set()
     if request_by_id:
         grants = session.scalars(
             select(AccessGrantRecord).where(
-                AccessGrantRecord.workspace_id == workspace.id,
                 AccessGrantRecord.request_id.in_(list(request_by_id)),
             )
         ).all()
         for candidate_grant in grants:
             request = request_by_id.get(candidate_grant.request_id)
-            # 仅把同一 Workspace、当前员工的正式申请授权纳入卡片。
-            if request is not None and request.requester_id == workspace.actor_id:
+            # 正式业务资源跟随当前员工跨私有 Workspace 读取；同时要求
+            # Grant 与原 Request 仍属于同一来源 Workspace。
+            if (
+                request is not None
+                and request.requester_id == workspace.actor_id
+                and candidate_grant.workspace_id == request.workspace_id
+            ):
                 granted_request_ids.add(candidate_grant.request_id)
                 grants_by_code.setdefault(request.entitlement_code, []).append(
                     candidate_grant

@@ -1,0 +1,241 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "AccessPilot v1.3 系统架构",
+    "quality_profile": "showcase",
+    "viewBox": [1340, 650]
+  },
+  "components": [
+    {
+      "id": "browser",
+      "type": "external",
+      "label": "用户浏览器",
+      "sublabel": "四角色 Mock Login",
+      "pos": [30, 280],
+      "size": [150, 72]
+    },
+    {
+      "id": "web",
+      "type": "frontend",
+      "label": "React 产品工作台",
+      "sublabel": "assistant-ui · 业务卡片 · 轨迹",
+      "pos": [230, 280],
+      "size": [170, 72]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "FastAPI 入口层",
+      "sublabel": "JSON API · SSE · Workspace sticky flow",
+      "pos": [450, 280],
+      "size": [180, 72]
+    },
+    {
+      "id": "graph",
+      "type": "backend",
+      "label": "LangGraph Agent Loop",
+      "sublabel": "路由 · RAG · 只读工具 · 确认",
+      "pos": [680, 280],
+      "size": [180, 72]
+    },
+    {
+      "id": "domain",
+      "type": "backend",
+      "label": "确定性领域服务",
+      "sublabel": "申请 · Packet · 审批 · 开通",
+      "pos": [910, 280],
+      "size": [180, 72]
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "PostgreSQL + pgvector",
+      "sublabel": "业务权威事实 · 政策向量 · 审计",
+      "pos": [1120, 280],
+      "size": [160, 72]
+    },
+    {
+      "id": "identity",
+      "type": "security",
+      "label": "身份与授权边界",
+      "sublabel": "AuthSession · Principal · ACL · CSRF",
+      "pos": [450, 90],
+      "size": [180, 72]
+    },
+    {
+      "id": "providers",
+      "type": "external",
+      "label": "模型与向量适配器",
+      "sublabel": "DeepSeek · 百炼 · 离线回退",
+      "pos": [680, 90],
+      "size": [180, 72]
+    },
+    {
+      "id": "iam",
+      "type": "external",
+      "label": "模拟 IAM",
+      "sublabel": "幂等开通 · 查询恢复",
+      "pos": [920, 90],
+      "size": [160, 72]
+    },
+    {
+      "id": "checkpoint",
+      "type": "database",
+      "label": "Official PostgresSaver",
+      "sublabel": "exact head · interrupt / resume",
+      "pos": [1100, 470],
+      "size": [180, 72]
+    },
+    {
+      "id": "eventstream",
+      "type": "messagebus",
+      "label": "安全事件投影",
+      "sublabel": "workspace_events · SSE 回放",
+      "pos": [230, 470],
+      "size": [180, 72]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "AccessPilot 本地应用边界",
+      "wraps": ["web", "api", "identity", "graph", "domain", "eventstream"]
+    },
+    {
+      "kind": "security-group",
+      "label": "服务端受控边界",
+      "wraps": ["api", "identity", "graph", "domain"]
+    },
+    {
+      "kind": "region",
+      "label": "同一 PostgreSQL 实例中的两类职责",
+      "wraps": ["postgres", "checkpoint"],
+      "pad": 14
+    }
+  ],
+  "connections": [
+    {
+      "id": "browser-web",
+      "from": "browser",
+      "to": "web",
+      "label": "HTTP · HttpOnly Cookie",
+      "labelDy": 60
+    },
+    {
+      "id": "web-api",
+      "from": "web",
+      "to": "api",
+      "label": "JSON / SSE",
+      "variant": "emphasis",
+      "labelDy": -30
+    },
+    {
+      "id": "api-graph",
+      "from": "api",
+      "to": "graph",
+      "label": "Flow 2 sticky dispatch",
+      "variant": "emphasis",
+      "labelDy": 60
+    },
+    {
+      "id": "graph-domain",
+      "from": "graph",
+      "to": "domain",
+      "label": "草稿 CAS / 确认结果",
+      "labelDy": -30
+    },
+    {
+      "id": "domain-postgres",
+      "from": "domain",
+      "to": "postgres",
+      "label": "事务 · ACL · 幂等事实",
+      "variant": "emphasis",
+      "labelDy": 60
+    },
+    {
+      "id": "api-identity",
+      "from": "api",
+      "to": "identity",
+      "label": "校验 Session / CSRF",
+      "variant": "security"
+    },
+    {
+      "id": "identity-postgres",
+      "from": "identity",
+      "to": "postgres",
+      "label": "读取身份与资源 ACL",
+      "variant": "security",
+      "fromSide": "top",
+      "toSide": "top"
+    },
+    {
+      "id": "graph-providers",
+      "from": "graph",
+      "to": "providers",
+      "label": "结构化解析 / Embedding",
+      "variant": "dashed"
+    },
+    {
+      "id": "domain-iam",
+      "from": "domain",
+      "to": "iam",
+      "label": "稳定幂等键",
+      "variant": "dashed"
+    },
+    {
+      "id": "graph-checkpoint",
+      "from": "graph",
+      "to": "checkpoint",
+      "label": "candidate → accepted exact head",
+      "fromSide": "bottom",
+      "toSide": "left"
+    },
+    {
+      "id": "api-eventstream",
+      "from": "api",
+      "to": "eventstream",
+      "label": "持久化白名单事件",
+      "fromSide": "bottom",
+      "toSide": "right"
+    },
+    {
+      "id": "eventstream-web",
+      "from": "eventstream",
+      "to": "web",
+      "label": "Last-Event-ID 回放",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "产品功能面",
+      "items": [
+        "自然语言申请、政策问答、权限与申请状态查询",
+        "申请草稿确认、Decision Packet、两级审批与模拟开通",
+        "业务卡片、申请时间线、安全活动流与最近三轮 Agent 轨迹"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "权威状态分工",
+      "items": [
+        "PostgreSQL 业务表决定身份、申请、审批和 AccessGrant",
+        "LangGraph checkpoint 只保存执行位置与可恢复派生状态",
+        "模型只做受控解析和只读建议，不审批、不开通、不授权"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "作品集边界",
+      "items": [
+        "全部业务数据虚构；Mock Login 不是真实 SSO",
+        "IAM 是确定性模拟器；未接入真实企业系统",
+        "本地 deterministic offline 证据不外推生产 SLA 或模型质量"
+      ]
+    }
+  ]
+}

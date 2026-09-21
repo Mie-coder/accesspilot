@@ -338,7 +338,10 @@ def create_app(
             ),
         )
     if embedding_model is None:
-        if active_settings.dashscope_api_key is None:
+        if (
+            active_settings.embedding_mode == "deterministic-offline"
+            or active_settings.dashscope_api_key is None
+        ):
             embedding_model = DeterministicEmbeddingModel()
         else:
             embedding_model = DashScopeEmbeddingModel(
