@@ -1,0 +1,92 @@
+{
+ "summary": {
+  "label": "iter1",
+  "suite": "dev",
+  "model": "deepseek-v4-flash",
+  "threshold": 0.5,
+  "limit": 4,
+  "retrieval": {
+   "hitAt1": 0.967,
+   "recallAt1": 0.95,
+   "recallAt4": 1.0,
+   "mrr": 0.983,
+   "groundedRate": 1.0,
+   "citationPrecision": 0.969,
+   "avgCitations": 1.07,
+   "outOfScopeRejection": 1.0,
+   "passRate": 0.975,
+   "answerable": 30,
+   "outOfScope": 10,
+   "maxOutOfScopeSimilarity": 0.4307,
+   "minGoldTopSimilarity": 0.5643
+  },
+  "retrievalOffline": {
+   "hitAt1": 0.933,
+   "recallAt1": 0.917,
+   "recallAt4": 1.0,
+   "mrr": 0.958,
+   "groundedRate": 0.833,
+   "citationPrecision": 0.929,
+   "avgCitations": 1.04,
+   "outOfScopeRejection": 1.0,
+   "passRate": 0.875,
+   "answerable": 30,
+   "outOfScope": 10,
+   "maxOutOfScopeSimilarity": 0.1247,
+   "minGoldTopSimilarity": 0.0296
+  },
+  "intentAccuracy": 1.0,
+  "dangerousMisroutes": [],
+  "securityFlagRate": 1.0,
+  "extractionAccuracy": 0.967,
+  "fabricationRate": 0.0,
+  "fabricated": {},
+  "blockedConfirmAttempts": [
+   "E17"
+  ],
+  "adversarialPassRate": 1.0,
+  "errorRate": 0.0,
+  "providerHttpErrors": 0,
+  "networkRetries": 0,
+  "ruleShare": 0.255,
+  "overallPassRate": 0.983,
+  "cases": {
+   "retrieval": 40,
+   "understanding": 51,
+   "extraction": 30,
+   "total": 121
+  },
+  "modelCalls": 88,
+  "tokens": {
+   "prompt": 41977,
+   "completion": 21629,
+   "embedding": 0
+  },
+  "latencyMs": {
+   "p50": 1350,
+   "p95": 3763
+  }
+ },
+ "failures": {
+  "retrieval": [
+   {
+    "id": "R19",
+    "text": "申请被经理驳回了，还会继续流转吗？",
+    "reasons": [
+     "first citation POL-006 not gold",
+     "irrelevant citations ['POL-006']"
+    ]
+   }
+  ],
+  "understanding": [],
+  "extraction": [
+   {
+    "id": "E25",
+    "text": "帮我申请一个能看代码的权限",
+    "reasons": [
+     "not routed to request_access (discover_eligible_access)"
+    ]
+   }
+  ]
+ }
+}
