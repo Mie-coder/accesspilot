@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from accesspilot.agent.embeddings import EmbeddingModel
+from accesspilot.agent.embeddings import DeterministicEmbeddingModel, EmbeddingModel
 from accesspilot.agent.routing import is_self_approval_question
 from accesspilot.db.models import PolicyChunkRecord
 from accesspilot.domain.catalog import POLICY_CODES
@@ -43,6 +43,17 @@ class PolicyAnswer(BaseModel):
     answer: str
     evidence: list[PolicyEvidence] = Field(default_factory=list)
     next_step: str
+
+
+# 政策问答每次最多取回的候选条数；产品与质量评测共用。
+POLICY_SEARCH_LIMIT = 4
+# 回答最多引用两条，且只引用排序分与最佳结果相差不超过 0.05 的条款。
+POLICY_MAX_CITATIONS = 2
+POLICY_CITATION_MARGIN = 0.05
+# 离线字符特征向量与百炼语义向量的相似度分布不同，阈值按模型分别校准：
+# 2026-10-08 评测中，资料外问题在百炼向量下最高约 0.45，相关条款通常在 0.55 以上。
+DETERMINISTIC_SIMILARITY_THRESHOLD = 0.20
+SEMANTIC_SIMILARITY_THRESHOLD = 0.50
 
 
 class PolicyCatalogUnavailableError(RuntimeError):
@@ -95,12 +106,22 @@ class PolicyService:
         self,
         *,
         embedding_model: EmbeddingModel,
-        similarity_threshold: float = 0.20,
+        similarity_threshold: float | None = None,
     ) -> None:
+        if similarity_threshold is None:
+            similarity_threshold = (
+                DETERMINISTIC_SIMILARITY_THRESHOLD
+                if isinstance(embedding_model, DeterministicEmbeddingModel)
+                else SEMANTIC_SIMILARITY_THRESHOLD
+            )
         if not 0.0 <= similarity_threshold <= 1.0:
             raise ValueError("政策相似度阈值必须在 0 到 1 之间")
         self._embedding_model = embedding_model
         self._similarity_threshold = similarity_threshold
+
+    @property
+    def similarity_threshold(self) -> float:
+        return self._similarity_threshold
 
     def catalog(self, session: Session) -> list[PolicyEvidence]:
         """从数据库事实源返回完整且稳定排序的政策目录。"""
@@ -136,7 +157,7 @@ class PolicyService:
                 session,
                 query,
                 self._embedding_model,
-                limit=4,
+                limit=POLICY_SEARCH_LIMIT,
             )
         except Exception:
             return PolicyAnswer(
@@ -146,29 +167,7 @@ class PolicyService:
                 next_step="请稍后重试；如问题紧急，请联系人工安全流程。",
             )
 
-        evidence = [
-            _evidence_from_match(match)
-            for match in matches
-            if match.similarity >= self._similarity_threshold
-        ]
-        if not evidence:
-            return PolicyAnswer(
-                status="insufficient_evidence",
-                answer="当前证据不足，无法可靠回答这个政策问题。",
-                evidence=[],
-                next_step="请补充具体权限、审批环节或业务场景后重试。",
-            )
-
-        answer = "；".join(
-            f"根据 {item.policy_code}《{item.title}》：{item.content}"
-            for item in evidence
-        )
-        return PolicyAnswer(
-            status="grounded",
-            answer=answer,
-            evidence=evidence,
-            next_step="请按上述政策核对申请字段和审批要求。",
-        )
+        return select_policy_evidence(matches, self._similarity_threshold)
 
     def self_approval(self, session: Session) -> PolicyAnswer:
         """Read the fixed POL-006 fact without entering vector retrieval."""
@@ -202,3 +201,36 @@ class PolicyService:
             evidence=[evidence],
             next_step="请由与申请人身份不同的直属经理或数据所有者审批。",
         )
+
+
+def select_policy_evidence(
+    matches: list[PolicyMatch],
+    similarity_threshold: float,
+) -> PolicyAnswer:
+    """把排序后的检索结果转成三态政策回答；产品与质量评测共用。"""
+
+    candidates = [match for match in matches if match.similarity >= similarity_threshold]
+    best = max((match.rank_score for match in candidates), default=0.0)
+    evidence = [
+        _evidence_from_match(match)
+        for match in candidates
+        if match.rank_score >= best - POLICY_CITATION_MARGIN
+    ][:POLICY_MAX_CITATIONS]
+    if not evidence:
+        return PolicyAnswer(
+            status="insufficient_evidence",
+            answer="当前证据不足，无法可靠回答这个政策问题。",
+            evidence=[],
+            next_step="请补充具体权限、审批环节或业务场景后重试。",
+        )
+
+    answer = "；".join(
+        f"根据 {item.policy_code}《{item.title}》：{item.content}"
+        for item in evidence
+    )
+    return PolicyAnswer(
+        status="grounded",
+        answer=answer,
+        evidence=evidence,
+        next_step="请按上述政策核对申请字段和审批要求。",
+    )

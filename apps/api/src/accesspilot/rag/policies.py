@@ -1,5 +1,6 @@
 """政策向量写入与 pgvector 相似度检索。"""
 
+import re
 from collections.abc import Sequence
 from typing import Any, cast
 
@@ -9,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from accesspilot.agent.embeddings import EMBEDDING_DIMENSIONS, EmbeddingModel
 from accesspilot.db.models import PolicyChunkRecord
-from accesspilot.domain.catalog import POLICY_CODES
+from accesspilot.domain.catalog import POLICIES, POLICY_CODES
 
 
 class PolicyEmbeddingError(RuntimeError):
@@ -44,10 +45,46 @@ class PolicyMatch(BaseModel):
     similarity: float
     version: str = "v1"
     source: str = "fictional_access_policy"
+    # 问题与条款标题、常见问法共有的二字片段占比；只影响排序，不改变相似度。
+    keyword_overlap: float = 0.0
+
+    @property
+    def rank_score(self) -> float:
+        return self.similarity + KEYWORD_WEIGHT * self.keyword_overlap
+
+
+# 向量相似度为主，关键词重合只用来拉开分数接近的条款。
+KEYWORD_WEIGHT = 0.2
+_SEARCH_HINTS = {policy.code: policy.search_hints for policy in POLICIES}
+
+
+def _bigrams(text: str) -> set[str]:
+    compact = re.sub(r"[^\w]", "", text.casefold())
+    return {compact[index : index + 2] for index in range(len(compact) - 1)}
+
+
+_KEYWORDS = {policy.code: _bigrams(policy.title + policy.search_hints) for policy in POLICIES}
+
+
+def rank_policy_matches(query: str, matches: Sequence[PolicyMatch]) -> list[PolicyMatch]:
+    """按“向量相似度 + 关键词重合”排序；同分时按政策编号保持稳定。"""
+
+    query_grams = _bigrams(query)
+    ranked = [
+        match.model_copy(update={"keyword_overlap": len(
+            query_grams & _KEYWORDS.get(match.policy_code, set()),
+        ) / max(1, len(query_grams))})
+        for match in matches
+    ]
+    return sorted(ranked, key=lambda match: (-match.rank_score, match.policy_code))
 
 
 def _policy_text(chunk: PolicyChunkRecord) -> str:
-    return f"{chunk.title}\n{chunk.content}"
+    """被向量化的文本：条款原文加上只用于检索的常见问法。"""
+
+    hints = _SEARCH_HINTS.get(chunk.policy_code, "")
+    text = f"{chunk.title}\n{chunk.content}"
+    return f"{text}\n常见问法：{hints}" if hints else text
 
 
 def _require_vectors(
@@ -131,11 +168,11 @@ def search_policies(
     # pgvector 的 SQLAlchemy 类型提供 cosine_distance；cast 只用于类型检查。
     embedding_column = cast(Any, PolicyChunkRecord.embedding)
     distance = embedding_column.cosine_distance(query_vectors[0]).label("distance")
+    # 政策库只有八条，取回全部向量距离后再结合关键词重排，最后截取 limit 条。
     rows = session.execute(
         select(PolicyChunkRecord, distance)
         .where(PolicyChunkRecord.embedding.is_not(None))
         .order_by(distance, PolicyChunkRecord.policy_code)
-        .limit(limit)
     ).all()
     if not rows:
         raise PolicyIndexUnavailableError("政策向量尚未建立，可重试初始化")
@@ -160,4 +197,4 @@ def search_policies(
                 ),
             )
         )
-    return matches
+    return rank_policy_matches(query, matches)[:limit]
