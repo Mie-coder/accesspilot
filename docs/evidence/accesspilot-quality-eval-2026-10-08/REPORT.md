@@ -6,6 +6,7 @@
 - 调优集：[`quality-dev.json`](../../../apps/api/tests/evals/quality/quality-dev.json)，121 题 = 政策检索 40（30 道应答、10 道资料外）+ 意图理解 51（含 4 道注入/越权和 9 道“容易被带偏”的题）+ 字段提取 30
 - 盲测集：[`quality-holdout.json`](../../../apps/api/tests/evals/quality/quality-holdout.json)，52 题。调优期间不看、不按它改代码，最后只跑一次
 - 原始结果与逐题判分：本目录 `raw-*.json`、`scored-*.json`
+- 大白话说明页：[`explainer.html`](explainer.html)
 
 自建小样本、虚构政策库只有 8 条，用于前后对比，不代表线上准确率。模型输出有随机性。
 
