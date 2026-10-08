@@ -7,6 +7,7 @@
 - 盲测集：[`quality-holdout.json`](../../../apps/api/tests/evals/quality/quality-holdout.json)，52 题。调优期间不看、不按它改代码，最后只跑一次
 - 原始结果与逐题判分：本目录 `raw-*.json`、`scored-*.json`
 - 大白话说明页：[`explainer.html`](explainer.html)
+- 完整题库与逐题问答（改动前后对照）：[`QA-FULL.html`](QA-FULL.html)
 
 自建小样本、虚构政策库只有 8 条，用于前后对比，不代表线上准确率。模型输出有随机性。
 
