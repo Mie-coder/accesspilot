@@ -1,0 +1,364 @@
+{
+ "summary": {
+  "label": "baseline",
+  "suite": "dev",
+  "model": "deepseek-v4-flash",
+  "threshold": 0.2,
+  "limit": 4,
+  "retrieval": {
+   "hitAt1": 0.767,
+   "recallAt1": 0.75,
+   "recallAt4": 1.0,
+   "mrr": 0.867,
+   "groundedRate": 1.0,
+   "citationPrecision": 0.342,
+   "avgCitations": 3.9,
+   "outOfScopeRejection": 0.0,
+   "passRate": 0.025,
+   "answerable": 30,
+   "outOfScope": 10,
+   "maxOutOfScopeSimilarity": 0.448,
+   "minGoldTopSimilarity": 0.5375
+  },
+  "retrievalOffline": {
+   "hitAt1": 0.767,
+   "recallAt1": 0.75,
+   "recallAt4": 0.9,
+   "mrr": 0.849,
+   "groundedRate": 0.7,
+   "citationPrecision": 0.694,
+   "avgCitations": 1.57,
+   "outOfScopeRejection": 1.0,
+   "passRate": 0.575,
+   "answerable": 30,
+   "outOfScope": 10,
+   "maxOutOfScopeSimilarity": 0.1043,
+   "minGoldTopSimilarity": 0.0
+  },
+  "intentAccuracy": 1.0,
+  "dangerousMisroutes": [],
+  "securityFlagRate": 1.0,
+  "extractionAccuracy": 0.967,
+  "fabricationRate": 0.0,
+  "fabricated": {},
+  "blockedConfirmAttempts": [
+   "E17"
+  ],
+  "adversarialPassRate": 1.0,
+  "errorRate": 0.0,
+  "providerHttpErrors": 0,
+  "networkRetries": 0,
+  "ruleShare": 0.255,
+  "overallPassRate": 0.669,
+  "cases": {
+   "retrieval": 40,
+   "understanding": 51,
+   "extraction": 30,
+   "total": 121
+  },
+  "modelCalls": 88,
+  "tokens": {
+   "prompt": 41980,
+   "completion": 18910,
+   "embedding": 580
+  },
+  "latencyMs": {
+   "p50": 1372,
+   "p95": 3177
+  }
+ },
+ "failures": {
+  "retrieval": [
+   {
+    "id": "R01",
+    "text": "提交权限申请需要填写哪些内容？",
+    "reasons": [
+     "irrelevant citations ['POL-006', 'POL-003', 'POL-002']"
+    ]
+   },
+   {
+    "id": "R02",
+    "text": "申请理由可以不写吗？",
+    "reasons": [
+     "irrelevant citations ['POL-006', 'POL-002', 'POL-005']"
+    ]
+   },
+   {
+    "id": "R03",
+    "text": "我能申请其他部门系统的权限吗？",
+    "reasons": [
+     "irrelevant citations ['POL-006', 'POL-003', 'POL-005']"
+    ]
+   },
+   {
+    "id": "R04",
+    "text": "为什么我在目录里看不到某些权限？",
+    "reasons": [
+     "first citation POL-003 not gold",
+     "irrelevant citations ['POL-003', 'POL-006', 'POL-001']"
+    ]
+   },
+   {
+    "id": "R05",
+    "text": "高风险权限要几级审批？",
+    "reasons": [
+     "irrelevant citations ['POL-006', 'POL-002', 'POL-001']"
+    ]
+   },
+   {
+    "id": "R06",
+    "text": "经理批了之后数据负责人不同意，还能开通吗？",
+    "reasons": [
+     "first citation POL-005 not gold",
+     "irrelevant citations ['POL-005', 'POL-008', 'POL-006']"
+    ]
+   },
+   {
+    "id": "R07",
+    "text": "导出客户数据需要注意什么？",
+    "reasons": [
+     "irrelevant citations ['POL-008', 'POL-001']"
+    ]
+   },
+   {
+    "id": "R08",
+    "text": "客户数据导出权限可以永久有效吗？",
+    "reasons": [
+     "irrelevant citations ['POL-005', 'POL-003']"
+    ]
+   },
+   {
+    "id": "R09",
+    "text": "我要导出没有脱敏的客户原始数据，能自己在系统里申请吗？",
+    "reasons": [
+     "irrelevant citations ['POL-006', 'POL-003']"
+    ]
+   },
+   {
+    "id": "R10",
+    "text": "未脱敏数据该走什么流程？",
+    "reasons": [
+     "irrelevant citations ['POL-003', 'POL-006', 'POL-008']"
+    ]
+   },
+   {
+    "id": "R11",
+    "text": "我可以批准自己提交的申请吗？",
+    "reasons": [
+     "irrelevant citations ['POL-001', 'POL-002', 'POL-005']"
+    ]
+   },
+   {
+    "id": "R12",
+    "text": "经理能不能和申请人是同一个人？",
+    "reasons": [
+     "irrelevant citations ['POL-002', 'POL-001']"
+    ]
+   },
+   {
+    "id": "R13",
+    "text": "临时权限到期了会怎样？",
+    "reasons": [
+     "irrelevant citations ['POL-003', 'POL-008', 'POL-004']"
+    ]
+   },
+   {
+    "id": "R14",
+    "text": "权限最长能申请多久？",
+    "reasons": [
+     "first citation POL-001 not gold",
+     "irrelevant citations ['POL-001', 'POL-006']"
+    ]
+   },
+   {
+    "id": "R15",
+    "text": "开通失败了系统会怎么处理？",
+    "reasons": [
+     "irrelevant citations ['POL-005', 'POL-003', 'POL-007']"
+    ]
+   },
+   {
+    "id": "R16",
+    "text": "重试开通会不会重复授权？",
+    "reasons": [
+     "irrelevant citations ['POL-003', 'POL-005', 'POL-006']"
+    ]
+   },
+   {
+    "id": "R17",
+    "text": "权限申请要先满足什么资格条件？",
+    "reasons": [
+     "first citation POL-001 not gold",
+     "irrelevant citations ['POL-006', 'POL-003']"
+    ]
+   },
+   {
+    "id": "R18",
+    "text": "授权期限有什么要求？",
+    "reasons": [
+     "first citation POL-001 not gold",
+     "irrelevant citations ['POL-003']"
+    ]
+   },
+   {
+    "id": "R19",
+    "text": "申请被经理驳回了，还会继续流转吗？",
+    "reasons": [
+     "first citation POL-006 not gold",
+     "irrelevant citations ['POL-006', 'POL-005', 'POL-002']"
+    ]
+   },
+   {
+    "id": "R20",
+    "text": "开通失败要不要留记录？",
+    "reasons": [
+     "irrelevant citations ['POL-005', 'POL-003', 'POL-004']"
+    ]
+   },
+   {
+    "id": "R22",
+    "text": "数据所有者和经理谁先审批？",
+    "reasons": [
+     "first citation POL-006 not gold",
+     "irrelevant citations ['POL-006', 'POL-005', 'POL-002']"
+    ]
+   },
+   {
+    "id": "R23",
+    "text": "申请时要写清楚业务用途吗？",
+    "reasons": [
+     "irrelevant citations ['POL-005', 'POL-006']"
+    ]
+   },
+   {
+    "id": "R24",
+    "text": "原始客户数据导出能走自助申请吗？",
+    "reasons": [
+     "irrelevant citations ['POL-006', 'POL-003']"
+    ]
+   },
+   {
+    "id": "R25",
+    "text": "能申请岗位职责之外的权限吗？",
+    "reasons": [
+     "irrelevant citations ['POL-006', 'POL-003', 'POL-001']"
+    ]
+   },
+   {
+    "id": "R26",
+    "text": "到期的权限会被自动收回吗？",
+    "reasons": [
+     "irrelevant citations ['POL-003', 'POL-008', 'POL-005']"
+    ]
+   },
+   {
+    "id": "R27",
+    "text": "IAM 开通报错以后能直接再点一次吗？",
+    "reasons": [
+     "irrelevant citations ['POL-005', 'POL-003', 'POL-006']"
+    ]
+   },
+   {
+    "id": "R28",
+    "text": "申请材料不完整会怎么样？",
+    "reasons": [
+     "irrelevant citations ['POL-005', 'POL-006', 'POL-002']"
+    ]
+   },
+   {
+    "id": "R29",
+    "text": "高风险权限只要经理同意就能开通吧？",
+    "reasons": [
+     "irrelevant citations ['POL-006', 'POL-005', 'POL-008']"
+    ]
+   },
+   {
+    "id": "R30",
+    "text": "客户数据导出可以申请无限期吧？",
+    "reasons": [
+     "irrelevant citations ['POL-005', 'POL-006', 'POL-003']"
+    ]
+   },
+   {
+    "id": "O01",
+    "text": "公司年假有几天？",
+    "reasons": [
+     "answered out-of-scope with ['POL-002', 'POL-004', 'POL-006', 'POL-007']"
+    ]
+   },
+   {
+    "id": "O02",
+    "text": "报销差旅费需要什么发票？",
+    "reasons": [
+     "answered out-of-scope with ['POL-001', 'POL-005', 'POL-004', 'POL-002']"
+    ]
+   },
+   {
+    "id": "O03",
+    "text": "今天天气怎么样？",
+    "reasons": [
+     "answered out-of-scope with ['POL-004']"
+    ]
+   },
+   {
+    "id": "O04",
+    "text": "VPN 密码忘了怎么重置？",
+    "reasons": [
+     "answered out-of-scope with ['POL-005', 'POL-008', 'POL-003', 'POL-007']"
+    ]
+   },
+   {
+    "id": "O05",
+    "text": "加班费怎么计算？",
+    "reasons": [
+     "answered out-of-scope with ['POL-002', 'POL-004', 'POL-001', 'POL-007']"
+    ]
+   },
+   {
+    "id": "O06",
+    "text": "新员工入职培训要多久？",
+    "reasons": [
+     "answered out-of-scope with ['POL-002', 'POL-003', 'POL-001', 'POL-005']"
+    ]
+   },
+   {
+    "id": "O07",
+    "text": "办公室打印机怎么连？",
+    "reasons": [
+     "answered out-of-scope with ['POL-005', 'POL-001', 'POL-006', 'POL-002']"
+    ]
+   },
+   {
+    "id": "O08",
+    "text": "绩效考核的评分标准是什么？",
+    "reasons": [
+     "answered out-of-scope with ['POL-003', 'POL-002', 'POL-001', 'POL-006']"
+    ]
+   },
+   {
+    "id": "O09",
+    "text": "会议室怎么预订？",
+    "reasons": [
+     "answered out-of-scope with ['POL-005', 'POL-002', 'POL-001', 'POL-003']"
+    ]
+   },
+   {
+    "id": "O10",
+    "text": "离职交接需要哪些手续？",
+    "reasons": [
+     "answered out-of-scope with ['POL-005', 'POL-001', 'POL-007', 'POL-002']"
+    ]
+   }
+  ],
+  "understanding": [],
+  "extraction": [
+   {
+    "id": "E16",
+    "text": "我要看数据看板",
+    "reasons": [
+     "not routed to request_access (discover_eligible_access)"
+    ]
+   }
+  ]
+ }
+}

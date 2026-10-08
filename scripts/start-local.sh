@@ -244,6 +244,8 @@ trap 'exit 0' INT TERM
 echo "[3/5] 执行数据库迁移、恢复虚构目录、启动后端..."
 (
   . .venv/bin/activate
+  export ACCESSPILOT_EMBEDDING_MODE=deterministic-offline
+  python -m alembic upgrade head
   exec ./scripts/start-api.sh
 ) >"$API_LOG_PATH" 2>&1 &
 API_PROCESS_ID=$!

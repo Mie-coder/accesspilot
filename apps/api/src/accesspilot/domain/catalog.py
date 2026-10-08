@@ -73,47 +73,57 @@ class PolicyClause:
     content: str
     version: str = "v1"
     source: str = "fictional_access_policy"
+    # 只参与向量检索的口语化说法，帮助“驳回”“永久”等问法找到条款；不展示、不作为依据。
+    search_hints: str = ""
 
 POLICIES = (
     PolicyClause(
         code="POL-001",
         title="申请字段完整性",
         content="权限申请必须包含申请人、具体权限、授权期限和明确的业务理由。",
+        search_hints="申请单必填项、要填写哪些内容、缺少信息、材料不完整、业务理由可不可以不写",
     ),
     PolicyClause(
         code="POL-002",
         title="最小权限与申请资格",
         content="员工只能申请与其部门或岗位职责相关的最小权限，系统必须先校验申请资格。",
+        search_hints="申请资格校验、部门与岗位职责、跨部门或职责之外的权限、目录里看不到的权限",
     ),
     PolicyClause(
         code="POL-003",
         title="高风险权限双审批",
         content="高风险权限必须依次经过直属经理和数据所有者审批，任何一级未通过都不得开通。",
+        search_hints="审批顺序与几级审批、直属经理和数据所有者谁先审批、被驳回或不同意后能否开通",
     ),
     PolicyClause(
         code="POL-004",
         title="客户数据导出期限与用途",
         content="客户数据导出权限必须说明业务用途并限制使用期限，不得授予无限期访问。",
+        search_hints="导出客户数据的用途说明、导出期限、能否永久或长期有效",
     ),
     PolicyClause(
         code="POL-005",
         title="原始客户数据禁止自助",
         content="原始或未脱敏客户数据权限不得通过自助流程申请，必须转人工安全流程。",
+        search_hints="未脱敏或原始客户数据、能否自助申请、转人工安全审核",
     ),
     PolicyClause(
         code="POL-006",
         title="禁止自审批",
         content="申请人不得审批自己的权限申请，直属经理和数据所有者必须与申请人身份不同。",
+        search_hints="能否批准或通过自己的申请、自己审批自己、审批人和申请人是同一个人",
     ),
     PolicyClause(
         code="POL-007",
         title="限时授权与自动回收",
         content="临时权限必须设置最大授权期限，到期后系统应自动回收或进入回收待处理状态。",
+        search_hints="最长授权期限、到期后自动收回、临时权限有效期",
     ),
     PolicyClause(
         code="POL-008",
         title="开通失败审计与幂等重试",
         content="权限开通失败必须记录审计事件；重试必须使用幂等键，不能产生重复授权。",
+        search_hints="开通失败或报错、重试会不会重复授权、失败要不要记录审计",
     ),
 )
 

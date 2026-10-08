@@ -2,7 +2,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from accesspilot.agent.embeddings import EMBEDDING_DIMENSIONS, DeterministicEmbeddingModel
-from accesspilot.bootstrap import bootstrap_database
+from accesspilot.bootstrap import _configured_embedding, bootstrap_database
+from accesspilot.config import Settings
 from accesspilot.db.models import PolicyChunkRecord
 
 
@@ -34,3 +35,16 @@ def test_bootstrap_is_repeatable_and_indexes_every_policy(
         for chunk in session.scalars(select(PolicyChunkRecord)).all():
             chunk.embedding = None
         session.commit()
+
+
+def test_offline_embedding_mode_overrides_configured_provider() -> None:
+    model, mode = _configured_embedding(
+        Settings(
+            embedding_mode="deterministic-offline",
+            dashscope_api_key="configured-but-unused",
+            _env_file=None,
+        )
+    )
+
+    assert isinstance(model, DeterministicEmbeddingModel)
+    assert mode == "deterministic-offline"

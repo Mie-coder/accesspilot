@@ -63,11 +63,13 @@ class Settings(BaseSettings):
         default="text-embedding-v4",
         validation_alias="DASHSCOPE_EMBEDDING_MODEL",
     )
+    embedding_mode: Literal["auto", "deterministic-offline"] = "auto"
     dashscope_base_url: str = Field(
         default="https://dashscope.aliyuncs.com/compatible-mode/v1",
         validation_alias="DASHSCOPE_BASE_URL",
     )
-    policy_similarity_threshold: float = Field(default=0.20, ge=0.0, le=1.0)
+    # 留空时按向量模型选用校准过的默认阈值（见 tools/policies.py）。
+    policy_similarity_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
 
     @field_validator("checkpoint_schema")
     @classmethod

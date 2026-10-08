@@ -2,12 +2,14 @@
 
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 from langgraph.checkpoint import postgres as checkpoint_postgres
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 import accesspilot.agent.graph as graph_module
@@ -22,7 +24,7 @@ from accesspilot.conversation import (
     LegacyConversationOrchestrator,
     normalized_outcome,
 )
-from accesspilot.db.models import WorkspaceRecord
+from accesspilot.db.models import AccessGrantRecord, AccessRequestRecord, WorkspaceRecord
 from accesspilot.db.seed import seed_catalog
 from accesspilot.db.workspace_store import SqlAlchemyWorkspaceStore
 from accesspilot.domain.models import ParsedReply, RequestDraft
@@ -202,6 +204,29 @@ def test_legacy_orchestrator_freezes_normalized_outcomes_for_all_intents(
     content: str,
     expected: dict[str, object],
 ) -> None:
+    if content == "我现在有什么权限":
+        cutoff = datetime.now(UTC)
+        with database_session_factory() as session:
+            request_ids = list(
+                session.scalars(
+                    select(AccessRequestRecord.id).where(
+                        AccessRequestRecord.requester_id == "EMP-001"
+                    )
+                ).all()
+            )
+            grants = (
+                session.scalars(
+                    select(AccessGrantRecord).where(
+                        AccessGrantRecord.request_id.in_(request_ids)
+                    )
+                ).all()
+                if request_ids
+                else []
+            )
+            for grant in grants:
+                grant.starts_at = cutoff - timedelta(days=2)
+                grant.expires_at = cutoff - timedelta(days=1)
+            session.commit()
     token, orchestrator = _legacy_orchestrator(database_session_factory)
 
     turn = orchestrator.handle(

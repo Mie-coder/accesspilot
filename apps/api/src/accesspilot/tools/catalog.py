@@ -374,7 +374,7 @@ def list_active_access(
     workspace_token: str,
     at: datetime | None = None,
 ) -> ToolResult:
-    """仅返回当前 Workspace 中该员工已生效且未过期的授权。"""
+    """返回当前 Workspace 绑定员工跨 Session 生效且未过期的授权。"""
 
     if not workspace_token:
         return ToolResult(status="invalid_argument")
@@ -406,8 +406,7 @@ def list_active_access(
         )
         .join(SystemRecord, SystemRecord.code == EntitlementRecord.system_code)
         .where(
-            AccessGrantRecord.workspace_id == workspace.id,
-            AccessRequestRecord.workspace_id == workspace.id,
+            AccessGrantRecord.workspace_id == AccessRequestRecord.workspace_id,
             AccessRequestRecord.requester_id == workspace.actor_id,
             AccessGrantRecord.starts_at <= effective_at,
             AccessGrantRecord.expires_at > effective_at,

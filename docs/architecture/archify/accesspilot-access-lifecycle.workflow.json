@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "AccessPilot 权限申请主流程",
+    "quality_profile": "showcase",
+    "legend": { "mode": "hidden" },
+    "viewBox": [800, 500]
+  },
+  "lanes": [
+    { "id": "request", "label": "申请人与确定性业务服务" },
+    { "id": "approval", "label": "人工审批" },
+    { "id": "outcome", "label": "拒绝、开通与最终结果" }
+  ],
+  "phases": [
+    { "id": "intake", "label": "收集与确认", "fromCol": 0, "toCol": 2 },
+    { "id": "formal", "label": "正式申请与证据", "fromCol": 3, "toCol": 3, "variant": "emphasis" },
+    { "id": "decision", "label": "审批、开通与结果", "fromCol": 4, "toCol": 5, "variant": "security" }
+  ],
+  "nodes": [
+    { "id": "intake", "lane": "request", "col": 0, "type": "backend", "label": "提出并补全申请", "sublabel": "权限 · 期限 · 理由" },
+    { "id": "confirm", "lane": "request", "col": 2, "type": "security", "label": "确认草稿", "sublabel": "未确认不提交", "tag": "interrupt" },
+    { "id": "case", "lane": "request", "col": 3, "type": "database", "label": "申请 + Packet", "sublabel": "正式申请与冻结证据" },
+    { "id": "manager", "lane": "approval", "col": 4, "type": "security", "label": "经理审批", "sublabel": "第一步" },
+    { "id": "owner", "lane": "approval", "col": 5, "type": "security", "label": "负责人审批", "sublabel": "第二步" },
+    { "id": "rejected", "lane": "outcome", "col": 2, "type": "security", "label": "已拒绝", "sublabel": "不进入开通" },
+    { "id": "provision", "lane": "outcome", "col": 4, "type": "cloud", "label": "幂等开通", "sublabel": "稳定操作键" },
+    { "id": "grant", "lane": "outcome", "col": 5, "type": "database", "label": "AccessGrant", "sublabel": "成功才 completed" }
+  ],
+  "edges": [
+    { "id": "intake-confirm", "from": "intake", "to": "confirm", "label": "草稿完整", "variant": "security", "role": "main" },
+    { "id": "confirm-case", "from": "confirm", "to": "case", "label": "明确确认", "variant": "emphasis", "role": "main", "labelDy": 60 },
+    { "id": "case-manager", "from": "case", "to": "manager", "label": "Packet 前置", "variant": "security", "role": "main" },
+    { "id": "manager-owner", "from": "manager", "to": "owner", "label": "通过", "variant": "security", "role": "main", "route": "straight" },
+    { "id": "manager-rejected", "from": "manager", "to": "rejected", "label": "任一级驳回", "variant": "security", "role": "error", "fromSide": "left", "toSide": "left", "route": "return-left" },
+    { "id": "owner-provision", "from": "owner", "to": "provision", "label": "两级通过", "variant": "emphasis", "role": "main" },
+    { "id": "provision-grant", "from": "provision", "to": "grant", "label": "成功", "variant": "emphasis", "role": "main", "route": "straight", "labelAt": [573, 407] }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "对话阶段",
+      "items": [
+        "Agent 收集权限、期限和理由；字段不完整时继续追问",
+        "只有申请人明确确认，草稿才形成正式 Request 与冻结 Packet"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "授权边界",
+      "items": [
+        "模型不审批、不扮演人工角色，也不直接创建 AccessGrant",
+        "经理与数据负责人受服务端身份、角色和顺序守卫"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "完成与恢复",
+      "items": [
+        "审批通过只允许进入开通；唯一 AccessGrant 才表示 completed",
+        "timeout / unknown 查询原幂等操作后恢复，不重复授权"
+      ]
+    }
+  ]
+}

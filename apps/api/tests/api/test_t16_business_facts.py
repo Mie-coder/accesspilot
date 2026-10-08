@@ -29,6 +29,43 @@ from accesspilot.main import create_app
 from support.auth import login_as
 
 
+@pytest.fixture(autouse=True)
+def isolate_employee_access_history(
+    database_session_factory: sessionmaker[Session],
+) -> None:
+    """Keep employee-scoped overview cases independent in the shared test DB."""
+
+    cutoff = datetime.now(UTC)
+    with database_session_factory() as session:
+        requests = list(
+            session.scalars(
+                select(AccessRequestRecord).where(
+                    AccessRequestRecord.requester_id == "EMP-001"
+                )
+            ).all()
+        )
+        request_ids = [request.id for request in requests]
+        grants = (
+            list(
+                session.scalars(
+                    select(AccessGrantRecord).where(
+                        AccessGrantRecord.request_id.in_(request_ids)
+                    )
+                ).all()
+            )
+            if request_ids
+            else []
+        )
+        granted_request_ids = {grant.request_id for grant in grants}
+        for grant in grants:
+            grant.starts_at = cutoff - timedelta(days=2)
+            grant.expires_at = cutoff - timedelta(days=1)
+        for request in requests:
+            if request.id not in granted_request_ids:
+                request.request_status = "cancelled"
+        session.commit()
+
+
 def build_client(
     database_session_factory: sessionmaker[Session],
 ) -> TestClient:
@@ -151,22 +188,33 @@ def test_access_overview_requires_workspace_cookie(
     assert response.status_code == 401
 
 
-def test_access_overview_isolated_to_current_workspace_and_actor(
+def test_access_overview_follows_current_actor_across_private_workspaces(
     database_session_factory: sessionmaker[Session],
 ) -> None:
     client = build_client(database_session_factory)
     token = create_workspace(client)
     current_workspace = load_workspace(database_session_factory, token)
 
-    other_client = build_client(database_session_factory)
-    other_token = create_workspace(other_client)
-    other_workspace = load_workspace(database_session_factory, other_token)
+    relogin_client = build_client(database_session_factory)
+    relogin_token = create_workspace(relogin_client)
+    relogin_workspace = load_workspace(database_session_factory, relogin_token)
+
+    other_actor_client = build_client(database_session_factory)
+    login_as(other_actor_client, "EMP-002")
+    other_actor_token = other_actor_client.cookies.get("accesspilot_session")
+    assert other_actor_token is not None
+    other_actor_workspace = load_workspace(
+        database_session_factory,
+        other_actor_token,
+    )
 
     with database_session_factory() as session:
         current = session.get(WorkspaceRecord, current_workspace.id)
-        other = session.get(WorkspaceRecord, other_workspace.id)
+        relogin = session.get(WorkspaceRecord, relogin_workspace.id)
+        other_actor = session.get(WorkspaceRecord, other_actor_workspace.id)
         assert current is not None
-        assert other is not None
+        assert relogin is not None
+        assert other_actor is not None
         _, current_grant = add_grant(
             session,
             workspace=current,
@@ -175,11 +223,19 @@ def test_access_overview_isolated_to_current_workspace_and_actor(
             starts_at=datetime.now(UTC) - timedelta(days=1),
             expires_at=datetime.now(UTC) + timedelta(days=30),
         )
-        other_request, other_grant = add_grant(
+        relogin_request, relogin_grant = add_grant(
             session,
-            workspace=other,
-            requester_id="EMP-002",
+            workspace=relogin,
+            requester_id="EMP-001",
             entitlement_code="insighthub.customer_export",
+            starts_at=datetime.now(UTC) - timedelta(days=1),
+            expires_at=datetime.now(UTC) + timedelta(days=30),
+        )
+        other_actor_request, other_actor_grant = add_grant(
+            session,
+            workspace=other_actor,
+            requester_id="EMP-002",
+            entitlement_code="codeforge.repo_read",
             starts_at=datetime.now(UTC) - timedelta(days=1),
             expires_at=datetime.now(UTC) + timedelta(days=30),
         )
@@ -193,10 +249,14 @@ def test_access_overview_isolated_to_current_workspace_and_actor(
     assert isinstance(payload.get("items"), list)
     current_item = item_for_code(payload, "insighthub.dashboard_view")
     assert current_item["state"] == "owned"
+    relogin_item = item_for_code(payload, "insighthub.customer_export")
+    assert relogin_item["state"] == "owned"
     serialized = response.text
     assert str(current_grant.id) in serialized
-    assert str(other_grant.id) not in serialized
-    assert str(other_request.id) not in serialized
+    assert str(relogin_grant.id) in serialized
+    assert str(relogin_request.id) in serialized
+    assert str(other_actor_grant.id) not in serialized
+    assert str(other_actor_request.id) not in serialized
     assert "EMP-002" not in serialized
 
 
@@ -400,8 +460,9 @@ def test_older_non_terminal_request_remains_pending_after_newer_cancelled_reques
         for item in response.json()["items"]
         if item["code"] == "insighthub.dashboard_view"
     ]
-    assert [item["state"] for item in matching] == ["pending"]
-    assert matching[0]["request_id"] == str(earlier.id)
+    pending_item = next(item for item in matching if item["state"] == "pending")
+    assert pending_item["request_id"] == str(earlier.id)
+    assert all(item["state"] != "eligible" for item in matching)
 
 
 def test_request_detail_projects_only_safe_provisioning_and_audit_fields(
